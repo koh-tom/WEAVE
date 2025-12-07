@@ -1,2 +1,17 @@
-docs/
+# Zig
+zig-out/
+.zig-cache/
+
+# Build
 build/
+
+# Node / JS
+node_modules/
+dist/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+docs/
