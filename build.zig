@@ -75,7 +75,7 @@ pub fn build(b: *std.Build) void {
         "core/shared/utils/bh_leb128.c",
         "core/shared/utils/runtime_timer.c",
         "core/shared/utils/uncommon/bh_read_file.c",
-        "core/iwasm/common/arch/invokeNative_general.c",
+        "core/iwasm/common/arch/invokeNative_em64.s",
         "core/iwasm/common/wasm_c_api.c",
     }) |src| {
         exe.addCSourceFile(.{
