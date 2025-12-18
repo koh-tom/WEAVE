@@ -15,3 +15,8 @@ dist/
 Thumbs.db
 
 docs/
+
+WEAVE.sln
+
+test.o
+test_build.o
