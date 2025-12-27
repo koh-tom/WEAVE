@@ -74,6 +74,12 @@ const WasmSubscriber = struct {
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
             _ = wamr.wasm_runtime_call_wasm(exec_env, func, 4, &msg_argv);
         }
+
+        // メモリリセット (フェーズ 2.1)
+        if (wamr.wasm_runtime_lookup_function(self.instance, "os_reset_heap")) |reset_func| {
+            var reset_argv = [_]u32{0};
+            _ = wamr.wasm_runtime_call_wasm(exec_env, reset_func, 0, &reset_argv);
+        }
     }
 };
 
@@ -141,7 +147,6 @@ pub fn main() !void {
             var argv = [_]u32{0};
             if (!wamr.wasm_runtime_call_wasm(env, func, 0, &argv)) {
                 std.debug.print("Error: on_init failed!\n", .{});
-                // 継続せず終了
                 return;
             }
         }
