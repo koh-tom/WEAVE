@@ -31,12 +31,13 @@ pub const Subscriber = struct {
     callback: SubscribeCallback,
 };
 
-/// Event Bus コア実装
+/// Event Bus コア実装 (スレッドセーフ)
 pub const EventBus = struct {
     allocator: std.mem.Allocator,
     subscribers: std.StringHashMap(std.ArrayListUnmanaged(Subscriber)),
     next_msg_id: u64,
     verbose: bool,
+    mutex: std.Thread.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) EventBus {
         return EventBus{
@@ -44,10 +45,14 @@ pub const EventBus = struct {
             .subscribers = std.StringHashMap(std.ArrayListUnmanaged(Subscriber)).init(allocator),
             .next_msg_id = 1,
             .verbose = true,
+            .mutex = .{},
         };
     }
 
     pub fn deinit(self: *EventBus) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         var it = self.subscribers.iterator();
         while (it.next()) |entry| {
             var list = entry.value_ptr.*;
@@ -58,6 +63,9 @@ pub const EventBus = struct {
     }
 
     pub fn subscribe(self: *EventBus, topic: []const u8, node_id: u32, callback: SubscribeCallback, context: ?*anyopaque) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         const result = try self.subscribers.getOrPut(topic);
         if (!result.found_existing) {
             result.key_ptr.* = try self.allocator.dupe(u8, topic);
@@ -78,6 +86,8 @@ pub const EventBus = struct {
         qos: QoS,
         source_node_id: u32,
     ) !void {
+        self.mutex.lock();
+
         if (self.verbose) std.debug.print("Publishing to '{s}' from Node {} (QoS: {any})\n", .{ topic, source_node_id, qos });
 
         const msg = EventMessage{
@@ -90,8 +100,13 @@ pub const EventBus = struct {
         };
         self.next_msg_id += 1;
 
-        if (self.subscribers.get(topic)) |subs| {
-            for (subs.items) |sub| {
+        // 購読者リストのスナップショットを取得してからロック解除
+        // コールバック実行中にsubscribeが呼ばれてもデッドロックしない
+        const subs = self.subscribers.get(topic);
+        self.mutex.unlock();
+
+        if (subs) |s| {
+            for (s.items) |sub| {
                 if (sub.node_id != source_node_id) {
                     sub.callback(sub.context, &msg);
                 }
