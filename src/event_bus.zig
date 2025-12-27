@@ -36,12 +36,14 @@ pub const EventBus = struct {
     allocator: std.mem.Allocator,
     subscribers: std.StringHashMap(std.ArrayListUnmanaged(Subscriber)),
     next_msg_id: u64,
+    verbose: bool,
 
     pub fn init(allocator: std.mem.Allocator) EventBus {
         return EventBus{
             .allocator = allocator,
             .subscribers = std.StringHashMap(std.ArrayListUnmanaged(Subscriber)).init(allocator),
             .next_msg_id = 1,
+            .verbose = true,
         };
     }
 
@@ -66,7 +68,7 @@ pub const EventBus = struct {
             .context = context,
             .callback = callback,
         });
-        std.debug.print("Node {} subscribed to topic '{s}'\n", .{ node_id, topic });
+        if (self.verbose) std.debug.print("Node {} subscribed to topic '{s}'\n", .{ node_id, topic });
     }
 
     pub fn publish(
@@ -76,7 +78,7 @@ pub const EventBus = struct {
         qos: QoS,
         source_node_id: u32,
     ) !void {
-        std.debug.print("Publishing to '{s}' from Node {} (QoS: {any})\n", .{ topic, source_node_id, qos });
+        if (self.verbose) std.debug.print("Publishing to '{s}' from Node {} (QoS: {any})\n", .{ topic, source_node_id, qos });
 
         const msg = EventMessage{
             .id = self.next_msg_id,

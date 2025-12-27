@@ -6,28 +6,21 @@ pub fn build(b: *std.Build) void {
 
     const wamr_dir = "deps/wasm-micro-runtime";
 
-    const exe = b.addExecutable(.{
-        .name = "WEAVE",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
+    // WAMRのインクルードパス (共通)
+    const wamr_include_paths = &[_][]const u8{
+        "core/iwasm/include",
+        "core/iwasm/common",
+        "core/iwasm/interpreter",
+        "core/shared/utils",
+        "core/shared/platform/linux",
+        "core/shared/platform/common/posix",
+        "core/shared/platform/common/libc-util",
+        "core/shared/platform/include",
+        "core/shared/mem-alloc",
+        "core/iwasm/libraries/libc-wasi/sandboxed-system-primitives/src",
+    };
 
-    // WAMRのインクルードパス
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/iwasm/include" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/iwasm/common" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/iwasm/interpreter" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/shared/utils" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/shared/platform/linux" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/shared/platform/common/posix" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/shared/platform/common/libc-util" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/shared/platform/include" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/shared/mem-alloc" }) catch unreachable));
-    exe.addIncludePath(b.path(std.fs.path.join(b.allocator, &.{ wamr_dir, "core/iwasm/libraries/libc-wasi/sandboxed-system-primitives/src" }) catch unreachable));
-
-    // WAMRの定義
+    // WAMRの定義 (共通)
     const wamr_defines = &.{
         "-D_GNU_SOURCE",
         "-DBH_PLATFORM_LINUX",
@@ -42,8 +35,8 @@ pub fn build(b: *std.Build) void {
         "-fno-sanitize=alignment",
     };
 
-    // WAMRのソースファイル
-    inline for (.{
+    // WAMRのソースファイル (共通)
+    const wamr_sources = &[_][]const u8{
         "core/iwasm/common/wasm_application.c",
         "core/iwasm/common/wasm_runtime_common.c",
         "core/iwasm/common/wasm_native.c",
@@ -77,19 +70,38 @@ pub fn build(b: *std.Build) void {
         "core/shared/utils/uncommon/bh_read_file.c",
         "core/iwasm/common/arch/invokeNative_em64.s",
         "core/iwasm/common/wasm_c_api.c",
-    }) |src| {
-        exe.addCSourceFile(.{
-            .file = b.path(b.fmt("{s}/{s}", .{ wamr_dir, src })),
-            .flags = wamr_defines,
-        });
-    }
+    };
 
-    exe.linkLibC();
-    exe.linkSystemLibrary("m");
-    exe.linkSystemLibrary("dl");
-    exe.linkSystemLibrary("pthread");
-    exe.linkSystemLibrary("rt");
+    // --- ヘルパー: WAMR設定を実行ファイルに適用 ---
+    const addWamrDeps = struct {
+        fn apply(bb: *std.Build, exe_target: *std.Build.Step.Compile, dir: []const u8, includes: []const []const u8, sources: []const []const u8, defines: anytype) void {
+            for (includes) |inc| {
+                exe_target.addIncludePath(bb.path(std.fs.path.join(bb.allocator, &.{ dir, inc }) catch unreachable));
+            }
+            for (sources) |src| {
+                exe_target.addCSourceFile(.{
+                    .file = bb.path(bb.fmt("{s}/{s}", .{ dir, src })),
+                    .flags = defines,
+                });
+            }
+            exe_target.linkLibC();
+            exe_target.linkSystemLibrary("m");
+            exe_target.linkSystemLibrary("dl");
+            exe_target.linkSystemLibrary("pthread");
+            exe_target.linkSystemLibrary("rt");
+        }
+    }.apply;
 
+    // --- Main Executable ---
+    const exe = b.addExecutable(.{
+        .name = "WEAVE",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    addWamrDeps(b, exe, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -97,7 +109,21 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
-
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    // --- Stress Test Step ---
+    const stress_exe = b.addExecutable(.{
+        .name = "stress_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/stress_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    addWamrDeps(b, stress_exe, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
+
+    const run_stress_cmd = b.addRunArtifact(stress_exe);
+    const stress_step = b.step("stress", "Run memory stress test (Phase 2.1)");
+    stress_step.dependOn(&run_stress_cmd.step);
 }
