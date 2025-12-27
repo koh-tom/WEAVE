@@ -50,7 +50,7 @@ const WasmSubscriber = struct {
 
     pub fn callback(ctx: ?*anyopaque, msg: *const @import("event_bus.zig").EventMessage) void {
         const self: *WasmSubscriber = @ptrCast(@alignCast(ctx orelse return));
-        const exec_env = wamr.wasm_runtime_create_exec_env(self.instance, 8192);
+        const exec_env = wamr.wasm_runtime_create_exec_env(self.instance, 16384);
         if (exec_env == null) return;
         defer wamr.wasm_runtime_destroy_exec_env(exec_env);
 
@@ -88,43 +88,66 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    std.debug.print("Status: Initializing EventBus...\n", .{});
     var bus = EventBus.init(allocator);
     defer bus.deinit();
     global_bus = &bus;
 
+    std.debug.print("Status: Initializing WAMR Runtime...\n", .{});
     var init_args = std.mem.zeroInit(wamr.RuntimeInitArgs, .{
         .mem_alloc_type = wamr.Alloc_With_System_Allocator,
     });
-    if (!wamr.wasm_runtime_full_init(&init_args)) return;
+    if (!wamr.wasm_runtime_full_init(&init_args)) {
+        std.debug.print("Error: wasm_runtime_full_init failed\n", .{});
+        return;
+    }
     defer wamr.wasm_runtime_destroy();
 
+    std.debug.print("Status: Registering Native Symbols...\n", .{});
     var native_symbols = [_]wamr.NativeSymbol{
         .{ .symbol = "os_api_publish", .func_ptr = @constCast(&os_api_publish), .signature = "(iiiii)i", .attachment = null },
         .{ .symbol = "os_api_log", .func_ptr = @constCast(&os_api_log), .signature = "(iii)i", .attachment = null },
     };
-    if (!wamr.wasm_runtime_register_natives("env", &native_symbols, native_symbols.len)) return;
+    if (!wamr.wasm_runtime_register_natives("env", &native_symbols, native_symbols.len)) {
+        std.debug.print("Error: wasm_runtime_register_natives failed\n", .{});
+        return;
+    }
 
+    std.debug.print("Status: Loading Wasm binary...\n", .{});
     const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, "wasm-apps/chat_node.wasm", 1024 * 1024);
     defer allocator.free(wasm_buffer);
 
     var error_buf: [128]u8 = undefined;
     const module = wamr.wasm_runtime_load(wasm_buffer.ptr, @intCast(wasm_buffer.len), &error_buf, @intCast(error_buf.len));
-    if (module == null) return;
+    if (module == null) {
+        std.debug.print("Error: wasm_runtime_load failed: {s}\n", .{error_buf});
+        return;
+    }
     defer wamr.wasm_runtime_unload(module);
 
+    std.debug.print("Status: Instantiating Wasm module...\n", .{});
     const module_inst = wamr.wasm_runtime_instantiate(module, 64*1024, 64*1024, &error_buf, @intCast(error_buf.len));
-    if (module_inst == null) return;
+    if (module_inst == null) {
+        std.debug.print("Error: wasm_runtime_instantiate failed: {s}\n", .{error_buf});
+        return;
+    }
     defer wamr.wasm_runtime_deinstantiate(module_inst);
 
-    const exec_env = wamr.wasm_runtime_create_exec_env(module_inst, 8192);
+    std.debug.print("Status: Calling on_init...\n", .{});
+    const exec_env = wamr.wasm_runtime_create_exec_env(module_inst, 16384);
     if (exec_env) |env| {
         defer wamr.wasm_runtime_destroy_exec_env(env);
         if (wamr.wasm_runtime_lookup_function(module_inst, "on_init")) |func| {
             var argv = [_]u32{0};
-            _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
+            if (!wamr.wasm_runtime_call_wasm(env, func, 0, &argv)) {
+                std.debug.print("Error: on_init failed!\n", .{});
+                // 継続せず終了
+                return;
+            }
         }
     }
 
+    std.debug.print("Status: Registering Wasm subscriber...\n", .{});
     global_wasm_sub = WasmSubscriber{ .instance = module_inst };
     try bus.subscribe("ext.twitch.chat", 1, WasmSubscriber.callback, &global_wasm_sub);
 
