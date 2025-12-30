@@ -8,6 +8,7 @@ pub const QoS = enum(u8) {
 };
 
 /// ホスト内で管理されるメッセージのエンベロープ
+/// キューイングされるため、文字列の所有権を持つ必要がある
 pub const EventMessage = struct {
     id: u64,
     topic: []const u8,
@@ -16,7 +17,19 @@ pub const EventMessage = struct {
     qos: QoS,
     payload: []const u8,
 
-    pub fn deinit(self: *EventMessage, allocator: std.mem.Allocator) void {
+    /// ヒープにデータをコピーして新しいEventMessageを作成
+    pub fn clone(self: EventMessage, allocator: std.mem.Allocator) !EventMessage {
+        return EventMessage{
+            .id = self.id,
+            .topic = try allocator.dupe(u8, self.topic),
+            .timestamp = self.timestamp,
+            .source_node_id = self.source_node_id,
+            .qos = self.qos,
+            .payload = try allocator.dupe(u8, self.payload),
+        };
+    }
+
+    pub fn deinit(self: EventMessage, allocator: std.mem.Allocator) void {
         allocator.free(self.topic);
         allocator.free(self.payload);
     }
@@ -29,6 +42,70 @@ pub const Subscriber = struct {
     node_id: u32,
     context: ?*anyopaque,
     callback: SubscribeCallback,
+};
+
+/// MPSC イベントキュー
+/// 非同期配送のために、Publishスレッドから配送スレッドへデータを渡す
+pub const EventQueue = struct {
+    allocator: std.mem.Allocator,
+    queue: std.TailQueue(EventMessage),
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+    is_shutdown: bool,
+
+    pub fn init(allocator: std.mem.Allocator) EventQueue {
+        return EventQueue{
+            .allocator = allocator,
+            .queue = .{},
+            .mutex = .{},
+            .cond = .{},
+            .is_shutdown = false,
+        };
+    }
+
+    pub fn deinit(self: *EventQueue) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        while (self.queue.popFirst()) |node| {
+            node.data.deinit(self.allocator);
+            self.allocator.destroy(node);
+        }
+        self.is_shutdown = true;
+        self.cond.broadcast();
+    }
+
+    /// キューにイベントを追加
+    pub fn push(self: *EventQueue, msg: EventMessage) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.is_shutdown) return error.QueueShutdown;
+
+        const node = try self.allocator.create(std.TailQueue(EventMessage).Node);
+        node.data = try msg.clone(self.allocator);
+        self.queue.append(node);
+        
+        self.cond.signal();
+    }
+
+    /// キューからイベントを取り出す (ブロッキング)
+    pub fn pop(self: *EventQueue) ?EventMessage {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        while (self.queue.len == 0 and !self.is_shutdown) {
+            self.cond.wait(&self.mutex);
+        }
+
+        if (self.queue.popFirst()) |node| {
+            const msg = node.data;
+            self.allocator.destroy(node);
+            return msg;
+        }
+
+        return null;
+    }
 };
 
 /// Event Bus コア実装 (スレッドセーフ)
@@ -101,7 +178,6 @@ pub const EventBus = struct {
         self.next_msg_id += 1;
 
         // 購読者リストのスナップショットを取得してからロック解除
-        // コールバック実行中にsubscribeが呼ばれてもデッドロックしない
         const subs = self.subscribers.get(topic);
         self.mutex.unlock();
 
