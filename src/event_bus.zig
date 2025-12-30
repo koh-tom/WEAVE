@@ -67,7 +67,7 @@ pub const EventQueue = struct {
     pub fn deinit(self: *EventQueue) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         while (self.list.popFirst()) |n| {
             const node: *Node = @fieldParentPtr("node", n);
             node.data.deinit(self.allocator);
@@ -89,7 +89,7 @@ pub const EventQueue = struct {
             .node = .{},
         };
         self.list.append(&node.node);
-        
+
         self.cond.signal();
     }
 
@@ -134,7 +134,7 @@ pub const EventBus = struct {
 
     pub fn deinit(self: *EventBus) void {
         self.queue.deinit();
-        
+
         self.mutex.lock();
         defer self.mutex.unlock();
 

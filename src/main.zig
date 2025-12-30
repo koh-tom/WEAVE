@@ -83,6 +83,22 @@ const WasmSubscriber = struct {
     }
 };
 
+/// イベントディスパッチャスレッドのメインループ
+fn eventDispatcherLoop(bus: *EventBus) void {
+    std.debug.print("Status: Event Dispatcher Thread started\n", .{});
+    while (true) {
+        // イベントを待機 (ブロッキング)
+        if (bus.queue.pop()) |msg| {
+            bus.dispatch(&msg);
+            msg.deinit(bus.allocator); // 配送完了後にヒープメモリを解放
+        } else {
+            // popがnullを返した場合はキューがシャットダウンされたことを意味する
+            break;
+        }
+    }
+    std.debug.print("Status: Event Dispatcher Thread stopped\n", .{});
+}
+
 var global_wasm_sub: WasmSubscriber = undefined;
 
 pub fn main() !void {
@@ -98,6 +114,11 @@ pub fn main() !void {
     var bus = EventBus.init(allocator);
     defer bus.deinit();
     global_bus = &bus;
+
+    // ディスパッチャスレッドを起動
+    std.debug.print("Status: Spawning Event Dispatcher Thread...\n", .{});
+    const dispatcher_thread = try std.Thread.spawn(.{}, eventDispatcherLoop, .{&bus});
+    dispatcher_thread.detach();
 
     std.debug.print("Status: Initializing WAMR Runtime...\n", .{});
     var init_args = std.mem.zeroInit(wamr.RuntimeInitArgs, .{
@@ -158,6 +179,9 @@ pub fn main() !void {
 
     std.debug.print("Status: Publishing test event...\n", .{});
     try bus.publish("ext.twitch.chat", "Hello WEAVE!", .Reliable, 0);
+
+    // 非同期配送を待つために少し待機
+    std.Thread.sleep(200 * std.time.ns_per_ms);
 
     std.debug.print("Status: Success\n", .{});
 }
