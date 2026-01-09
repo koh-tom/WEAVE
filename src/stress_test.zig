@@ -98,14 +98,12 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var bus = EventBus.init(allocator, 100000);
-    defer bus.deinit();
     bus.verbose = false;
     global_bus = &bus;
 
     // ディスパッチャスレッドを起動
     const dispatcher_thread = try std.Thread.spawn(.{}, eventDispatcherLoop, .{&bus});
-    dispatcher_thread.detach();
-
+    
     var init_args = std.mem.zeroInit(wamr.RuntimeInitArgs, .{ .mem_alloc_type = wamr.Alloc_With_System_Allocator });
     _ = wamr.wasm_runtime_full_init(&init_args);
     defer wamr.wasm_runtime_destroy();
@@ -128,7 +126,7 @@ pub fn main() !void {
     try bus.subscribe("test.stress", 1, WasmSubscriber.callback, &wasm_sub);
 
     const iterations = 100000;
-    std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});
+    std.debug.print("Running {} iterations with Async Queue (Capacity: 100000)...\n", .{iterations});
     
     const start_time = std.time.milliTimestamp();
     var i: u32 = 0;
@@ -138,7 +136,6 @@ pub fn main() !void {
     }
 
     // すべてのイベントが処理されるまで少し待機
-    // 実際にはカウントが0になるまで待つのが正しいが、ここでは簡易的に
     while (bus.queue.count > 0) {
         std.Thread.sleep(10 * std.time.ns_per_ms);
     }
@@ -146,4 +143,8 @@ pub fn main() !void {
     const end_time = std.time.milliTimestamp();
 
     std.debug.print("Test Finished Successfully in {}ms!\n", .{end_time - start_time});
+
+    // EventBusのdeinitによってキューがシャットダウンされ、ディスパッチャがループを抜ける
+    bus.deinit();
+    dispatcher_thread.join();
 }

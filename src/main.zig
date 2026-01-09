@@ -112,13 +112,12 @@ pub fn main() !void {
 
     std.debug.print("Status: Initializing EventBus...\n", .{});
     var bus = EventBus.init(allocator, 1000);
-    defer bus.deinit();
     global_bus = &bus;
 
     // ディスパッチャスレッドを起動
     std.debug.print("Status: Spawning Event Dispatcher Thread...\n", .{});
     const dispatcher_thread = try std.Thread.spawn(.{}, eventDispatcherLoop, .{&bus});
-    dispatcher_thread.detach();
+    // メインの最後に join する
 
     std.debug.print("Status: Initializing WAMR Runtime...\n", .{});
     var init_args = std.mem.zeroInit(wamr.RuntimeInitArgs, .{
@@ -184,4 +183,8 @@ pub fn main() !void {
     std.Thread.sleep(200 * std.time.ns_per_ms);
 
     std.debug.print("Status: Success\n", .{});
+
+    // EventBusのdeinitによってキューがシャットダウンされ、ディスパッチャがループを抜ける
+    bus.deinit();
+    dispatcher_thread.join();
 }
