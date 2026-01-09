@@ -111,7 +111,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     std.debug.print("Status: Initializing EventBus...\n", .{});
-    var bus = EventBus.init(allocator);
+    var bus = EventBus.init(allocator, 1000);
     defer bus.deinit();
     global_bus = &bus;
 
