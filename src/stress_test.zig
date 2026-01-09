@@ -144,7 +144,8 @@ pub fn main() !void {
 
     std.debug.print("Test Finished Successfully in {}ms!\n", .{end_time - start_time});
 
-    // EventBusのdeinitによってキューがシャットダウンされ、ディスパッチャがループを抜ける
-    bus.deinit();
+    // シャットダウンシーケンス: 停止通知 -> スレッド待機 -> メモリ解放
+    bus.stop();
     dispatcher_thread.join();
+    bus.deinit();
 }

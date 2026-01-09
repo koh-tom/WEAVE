@@ -70,6 +70,7 @@ pub const EventQueue = struct {
         };
     }
 
+    /// キューのメモリ解放 (スレッドが join された後に呼ぶこと)
     pub fn deinit(self: *EventQueue) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -79,14 +80,19 @@ pub const EventQueue = struct {
             node.data.deinit(self.allocator);
             self.allocator.destroy(node);
         }
+    }
+
+    /// シャットダウン通知 (新規 push を拒否し、pop 待ちを解除する)
+    pub fn shutdown(self: *EventQueue) void {
+        self.mutex.lock();
         self.is_shutdown = true;
+        self.mutex.unlock();
+        
+        // 待機中の producer と consumer を全て起こす
         self.cond_not_empty.broadcast();
         self.cond_not_full.broadcast();
     }
 
-    /// キューにイベントを追加
-    /// block_if_full = true の場合、空きができるまで待機 (Reliable用)
-    /// block_if_full = false の場合、満杯ならエラーを返す (BestEffort用)
     pub fn push(self: *EventQueue, msg: EventMessage, block_if_full: bool) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -114,7 +120,9 @@ pub const EventQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        while (self.count == 0 and !self.is_shutdown) {
+        // ドレイン処理: シャットダウンされていても、キューにデータがある限りは取り出す
+        while (self.count == 0) {
+            if (self.is_shutdown) return null;
             self.cond_not_empty.wait(&self.mutex);
         }
 
@@ -151,9 +159,8 @@ pub const EventBus = struct {
         };
     }
 
+    /// メモリ解放 (スレッドが完全に停止した後に呼ぶこと)
     pub fn deinit(self: *EventBus) void {
-        self.queue.deinit();
-        
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -164,6 +171,12 @@ pub const EventBus = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.subscribers.deinit();
+        self.queue.deinit();
+    }
+
+    /// シャットダウン指示
+    pub fn stop(self: *EventBus) void {
+        self.queue.shutdown();
     }
 
     pub fn subscribe(self: *EventBus, topic: []const u8, node_id: u32, callback: SubscribeCallback, context: ?*anyopaque) !void {
@@ -204,7 +217,6 @@ pub const EventBus = struct {
             .payload = payload,
         };
 
-        // QoSに基づいた投入戦略
         const block = (qos == .Reliable);
         self.queue.push(msg, block) catch |err| {
             if (err == error.QueueFull) {
