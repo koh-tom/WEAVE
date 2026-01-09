@@ -77,6 +77,7 @@ const WasmSubscriber = struct {
 };
 
 fn eventDispatcherLoop(bus: *EventBus) void {
+    bus.registerDispatcherThread();
     std.debug.print("Dispatcher: Started\n", .{});
     while (true) {
         if (bus.queue.pop()) |msg| {
@@ -97,7 +98,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var bus = EventBus.init(allocator, 100000);
+    var bus = EventBus.init(allocator, 1000);
     bus.verbose = false;
     global_bus = &bus;
 
@@ -126,7 +127,7 @@ pub fn main() !void {
     try bus.subscribe("test.stress", 1, WasmSubscriber.callback, &wasm_sub);
 
     const iterations = 100000;
-    std.debug.print("Running {} iterations with Async Queue (Capacity: 100000)...\n", .{iterations});
+    std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});
     
     const start_time = std.time.milliTimestamp();
     var i: u32 = 0;

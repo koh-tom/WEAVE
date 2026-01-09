@@ -70,7 +70,6 @@ pub const EventQueue = struct {
         };
     }
 
-    /// キューのメモリ解放 (スレッドが join された後に呼ぶこと)
     pub fn deinit(self: *EventQueue) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -82,13 +81,11 @@ pub const EventQueue = struct {
         }
     }
 
-    /// シャットダウン通知 (新規 push を拒否し、pop 待ちを解除する)
     pub fn shutdown(self: *EventQueue) void {
         self.mutex.lock();
         self.is_shutdown = true;
         self.mutex.unlock();
         
-        // 待機中の producer と consumer を全て起こす
         self.cond_not_empty.broadcast();
         self.cond_not_full.broadcast();
     }
@@ -120,7 +117,6 @@ pub const EventQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // ドレイン処理: シャットダウンされていても、キューにデータがある限りは取り出す
         while (self.count == 0) {
             if (self.is_shutdown) return null;
             self.cond_not_empty.wait(&self.mutex);
@@ -147,6 +143,9 @@ pub const EventBus = struct {
     next_msg_id: u64,
     verbose: bool,
     mutex: std.Thread.Mutex,
+    
+    // デッドロック回避用 (usizeにキャストして保持)
+    dispatcher_thread_id: std.atomic.Value(usize),
 
     pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) EventBus {
         return EventBus{
@@ -156,10 +155,10 @@ pub const EventBus = struct {
             .next_msg_id = 1,
             .verbose = true,
             .mutex = .{},
+            .dispatcher_thread_id = std.atomic.Value(usize).init(0),
         };
     }
 
-    /// メモリ解放 (スレッドが完全に停止した後に呼ぶこと)
     pub fn deinit(self: *EventBus) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -174,9 +173,15 @@ pub const EventBus = struct {
         self.queue.deinit();
     }
 
-    /// シャットダウン指示
     pub fn stop(self: *EventBus) void {
         self.queue.shutdown();
+    }
+
+    /// ディスパッチャスレッドであることを登録する
+    pub fn registerDispatcherThread(self: *EventBus) void {
+        // pthread_t (unsigned long) を usize にキャスト
+        const tid = @as(usize, @intCast(std.Thread.getCurrentId()));
+        self.dispatcher_thread_id.store(tid, .monotonic);
     }
 
     pub fn subscribe(self: *EventBus, topic: []const u8, node_id: u32, callback: SubscribeCallback, context: ?*anyopaque) !void {
@@ -217,10 +222,16 @@ pub const EventBus = struct {
             .payload = payload,
         };
 
-        const block = (qos == .Reliable);
+        // デッドロック回避ロジック:
+        var block = (qos == .Reliable);
+        const tid = self.dispatcher_thread_id.load(.monotonic);
+        if (tid != 0 and tid == @as(usize, @intCast(std.Thread.getCurrentId()))) {
+            block = false;
+        }
+
         self.queue.push(msg, block) catch |err| {
             if (err == error.QueueFull) {
-                if (self.verbose) std.debug.print("QoS: BestEffort drop event '{s}' due to full queue\n", .{topic});
+                if (self.verbose) std.debug.print("QoS: drop event '{s}' due to full queue (Source: {})\n", .{topic, source_node_id});
                 return;
             }
             return err;

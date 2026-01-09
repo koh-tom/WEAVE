@@ -85,6 +85,7 @@ const WasmSubscriber = struct {
 
 /// イベントディスパッチャスレッドのメインループ
 fn eventDispatcherLoop(bus: *EventBus) void {
+    bus.registerDispatcherThread();
     std.debug.print("Status: Event Dispatcher Thread started\n", .{});
     while (true) {
         // イベントを待機 (ブロッキング)
