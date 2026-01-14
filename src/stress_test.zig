@@ -34,7 +34,10 @@ export fn os_api_log(
     msg_ptr: u32,
     msg_len: u32,
 ) u32 {
-    _ = exec_env; _ = level; _ = msg_ptr; _ = msg_len;
+    _ = exec_env;
+    _ = level;
+    _ = msg_ptr;
+    _ = msg_len;
     return 0;
 }
 
@@ -57,7 +60,7 @@ const WasmSubscriber = struct {
 
     pub fn callback(ctx: ?*anyopaque, msg: *const @import("event_bus.zig").EventMessage) void {
         const self: *WasmSubscriber = @ptrCast(@alignCast(ctx orelse return));
-        
+
         const alloc_func = wamr.wasm_runtime_lookup_function(self.instance, "os_alloc");
         if (alloc_func == null) return;
 
@@ -115,7 +118,7 @@ pub fn main() !void {
 
     // ディスパッチャスレッドを起動
     const dispatcher_thread = try std.Thread.spawn(.{}, eventDispatcherLoop, .{&bus});
-    
+
     var init_args = std.mem.zeroInit(wamr.RuntimeInitArgs, .{ .mem_alloc_type = wamr.Alloc_With_System_Allocator });
     _ = wamr.wasm_runtime_full_init(&init_args);
     defer wamr.wasm_runtime_destroy();
@@ -131,7 +134,7 @@ pub fn main() !void {
 
     var error_buf: [128]u8 = undefined;
     const module = wamr.wasm_runtime_load(wasm_buffer.ptr, @intCast(wasm_buffer.len), &error_buf, @intCast(error_buf.len));
-    const module_inst = wamr.wasm_runtime_instantiate(module, 64*1024, 64*1024, &error_buf, @intCast(error_buf.len));
+    const module_inst = wamr.wasm_runtime_instantiate(module, 64 * 1024, 64 * 1024, &error_buf, @intCast(error_buf.len));
     defer wamr.wasm_runtime_deinstantiate(module_inst);
 
     // 購読登録 (再利用可能なSubscriberを作成)
@@ -141,16 +144,18 @@ pub fn main() !void {
 
     const iterations = 100000;
     std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});
-    
+
     const start_time = std.time.milliTimestamp();
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
         try bus.publish("test.stress", "STRESS_TEST_PAYLOAD", .Reliable, 0);
-        if (i % 10000 == 0) std.debug.print("Progress: {}/100000 (Queue: {})\n", .{i, bus.queue.count});
+        if (i % 10000 == 0) std.debug.print("Progress: {}/100000 (Queue: {})\n", .{ i, bus.queue.count });
     }
 
-    // すべてのイベントが処理されるまで待機
-    bus.waitIdle();
+    // すべてのイベントが処理されるまで少し待機
+    while (bus.queue.count > 0) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
 
     const end_time = std.time.milliTimestamp();
 

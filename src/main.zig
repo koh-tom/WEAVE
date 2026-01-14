@@ -64,7 +64,7 @@ const WasmSubscriber = struct {
 
     pub fn callback(ctx: ?*anyopaque, msg: *const @import("event_bus.zig").EventMessage) void {
         const self: *WasmSubscriber = @ptrCast(@alignCast(ctx orelse return));
-        
+
         const alloc_func = wamr.wasm_runtime_lookup_function(self.instance, "os_alloc");
         if (alloc_func == null) return;
 
@@ -164,7 +164,7 @@ pub fn main() !void {
     defer wamr.wasm_runtime_unload(module);
 
     std.debug.print("Status: Instantiating Wasm module...\n", .{});
-    const module_inst = wamr.wasm_runtime_instantiate(module, 64*1024, 64*1024, &error_buf, @intCast(error_buf.len));
+    const module_inst = wamr.wasm_runtime_instantiate(module, 64 * 1024, 64 * 1024, &error_buf, @intCast(error_buf.len));
     if (module_inst == null) {
         std.debug.print("Error: wasm_runtime_instantiate failed: {s}\n", .{error_buf});
         return;
@@ -191,8 +191,8 @@ pub fn main() !void {
     std.debug.print("Status: Publishing test event...\n", .{});
     try bus.publish("ext.twitch.chat", "Hello WEAVE!", .Reliable, 0);
 
-    // 全ての配送が終わるのを待つ
-    bus.waitIdle();
+    // 非同期配送を待つために少し待機
+    std.Thread.sleep(200 * std.time.ns_per_ms);
 
     std.debug.print("Status: Success\n", .{});
 
