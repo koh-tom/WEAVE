@@ -40,38 +40,49 @@ export fn os_api_log(
 
 const WasmSubscriber = struct {
     instance: wamr.wasm_module_inst_t,
+    exec_env: wamr.wasm_exec_env_t,
+
+    pub fn init(instance: wamr.wasm_module_inst_t) !WasmSubscriber {
+        const env = wamr.wasm_runtime_create_exec_env(instance, 16384);
+        if (env == null) return error.ExecEnvCreationFailed;
+        return WasmSubscriber{
+            .instance = instance,
+            .exec_env = env.?,
+        };
+    }
+
+    pub fn deinit(self: *WasmSubscriber) void {
+        wamr.wasm_runtime_destroy_exec_env(self.exec_env);
+    }
 
     pub fn callback(ctx: ?*anyopaque, msg: *const @import("event_bus.zig").EventMessage) void {
         const self: *WasmSubscriber = @ptrCast(@alignCast(ctx orelse return));
-        const exec_env = wamr.wasm_runtime_create_exec_env(self.instance, 16384);
-        if (exec_env == null) return;
-        defer wamr.wasm_runtime_destroy_exec_env(exec_env);
-
+        
         const alloc_func = wamr.wasm_runtime_lookup_function(self.instance, "os_alloc");
         if (alloc_func == null) return;
 
         // Topicコピー
         var argv_t = [_]u32{@intCast(msg.topic.len)};
-        _ = wamr.wasm_runtime_call_wasm(exec_env, alloc_func, 1, &argv_t);
+        _ = wamr.wasm_runtime_call_wasm(self.exec_env, alloc_func, 1, &argv_t);
         const t_ptr = argv_t[0];
         @memcpy(@as([*]u8, @ptrCast(wamr.wasm_runtime_addr_app_to_native(self.instance, t_ptr).?))[0..msg.topic.len], msg.topic);
 
         // Payloadコピー
         var argv_p = [_]u32{@intCast(msg.payload.len)};
-        _ = wamr.wasm_runtime_call_wasm(exec_env, alloc_func, 1, &argv_p);
+        _ = wamr.wasm_runtime_call_wasm(self.exec_env, alloc_func, 1, &argv_p);
         const p_ptr = argv_p[0];
         @memcpy(@as([*]u8, @ptrCast(wamr.wasm_runtime_addr_app_to_native(self.instance, p_ptr).?))[0..msg.payload.len], msg.payload);
 
         // on_message実行
         if (wamr.wasm_runtime_lookup_function(self.instance, "on_message")) |func| {
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
-            _ = wamr.wasm_runtime_call_wasm(exec_env, func, 4, &msg_argv);
+            _ = wamr.wasm_runtime_call_wasm(self.exec_env, func, 4, &msg_argv);
         }
 
         // メモリリセット
         if (wamr.wasm_runtime_lookup_function(self.instance, "os_reset_heap")) |reset_func| {
             var reset_argv = [_]u32{0};
-            _ = wamr.wasm_runtime_call_wasm(exec_env, reset_func, 0, &reset_argv);
+            _ = wamr.wasm_runtime_call_wasm(self.exec_env, reset_func, 0, &reset_argv);
         }
     }
 };
@@ -123,7 +134,9 @@ pub fn main() !void {
     const module_inst = wamr.wasm_runtime_instantiate(module, 64*1024, 64*1024, &error_buf, @intCast(error_buf.len));
     defer wamr.wasm_runtime_deinstantiate(module_inst);
 
-    var wasm_sub = WasmSubscriber{ .instance = module_inst.? };
+    // 購読登録 (再利用可能なSubscriberを作成)
+    var wasm_sub = try WasmSubscriber.init(module_inst.?);
+
     try bus.subscribe("test.stress", 1, WasmSubscriber.callback, &wasm_sub);
 
     const iterations = 100000;
@@ -148,5 +161,6 @@ pub fn main() !void {
     // シャットダウンシーケンス: 停止通知 -> スレッド待機 -> メモリ解放
     bus.stop();
     dispatcher_thread.join();
+    wasm_sub.deinit();
     bus.deinit();
 }
