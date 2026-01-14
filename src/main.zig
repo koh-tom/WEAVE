@@ -103,7 +103,9 @@ fn eventDispatcherLoop(bus: *EventBus) void {
         if (bus.queue.pop()) |msg| {
             bus.dispatch(&msg);
             msg.deinit(bus.allocator); // 配送完了後にヒープメモリを解放
+            bus.notifyPotentialIdle(); // アイドル状態の可能性を通知
         } else {
+            bus.notifyPotentialIdle();
             // popがnullを返した場合はキューがシャットダウンされたことを意味する
             break;
         }

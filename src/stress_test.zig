@@ -98,7 +98,9 @@ fn eventDispatcherLoop(bus: *EventBus) void {
             // std.debug.print("Dispatcher: Popped event {}\n", .{msg.id});
             bus.dispatch(&msg);
             msg.deinit(bus.allocator);
+            bus.notifyPotentialIdle();
         } else {
+            bus.notifyPotentialIdle();
             std.debug.print("Dispatcher: Shutdown\n", .{});
             break;
         }

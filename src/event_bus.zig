@@ -49,7 +49,6 @@ pub const EventQueue = struct {
     mutex: std.Thread.Mutex,
     cond_not_full: std.Thread.Condition,
     cond_not_empty: std.Thread.Condition,
-    cond_idle: std.Thread.Condition,
     is_shutdown: bool,
     capacity: usize,
     count: usize,
@@ -65,7 +64,6 @@ pub const EventQueue = struct {
             .mutex = .{},
             .cond_not_full = .{},
             .cond_not_empty = .{},
-            .cond_idle = .{},
             .is_shutdown = false,
             .capacity = capacity,
             .count = 0,
@@ -90,7 +88,6 @@ pub const EventQueue = struct {
         
         self.cond_not_empty.broadcast();
         self.cond_not_full.broadcast();
-        self.cond_idle.broadcast();
     }
 
     pub fn push(self: *EventQueue, msg: EventMessage, block_if_full: bool) !void {
@@ -137,14 +134,6 @@ pub const EventQueue = struct {
 
         return null;
     }
-
-    pub fn waitIdle(self: *EventQueue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        while (self.count > 0 and !self.is_shutdown) {
-            self.cond_idle.wait(&self.mutex);
-        }
-    }
 };
 
 /// Event Bus コア実装 (スレッドセーフ)
@@ -155,6 +144,7 @@ pub const EventBus = struct {
     next_msg_id: u64,
     verbose: bool,
     mutex: std.Thread.Mutex,
+    cond_idle: std.Thread.Condition, // 追加: アイドル状態通知用
     
     // デッドロック回避用
     dispatcher_thread_id: std.atomic.Value(usize),
@@ -169,6 +159,7 @@ pub const EventBus = struct {
             .next_msg_id = 1,
             .verbose = true,
             .mutex = .{},
+            .cond_idle = .{},
             .dispatcher_thread_id = std.atomic.Value(usize).init(0),
             .busy_count = std.atomic.Value(usize).init(0),
         };
@@ -190,17 +181,34 @@ pub const EventBus = struct {
 
     pub fn stop(self: *EventBus) void {
         self.queue.shutdown();
+        self.cond_idle.broadcast();
     }
 
     pub fn waitIdle(self: *EventBus) void {
-        // まずキューが空になるのを待つ
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         while (true) {
+            // キューの中身を安全に確認
+            self.queue.mutex.lock();
             const q_count = self.queue.count;
-            const b_count = self.busy_count.load(.monotonic);
-            if (q_count == 0 and b_count == 0) break;
-            if (self.queue.is_shutdown) break;
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            const shutdown = self.queue.is_shutdown;
+            self.queue.mutex.unlock();
+
+            const b_count = self.busy_count.load(.acquire);
+            
+            if ((q_count == 0 and b_count == 0) or shutdown) break;
+            
+            // アイドル状態になるまで待機 (ポーリングなし)
+            self.cond_idle.wait(&self.mutex);
         }
+    }
+
+    /// アイドル状態になった可能性を通知する
+    pub fn notifyPotentialIdle(self: *EventBus) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.cond_idle.signal();
     }
 
     pub fn registerDispatcherThread(self: *EventBus) void {
@@ -264,7 +272,7 @@ pub const EventBus = struct {
     }
 
     pub fn dispatch(self: *EventBus, msg: *const EventMessage) void {
-        _ = self.busy_count.fetchAdd(1, .monotonic);
+        _ = self.busy_count.fetchAdd(1, .acquire);
         defer _ = self.busy_count.fetchSub(1, .release);
 
         self.mutex.lock();
