@@ -49,6 +49,7 @@ pub const EventQueue = struct {
     mutex: std.Thread.Mutex,
     cond_not_full: std.Thread.Condition,
     cond_not_empty: std.Thread.Condition,
+    cond_idle: std.Thread.Condition,
     is_shutdown: bool,
     capacity: usize,
     count: usize,
@@ -64,6 +65,7 @@ pub const EventQueue = struct {
             .mutex = .{},
             .cond_not_full = .{},
             .cond_not_empty = .{},
+            .cond_idle = .{},
             .is_shutdown = false,
             .capacity = capacity,
             .count = 0,
@@ -88,6 +90,7 @@ pub const EventQueue = struct {
         
         self.cond_not_empty.broadcast();
         self.cond_not_full.broadcast();
+        self.cond_idle.broadcast();
     }
 
     pub fn push(self: *EventQueue, msg: EventMessage, block_if_full: bool) !void {
@@ -127,11 +130,20 @@ pub const EventQueue = struct {
             const msg = node.data;
             self.allocator.destroy(node);
             self.count -= 1;
+            
             self.cond_not_full.signal();
             return msg;
         }
 
         return null;
+    }
+
+    pub fn waitIdle(self: *EventQueue) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (self.count > 0 and !self.is_shutdown) {
+            self.cond_idle.wait(&self.mutex);
+        }
     }
 };
 
@@ -144,8 +156,10 @@ pub const EventBus = struct {
     verbose: bool,
     mutex: std.Thread.Mutex,
     
-    // デッドロック回避用 (usizeにキャストして保持)
+    // デッドロック回避用
     dispatcher_thread_id: std.atomic.Value(usize),
+    // 配送中のメッセージ数
+    busy_count: std.atomic.Value(usize),
 
     pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) EventBus {
         return EventBus{
@@ -156,6 +170,7 @@ pub const EventBus = struct {
             .verbose = true,
             .mutex = .{},
             .dispatcher_thread_id = std.atomic.Value(usize).init(0),
+            .busy_count = std.atomic.Value(usize).init(0),
         };
     }
 
@@ -177,9 +192,18 @@ pub const EventBus = struct {
         self.queue.shutdown();
     }
 
-    /// ディスパッチャスレッドであることを登録する
+    pub fn waitIdle(self: *EventBus) void {
+        // まずキューが空になるのを待つ
+        while (true) {
+            const q_count = self.queue.count;
+            const b_count = self.busy_count.load(.monotonic);
+            if (q_count == 0 and b_count == 0) break;
+            if (self.queue.is_shutdown) break;
+            std.Thread.sleep(1 * std.time.ns_per_ms);
+        }
+    }
+
     pub fn registerDispatcherThread(self: *EventBus) void {
-        // pthread_t (unsigned long) を usize にキャスト
         const tid = @as(usize, @intCast(std.Thread.getCurrentId()));
         self.dispatcher_thread_id.store(tid, .monotonic);
     }
@@ -222,7 +246,6 @@ pub const EventBus = struct {
             .payload = payload,
         };
 
-        // デッドロック回避ロジック:
         var block = (qos == .Reliable);
         const tid = self.dispatcher_thread_id.load(.monotonic);
         if (tid != 0 and tid == @as(usize, @intCast(std.Thread.getCurrentId()))) {
@@ -241,6 +264,9 @@ pub const EventBus = struct {
     }
 
     pub fn dispatch(self: *EventBus, msg: *const EventMessage) void {
+        _ = self.busy_count.fetchAdd(1, .monotonic);
+        defer _ = self.busy_count.fetchSub(1, .release);
+
         self.mutex.lock();
         const subs_opt = self.subscribers.get(msg.topic);
         self.mutex.unlock();

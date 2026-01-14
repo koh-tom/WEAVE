@@ -191,8 +191,8 @@ pub fn main() !void {
     std.debug.print("Status: Publishing test event...\n", .{});
     try bus.publish("ext.twitch.chat", "Hello WEAVE!", .Reliable, 0);
 
-    // 非同期配送を待つために少し待機
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    // 全ての配送が終わるのを待つ
+    bus.waitIdle();
 
     std.debug.print("Status: Success\n", .{});
 

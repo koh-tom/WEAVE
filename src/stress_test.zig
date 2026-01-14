@@ -149,10 +149,8 @@ pub fn main() !void {
         if (i % 10000 == 0) std.debug.print("Progress: {}/100000 (Queue: {})\n", .{i, bus.queue.count});
     }
 
-    // すべてのイベントが処理されるまで少し待機
-    while (bus.queue.count > 0) {
-        std.Thread.sleep(10 * std.time.ns_per_ms);
-    }
+    // すべてのイベントが処理されるまで待機
+    bus.waitIdle();
 
     const end_time = std.time.milliTimestamp();
 
