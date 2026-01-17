@@ -15,6 +15,6 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
 
     sdk.log(1, "Wasm Node received event via Dynamic Memory!");
     
-    // イベントの再送テスト
+    // イベントの再送テスト (許可されている)
     sdk.publish(topic, payload, 1);
 }

@@ -38,6 +38,16 @@ export fn os_api_publish(
     const payload = @as([*]const u8, @ptrCast(p_native))[0..payload_len];
     const qos = @as(event_bus.QoS, @enumFromInt(@as(u8, @intCast(qos_raw))));
 
+    // 権限チェック (ACL)
+    if (!meta.manifest_parsed.value.canPublish(topic)) {
+        if (enable_log) std.debug.print("Security Error: Plugin '{s}' (Node {}) attempted to publish to unauthorized topic '{s}'\n", .{
+            meta.manifest_parsed.value.name,
+            meta.node_id,
+            topic,
+        });
+        return 1;
+    }
+
     // マニフェストから取得した Node ID を使用して発行
     bus.publish(topic, payload, qos, meta.node_id) catch return 1;
     return 0;
