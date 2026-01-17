@@ -4,6 +4,7 @@ const EventBus = @import("event_bus.zig").EventBus;
 const host_api = @import("host_api.zig");
 const WasmSubscriber = @import("wasm_subscriber.zig").WasmSubscriber;
 const WasmRuntime = @import("wasm_runtime.zig").WasmRuntime;
+const PluginManager = @import("plugin_manager.zig").PluginManager;
 
 fn eventDispatcherLoop(bus: *EventBus) void {
     bus.registerDispatcherThread();
@@ -30,7 +31,11 @@ pub fn main() !void {
 
     var bus = EventBus.init(allocator, 1000);
     bus.verbose = false;
+    var pm = PluginManager.init(allocator);
+    defer pm.deinit();
+
     host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
     host_api.enable_log = false; // パフォーマンスのためログを無効化
 
     // ディスパッチャスレッドを起動
@@ -52,9 +57,12 @@ pub fn main() !void {
     const module_inst = try runtime.instantiate(module, 64 * 1024, 64 * 1024);
     defer wamr.wasm_runtime_deinstantiate(module_inst);
 
+    // マニフェストの登録
+    const meta = try pm.registerPlugin(module_inst, "wasm-apps/manifest.json");
+
     // 購読登録
     var wasm_sub = try WasmSubscriber.init(module_inst);
-    try bus.subscribe("test.stress", 1, WasmSubscriber.callback, &wasm_sub);
+    try bus.subscribe("test.stress", meta.node_id, WasmSubscriber.callback, &wasm_sub);
 
     const iterations = 100000;
     std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});

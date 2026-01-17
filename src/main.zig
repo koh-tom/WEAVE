@@ -4,6 +4,7 @@ const EventBus = @import("event_bus.zig").EventBus;
 const host_api = @import("host_api.zig");
 const WasmSubscriber = @import("wasm_subscriber.zig").WasmSubscriber;
 const WasmRuntime = @import("wasm_runtime.zig").WasmRuntime;
+const PluginManager = @import("plugin_manager.zig").PluginManager;
 
 /// イベントディスパッチャスレッドのメインループ
 fn eventDispatcherLoop(bus: *EventBus) void {
@@ -33,10 +34,15 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // 1. 基盤の初期化 (EventBus)
-    std.debug.print("Status: Initializing EventBus...\n", .{});
+    // 1. 基盤の初期化 (EventBus, PluginManager)
+    std.debug.print("Status: Initializing EventBus & PluginManager...\n", .{});
     var bus = EventBus.init(allocator, 1000);
+    var pm = PluginManager.init(allocator);
+    defer pm.deinit();
+
     host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
+
     const dispatcher_thread = try std.Thread.spawn(.{}, eventDispatcherLoop, .{&bus});
 
     // 2. Wasmランタイムの初期化
@@ -67,8 +73,16 @@ pub fn main() !void {
         _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
     }
 
+    // マニフェストの登録
+    const meta = try pm.registerPlugin(module_inst, "wasm-apps/manifest.json");
+    std.debug.print("Status: Registered plugin '{s}' (Version: {s}) as Node {}\n", .{
+        meta.manifest_parsed.value.name,
+        meta.manifest_parsed.value.version,
+        meta.node_id,
+    });
+
     global_wasm_sub = try WasmSubscriber.init(module_inst);
-    try bus.subscribe("ext.twitch.chat", 1, WasmSubscriber.callback, &global_wasm_sub.?);
+    try bus.subscribe("ext.twitch.chat", meta.node_id, WasmSubscriber.callback, &global_wasm_sub.?);
 
     // 5. 実行と待機
     std.debug.print("Status: Running...\n", .{});

@@ -1,9 +1,12 @@
 const std = @import("std");
 const wamr = @import("wamr_libs.zig").wamr;
 const event_bus = @import("event_bus.zig");
+const plugin_manager = @import("plugin_manager.zig");
 
 /// ホスト側で共有されるEventBusへのポインタ
 pub var global_bus: ?*event_bus.EventBus = null;
+/// ホスト側で共有されるPluginManagerへのポインタ
+pub var global_plugin_manager: ?*plugin_manager.PluginManager = null;
 /// ログ出力を有効にするかどうか
 pub var enable_log: bool = true;
 
@@ -17,7 +20,16 @@ export fn os_api_publish(
     qos_raw: u32,
 ) u32 {
     const bus = global_bus orelse return 1;
+    const pm = global_plugin_manager orelse return 1;
+    
     const module_inst = wamr.wasm_runtime_get_module_inst(exec_env);
+    
+    // 呼び出し元のメタデータを取得
+    const meta = pm.getMetadata(module_inst) orelse {
+        if (enable_log) std.debug.print("Error: Unknown plugin attempted to publish\n", .{});
+        return 1;
+    };
+
     const t_native = wamr.wasm_runtime_addr_app_to_native(module_inst, topic_ptr);
     const p_native = wamr.wasm_runtime_addr_app_to_native(module_inst, payload_ptr);
     if (t_native == null or p_native == null) return 1;
@@ -26,7 +38,8 @@ export fn os_api_publish(
     const payload = @as([*]const u8, @ptrCast(p_native))[0..payload_len];
     const qos = @as(event_bus.QoS, @enumFromInt(@as(u8, @intCast(qos_raw))));
 
-    bus.publish(topic, payload, qos, 1) catch return 1;
+    // マニフェストから取得した Node ID を使用して発行
+    bus.publish(topic, payload, qos, meta.node_id) catch return 1;
     return 0;
 }
 

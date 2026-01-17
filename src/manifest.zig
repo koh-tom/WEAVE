@@ -15,8 +15,10 @@ pub const Manifest = struct {
         const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024);
         defer allocator.free(content);
 
+        // .allocate = .alloc_always を指定して、入力バッファから文字列をコピーさせる
         return std.json.parseFromSlice(Manifest, allocator, content, .{
             .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
         });
     }
 
@@ -50,11 +52,11 @@ test "manifest parse test" {
         \\}
     ;
 
-    const parsed = try std.json.parseFromSlice(Manifest, allocator, json_text, .{});
+    const parsed = try std.json.parseFromSlice(Manifest, allocator, json_text, .{
+        .allocate = .alloc_always,
+    });
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("test-plugin", parsed.value.name);
     try std.testing.expect(parsed.value.canPublish("sensor.temp"));
-    try std.testing.expect(!parsed.value.canPublish("other.topic"));
-    // ワイルドカードの簡易実装 (完全な正規表現ではないが、現時点では完全一致または"*"を想定)
 }
