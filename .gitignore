@@ -1,22 +1,18 @@
 # Zig
-zig-out/
 .zig-cache/
+.zig-out/
+zig-cache/
+zig-out/
 
-# Build
-build/
+# Build Artifacts
+libevent_bus.a
+main
+stress_test
+bus_test
 
-# Node / JS
-node_modules/
-dist/
-.env
+# Wasm Artifacts
+wasm-apps/*.wasm
+!wasm-apps/chat_node.wasm
 
 # OS
 .DS_Store
-Thumbs.db
-
-docs/
-
-WEAVE.sln
-
-test.o
-test_build.o
