@@ -1,0 +1,13 @@
+{
+    "name": "chat_node",
+    "version": "0.1.0",
+    "permissions": {
+        "publish": [
+            "ext.twitch.chat",
+            "sys.log"
+        ],
+        "subscribe": [
+            "ext.twitch.chat"
+        ]
+    }
+}
