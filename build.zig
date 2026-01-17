@@ -126,4 +126,17 @@ pub fn build(b: *std.Build) void {
     const run_stress_cmd = b.addRunArtifact(stress_exe);
     const stress_step = b.step("stress", "Run memory stress test (Phase 2.1)");
     stress_step.dependOn(&run_stress_cmd.step);
+
+    // --- Pure Zig EventBus Test ---
+    const bus_test_exe = b.addExecutable(.{
+        .name = "bus_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_event_bus.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_bus_test = b.addRunArtifact(bus_test_exe);
+    const bus_test_step = b.step("bus_test", "Run pure Zig EventBus test");
+    bus_test_step.dependOn(&run_bus_test.step);
 }
