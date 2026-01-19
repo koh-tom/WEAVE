@@ -82,6 +82,5 @@ pub fn main() !void {
 
     bus.stop();
     dispatcher_thread.join();
-    wasm_sub.deinit();
     bus.deinit();
 }
