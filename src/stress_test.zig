@@ -61,8 +61,9 @@ pub fn main() !void {
     const meta = try pm.registerPlugin(module_inst, "wasm-apps/manifest.json");
 
     // 購読登録
-    var wasm_sub = try WasmSubscriber.init(module_inst);
-    try bus.subscribe("test.stress", meta.node_id, WasmSubscriber.callback, &wasm_sub);
+    if (meta.subscriber) |*sub| {
+        try bus.subscribe("test.stress", meta.node_id, WasmSubscriber.callback, sub);
+    }
 
     const iterations = 100000;
     std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});

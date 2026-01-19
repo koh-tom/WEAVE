@@ -2,6 +2,7 @@ const std = @import("std");
 const wamr = @import("wamr_libs.zig").wamr;
 const event_bus = @import("event_bus.zig");
 const plugin_manager = @import("plugin_manager.zig");
+const WasmSubscriber = @import("wasm_subscriber.zig").WasmSubscriber;
 
 /// ホスト側で共有されるEventBusへのポインタ
 pub var global_bus: ?*event_bus.EventBus = null;
@@ -53,6 +54,39 @@ export fn os_api_publish(
     return 0;
 }
 
+/// Wasm側から呼び出される subscribe API
+export fn os_api_subscribe(
+    exec_env: wamr.wasm_exec_env_t,
+    topic_ptr: u32,
+    topic_len: u32,
+) u32 {
+    const bus = global_bus orelse return 1;
+    const pm = global_plugin_manager orelse return 1;
+    const module_inst = wamr.wasm_runtime_get_module_inst(exec_env);
+    
+    const meta = pm.getMetadata(module_inst) orelse return 1;
+    const t_native = wamr.wasm_runtime_addr_app_to_native(module_inst, topic_ptr);
+    if (t_native == null) return 1;
+    const topic = @as([*]const u8, @ptrCast(t_native))[0..topic_len];
+
+    // 権限チェック (ACL)
+    if (!meta.manifest_parsed.value.canSubscribe(topic)) {
+        if (enable_log) std.debug.print("Security Error: Plugin '{s}' (Node {}) attempted to subscribe to unauthorized topic '{s}'\n", .{
+            meta.manifest_parsed.value.name,
+            meta.node_id,
+            topic,
+        });
+        return 1;
+    }
+
+    // 購読登録
+    if (meta.subscriber) |*sub| {
+        bus.subscribe(topic, meta.node_id, WasmSubscriber.callback, sub) catch return 1;
+    } else return 1;
+
+    return 0;
+}
+
 /// Wasm側から呼び出される log API
 export fn os_api_log(
     exec_env: wamr.wasm_exec_env_t,
@@ -72,9 +106,10 @@ export fn os_api_log(
 }
 
 /// WAMRに登録するネイティブ関数のリスト
-pub fn getNativeSymbols() [2]wamr.NativeSymbol {
+pub fn getNativeSymbols() [3]wamr.NativeSymbol {
     return [_]wamr.NativeSymbol{
         .{ .symbol = "os_api_publish", .func_ptr = @constCast(@ptrCast(&os_api_publish)), .signature = "(iiiii)i", .attachment = null },
+        .{ .symbol = "os_api_subscribe", .func_ptr = @constCast(@ptrCast(&os_api_subscribe)), .signature = "(ii)i", .attachment = null },
         .{ .symbol = "os_api_log", .func_ptr = @constCast(@ptrCast(&os_api_log)), .signature = "(iii)i", .attachment = null },
     };
 }

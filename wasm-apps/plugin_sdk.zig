@@ -5,8 +5,9 @@
 // ========================================================
 
 // --- Host API (extern宣言) ---
-pub extern fn os_api_publish(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_len: u32, qos: u32) i32;
-pub extern fn os_api_log(level: u32, msg_ptr: u32, msg_len: u32) i32;
+pub extern fn os_api_publish(topic_ptr: [*]const u8, topic_len: usize, payload_ptr: [*]const u8, payload_len: usize, qos: u8) i32;
+extern fn os_api_subscribe(topic_ptr: [*]const u8, topic_len: usize) i32;
+extern fn os_api_log(level: u32, msg_ptr: [*]const u8, msg_len: usize) i32;
 
 // --- バンプアロケータ ---
 // Wasm linear memory の末尾を管理するシンプルなアロケータ。
@@ -50,8 +51,6 @@ export fn os_alloc(size: u32) u32 {
 export fn os_dealloc(ptr: u32, size: u32) void {
     _ = ptr;
     _ = size;
-    // バンプアロケータでは個別 free は no-op
-    // 将来的にはフリーリストへの返却を実装可能
 }
 
 /// ヒープ全体をリセット（イベント処理完了後に呼ぶ想定）
@@ -63,16 +62,15 @@ export fn os_reset_heap() void {
 
 /// ログ出力
 pub fn log(level: u32, msg: []const u8) void {
-    _ = os_api_log(level, @intFromPtr(msg.ptr), @intCast(msg.len));
+    _ = os_api_log(level, msg.ptr, msg.len);
 }
 
 /// イベント発行
-pub fn publish(topic: []const u8, payload: []const u8, qos: u32) void {
-    _ = os_api_publish(
-        @intFromPtr(topic.ptr),
-        @intCast(topic.len),
-        @intFromPtr(payload.ptr),
-        @intCast(payload.len),
-        qos,
-    );
+pub fn publish(topic: []const u8, payload: []const u8, qos: u8) void {
+    _ = os_api_publish(topic.ptr, topic.len, payload.ptr, payload.len, qos);
+}
+
+/// トピック購読
+pub fn subscribe(topic: []const u8) void {
+    _ = os_api_subscribe(topic.ptr, topic.len);
 }
