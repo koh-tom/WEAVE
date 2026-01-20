@@ -276,11 +276,15 @@ pub const EventBus = struct {
         defer _ = self.busy_count.fetchSub(1, .release);
 
         self.mutex.lock();
-        const subs_opt = self.subscribers.get(msg.topic);
+        const subs_snapshot = if (self.subscribers.getPtr(msg.topic)) |list|
+            self.allocator.dupe(Subscriber, list.items) catch null
+        else
+            null;
         self.mutex.unlock();
 
-        if (subs_opt) |subs| {
-            for (subs.items) |sub| {
+        if (subs_snapshot) |snapshot| {
+            defer self.allocator.free(snapshot);
+            for (snapshot) |sub| {
                 if (sub.node_id != msg.source_node_id) {
                     sub.callback(sub.context, msg);
                 }
