@@ -291,4 +291,21 @@ pub const EventBus = struct {
             }
         }
     }
+
+    /// イベント配送ループの実行（別スレッドで呼ぶことを想定）
+    pub fn runDispatcher(self: *EventBus) void {
+        self.registerDispatcherThread();
+        if (self.verbose) std.debug.print("Status: Event Dispatcher Thread started\n", .{});
+        while (true) {
+            if (self.queue.pop()) |msg| {
+                self.dispatch(&msg);
+                msg.deinit(self.allocator); // 配送完了後にヒープメモリを解放
+                self.notifyPotentialIdle(); // アイドル状態の可能性を通知
+            } else {
+                self.notifyPotentialIdle();
+                break;
+            }
+        }
+        if (self.verbose) std.debug.print("Status: Event Dispatcher Thread stopped\n", .{});
+    }
 };

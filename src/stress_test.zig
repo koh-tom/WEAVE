@@ -6,22 +6,6 @@ const WasmSubscriber = @import("wasm_subscriber.zig").WasmSubscriber;
 const WasmRuntime = @import("wasm_runtime.zig").WasmRuntime;
 const PluginManager = @import("plugin_manager.zig").PluginManager;
 
-fn eventDispatcherLoop(bus: *EventBus) void {
-    bus.registerDispatcherThread();
-    std.debug.print("Dispatcher: Started\n", .{});
-    while (true) {
-        if (bus.queue.pop()) |msg| {
-            bus.dispatch(&msg);
-            msg.deinit(bus.allocator);
-            bus.notifyPotentialIdle();
-        } else {
-            bus.notifyPotentialIdle();
-            std.debug.print("Dispatcher: Shutdown\n", .{});
-            break;
-        }
-    }
-}
-
 pub fn main() !void {
     std.debug.print(">>> WEAVE Stress Test: Memory Management (Phase 2.2 Async) <<<\n", .{});
 
@@ -39,7 +23,7 @@ pub fn main() !void {
     host_api.enable_log = false; // パフォーマンスのためログを無効化
 
     // ディスパッチャスレッドを起動
-    const dispatcher_thread = try std.Thread.spawn(.{}, eventDispatcherLoop, .{&bus});
+    const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
     
     // Wasmランタイムの初期化
     var runtime = try WasmRuntime.init();

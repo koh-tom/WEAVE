@@ -19,23 +19,8 @@ pub fn main() !void {
     var bus = EventBus.init(allocator, 10);
     defer bus.deinit();
 
-    // ディスパッチャスレッドは立てずに、手動でテストするか、
-    // あるいはスレッドを立ててテストする。ここではスレッドを立てる。
-    const dispatcher_thread = try std.Thread.spawn(.{}, struct {
-        fn run(b: *EventBus) void {
-            b.registerDispatcherThread();
-            while (true) {
-                if (b.queue.pop()) |msg| {
-                    b.dispatch(&msg);
-                    msg.deinit(b.allocator);
-                    b.notifyPotentialIdle();
-                } else {
-                    b.notifyPotentialIdle();
-                    break;
-                }
-            }
-        }
-    }.run, .{&bus});
+    // ディスパッチャスレッドを立てる
+    const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
 
     // Node 2 が購読 (contextはnull)
     try bus.subscribe("ext.twitch.chat", 2, my_callback, null);

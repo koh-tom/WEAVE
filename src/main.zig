@@ -6,23 +6,6 @@ const WasmSubscriber = @import("wasm_subscriber.zig").WasmSubscriber;
 const WasmRuntime = @import("wasm_runtime.zig").WasmRuntime;
 const PluginManager = @import("plugin_manager.zig").PluginManager;
 
-/// イベントディスパッチャスレッドのメインループ
-fn eventDispatcherLoop(bus: *EventBus) void {
-    bus.registerDispatcherThread();
-    std.debug.print("Status: Event Dispatcher Thread started\n", .{});
-    while (true) {
-        if (bus.queue.pop()) |msg| {
-            bus.dispatch(&msg);
-            msg.deinit(bus.allocator); // 配送完了後にヒープメモリを解放
-            bus.notifyPotentialIdle(); // アイドル状態の可能性を通知
-        } else {
-            bus.notifyPotentialIdle();
-            break;
-        }
-    }
-    std.debug.print("Status: Event Dispatcher Thread stopped\n", .{});
-}
-
 pub fn main() !void {
     std.debug.print("========================================\n", .{});
     std.debug.print("   WEAVE: Streaming Event OS Core Daemon\n", .{});
@@ -41,7 +24,7 @@ pub fn main() !void {
     host_api.global_bus = &bus;
     host_api.global_plugin_manager = &pm;
 
-    const dispatcher_thread = try std.Thread.spawn(.{}, eventDispatcherLoop, .{&bus});
+    const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
 
     // 2. Wasmランタイムの初期化
     std.debug.print("Status: Initializing Wasm Runtime...\n", .{});
