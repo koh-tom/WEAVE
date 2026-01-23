@@ -53,7 +53,8 @@ pub fn main() !void {
 
     // 3. プラグインのロードとインスタンス化
     std.debug.print("Status: Loading and Instantiating Wasm modules...\n", .{});
-    const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, "wasm-apps/chat_node.wasm", 1024 * 1024);
+    const wasm_path = "wasm-apps/chat_node.wasm";
+    const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
     defer allocator.free(wasm_buffer);
 
     const module = try runtime.loadModule(wasm_buffer);
@@ -62,11 +63,19 @@ pub fn main() !void {
     const module_inst = try runtime.instantiate(module, 64 * 1024, 64 * 1024);
     defer wamr.wasm_runtime_deinstantiate(module_inst);
 
+    // Wasmパスからマニフェストパスを生成 (.wasm -> .json)
+    var manifest_path_buf: [256]u8 = undefined;
+    const manifest_path = if (std.mem.endsWith(u8, wasm_path, ".wasm"))
+        try std.fmt.bufPrint(&manifest_path_buf, "{s}.json", .{wasm_path[0 .. wasm_path.len - 5]})
+    else
+        "wasm-apps/manifest.json"; // fallback
+
     // マニフェストの登録
-    const meta = try pm.registerPlugin(module_inst, "wasm-apps/manifest.json");
-    std.debug.print("Status: Registered plugin '{s}' (Version: {s}) as Node {}\n", .{
+    const meta = try pm.registerPlugin(module_inst, manifest_path);
+    std.debug.print("Status: Registered plugin '{s}' (Version: {s}) from {s} as Node {}\n", .{
         meta.manifest_parsed.value.name,
         meta.manifest_parsed.value.version,
+        manifest_path,
         meta.node_id,
     });
 
