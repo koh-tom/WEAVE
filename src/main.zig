@@ -85,7 +85,14 @@ pub fn main() !void {
         const env = wamr.wasm_runtime_create_exec_env(module_inst, 16384);
         defer wamr.wasm_runtime_destroy_exec_env(env);
         var argv = [_]u32{0};
-        _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
+        if (!wamr.wasm_runtime_call_wasm(env, func, 0, &argv)) {
+            return error.PluginInitCallFailed;
+        }
+        const result = @as(i32, @bitCast(argv[0]));
+        if (result != 0) {
+            std.debug.print("Error: Plugin on_init failed with code {}\n", .{result});
+            return error.PluginInitFailed;
+        }
     }
 
     // 初期購読 (マニフェストに従って自動登録することも可能だが、ここでは明示的に呼び出す)
