@@ -50,12 +50,10 @@ pub fn main() !void {
         "wasm-apps/manifest.json"; // fallback
 
     // マニフェストの登録
-    const meta = try pm.registerPlugin(module_inst, manifest_path);
+    _ = try pm.registerPlugin(module_inst, manifest_path);
 
-    // 購読登録
-    if (meta.subscriber) |*sub| {
-        try bus.subscribe("test.stress", meta.node_id, WasmSubscriber.callback, sub);
-    }
+    // マニフェストに基づいた購読の自動登録
+    try pm.applyManifestSubscriptions(module_inst, &bus);
 
     const iterations = 100000;
     std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});

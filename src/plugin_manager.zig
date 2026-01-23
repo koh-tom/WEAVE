@@ -58,4 +58,15 @@ pub const PluginManager = struct {
     pub fn getMetadata(self: *PluginManager, instance: wamr.wasm_module_inst_t) ?*PluginMetadata {
         return self.plugins.get(instance);
     }
+
+    /// マニフェストに記載された購読トピックをEventBusに自動登録する
+    pub fn applyManifestSubscriptions(self: *PluginManager, instance: wamr.wasm_module_inst_t, bus: anytype) !void {
+        const meta = self.getMetadata(instance) orelse return error.PluginNotFound;
+        const sub_ptr = if (meta.subscriber) |*s| s else return;
+
+        for (meta.manifest_parsed.value.permissions.subscribe) |topic| {
+            // Note: EventBus.subscribe は現状完全一致のみサポート
+            try bus.subscribe(topic, meta.node_id, WasmSubscriber.callback, sub_ptr);
+        }
+    }
 };

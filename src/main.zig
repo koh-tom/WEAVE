@@ -78,10 +78,8 @@ pub fn main() !void {
         }
     }
 
-    // 初期購読 (マニフェストに従って自動登録することも可能だが、ここでは明示的に呼び出す)
-    if (meta.subscriber) |*sub| {
-        try bus.subscribe("ext.twitch.chat", meta.node_id, WasmSubscriber.callback, sub);
-    }
+    // マニフェストに基づいた購読の自動登録
+    try pm.applyManifestSubscriptions(module_inst, &bus);
 
     // 5. 実行と待機
     std.debug.print("Status: Running...\n", .{});
