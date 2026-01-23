@@ -2,8 +2,6 @@ const std = @import("std");
 const wamr = @import("wamr_libs.zig").wamr;
 
 pub const WasmRuntime = struct {
-    allocator: std.mem.Allocator,
-
     pub fn init() !WasmRuntime {
         var init_args = std.mem.zeroInit(wamr.RuntimeInitArgs, .{
             .mem_alloc_type = wamr.Alloc_With_System_Allocator,
@@ -11,7 +9,7 @@ pub const WasmRuntime = struct {
         if (!wamr.wasm_runtime_full_init(&init_args)) {
             return error.RuntimeInitFailed;
         }
-        return WasmRuntime{ .allocator = @import("std").heap.page_allocator }; // Dummy, not used for now
+        return WasmRuntime{};
     }
 
     pub fn deinit(self: *WasmRuntime) void {
