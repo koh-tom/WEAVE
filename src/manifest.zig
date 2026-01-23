@@ -25,7 +25,7 @@ pub const Manifest = struct {
     /// 特定のトピックへのPublish権限があるかチェック
     pub fn canPublish(self: Manifest, topic: []const u8) bool {
         for (self.permissions.publish) |p| {
-            if (std.mem.eql(u8, p, topic) or std.mem.eql(u8, p, "*")) return true;
+            if (matchTopic(p, topic)) return true;
         }
         return false;
     }
@@ -33,9 +33,22 @@ pub const Manifest = struct {
     /// 特定のトピックへのSubscribe権限があるかチェック
     pub fn canSubscribe(self: Manifest, topic: []const u8) bool {
         for (self.permissions.subscribe) |s| {
-            if (std.mem.eql(u8, s, topic) or std.mem.eql(u8, s, "*")) return true;
+            if (matchTopic(s, topic)) return true;
         }
         return false;
+    }
+
+    /// トピックのマッチング判定
+    /// - 完全一致: "a.b.c" == "a.b.c"
+    /// - グローバルワイルドカード: "*" matches anything
+    /// - プレフィックスワイルドカード: "a.b.*" matches "a.b.c", "a.b.d", etc.
+    fn matchTopic(pattern: []const u8, topic: []const u8) bool {
+        if (std.mem.eql(u8, pattern, "*")) return true;
+        if (std.mem.endsWith(u8, pattern, ".*")) {
+            const prefix = pattern[0 .. pattern.len - 1]; // "a.b."
+            return std.mem.startsWith(u8, topic, prefix);
+        }
+        return std.mem.eql(u8, pattern, topic);
     }
 };
 
@@ -59,4 +72,9 @@ test "manifest parse test" {
 
     try std.testing.expectEqualStrings("test-plugin", parsed.value.name);
     try std.testing.expect(parsed.value.canPublish("sensor.temp"));
+    try std.testing.expect(parsed.value.canPublish("log.info")); // wildcard log.*
+    try std.testing.expect(parsed.value.canPublish("log.error"));
+    try std.testing.expect(!parsed.value.canPublish("sensor.hum"));
+    try std.testing.expect(parsed.value.canSubscribe("command.start")); // wildcard command.*
+    try std.testing.expect(!parsed.value.canSubscribe("event.any"));
 }
