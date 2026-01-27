@@ -15,9 +15,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // 1. 基盤の初期化 (EventBus, PluginManager)
+    // 1. Wasmランタイムの初期化
+    var runtime = try WasmRuntime.init();
+    defer runtime.deinit();
+
+    // 2. 基盤の初期化 (EventBus, PluginManager)
     std.debug.print("Status: Initializing EventBus & PluginManager...\n", .{});
     var bus = EventBus.init(allocator, 1000);
+    defer bus.deinit();
     var pm = PluginManager.init(allocator);
     defer pm.deinit();
 
@@ -25,11 +30,6 @@ pub fn main() !void {
     host_api.global_plugin_manager = &pm;
 
     const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
-
-    // 2. Wasmランタイムの初期化
-    std.debug.print("Status: Initializing Wasm Runtime...\n", .{});
-    var runtime = try WasmRuntime.init();
-    defer runtime.deinit();
 
     var symbols = host_api.getNativeSymbols();
     try runtime.registerNatives("env", &symbols);
@@ -92,5 +92,4 @@ pub fn main() !void {
     std.debug.print("Status: Shutting down...\n", .{});
     bus.stop();
     dispatcher_thread.join();
-    bus.deinit();
 }

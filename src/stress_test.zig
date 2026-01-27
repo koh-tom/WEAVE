@@ -13,6 +13,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // 1. Wasmランタイムの初期化
+    var runtime = try WasmRuntime.init();
+    defer runtime.deinit();
+
     var bus = EventBus.init(allocator, 1000);
     bus.verbose = false;
     var pm = PluginManager.init(allocator);
@@ -25,9 +29,7 @@ pub fn main() !void {
     // ディスパッチャスレッドを起動
     const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
     
-    // Wasmランタイムの初期化
-    var runtime = try WasmRuntime.init();
-    defer runtime.deinit();
+
 
     var symbols = host_api.getNativeSymbols();
     try runtime.registerNatives("env", &symbols);
@@ -72,5 +74,4 @@ pub fn main() !void {
 
     bus.stop();
     dispatcher_thread.join();
-    bus.deinit();
 }
