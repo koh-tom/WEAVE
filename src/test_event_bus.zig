@@ -1,44 +1,81 @@
 const std = @import("std");
-const event_bus = @import("event_bus.zig");
-const EventBus = event_bus.EventBus;
-const QoS = event_bus.QoS;
+const EventBus = @import("event_bus.zig").EventBus;
+const EventMessage = @import("event_bus.zig").EventMessage;
 
-fn my_callback(context: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+fn my_callback(context: ?*anyopaque, msg: *const EventMessage) void {
     _ = context;
     std.debug.print(">>> Callback received message! ID: {}, Topic: {s}, Payload: {s}\n", .{ msg.id, msg.topic, msg.payload });
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+var receive_count: u32 = 0;
+fn count_callback(context: ?*anyopaque, msg: *const EventMessage) void {
+    _ = context;
+    _ = msg;
+    receive_count += 1;
+}
 
-    std.debug.print("Testing Event Bus (Pure Zig)...\n", .{});
-
-    // 容量10のバスを初期化
+test "EventBus: Basic Delivery" {
+    const allocator = std.testing.allocator;
     var bus = EventBus.init(allocator, 10);
     defer bus.deinit();
 
-    // ディスパッチャスレッドを立てる
     const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
 
-    // Node 2 が購読 (contextはnull)
-    try bus.subscribe("ext.twitch.chat", 2, my_callback, null);
-
-    // Node 1 が発行
-    std.debug.print("Publishing from Node 1...\n", .{});
-    try bus.publish("ext.twitch.chat", "{\"user\": \"koh\", \"msg\": \"hello!\"}", .BestEffort, 1);
-
-    // 全ての配送が終わるのを待つ
+    receive_count = 0;
+    try bus.subscribe("test.topic", 100, count_callback, null);
+    try bus.publish("test.topic", "hello", .Reliable, 0);
+    
     bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 1), receive_count);
 
-    // Node 2 が発行 (自分自身には届かないはずなので、ログは出ないはず)
-    std.debug.print("Publishing from Node 2 (Self-loop check)...\n", .{});
-    try bus.publish("ext.twitch.chat", "{\"user\": \"bot\", \"msg\": \"hi koh\"}", .BestEffort, 2);
-
-    bus.waitIdle();
-
-    std.debug.print("Test Finished. Shutting down...\n", .{});
     bus.stop();
     dispatcher_thread.join();
+}
+
+test "EventBus: Multiple Subscribers" {
+    const allocator = std.testing.allocator;
+    var bus = EventBus.init(allocator, 10);
+    defer bus.deinit();
+
+    const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
+
+    receive_count = 0;
+    try bus.subscribe("broadcast", 101, count_callback, null);
+    try bus.subscribe("broadcast", 102, count_callback, null);
+    try bus.subscribe("broadcast", 103, count_callback, null);
+
+    try bus.publish("broadcast", "everyone see this", .Reliable, 0);
+    
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 3), receive_count);
+
+    bus.stop();
+    dispatcher_thread.join();
+}
+
+test "EventBus: QoS BestEffort Drop" {
+    const allocator = std.testing.allocator;
+    // 小さいキューサイズで作成
+    var bus = EventBus.init(allocator, 2);
+    defer bus.deinit();
+
+    // ディスパッチャを起動せずに（＝消費させずに）キューを埋める
+    try bus.publish("drop.me", "1", .BestEffort, 0);
+    try bus.publish("drop.me", "2", .BestEffort, 0);
+    
+    // 3つ目はドロップされるはず
+    try bus.publish("drop.me", "3", .BestEffort, 0);
+    
+    try std.testing.expectEqual(@as(usize, 2), bus.queue.count);
+
+    // ディスパッチャを起動して空にする
+    const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
+    bus.waitIdle();
+
+    bus.stop();
+    dispatcher_thread.join();
+}
+
+pub fn main() !void {
+    std.debug.print("EventBus Tests completed (via main)\n", .{});
 }

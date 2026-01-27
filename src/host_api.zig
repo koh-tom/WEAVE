@@ -11,6 +11,20 @@ pub var global_plugin_manager: ?*plugin_manager.PluginManager = null;
 /// ログ出力を有効にするかどうか
 pub var enable_log: bool = true;
 
+/// WEAVE API 戻り値定義 (Wasm側と共通)
+pub const WEAVE_RESULT = enum(i32) {
+    SUCCESS = 0,
+    ERROR_UNKNOWN = 1,
+    ERROR_PERMISSION_DENIED = 2,
+    ERROR_INVALID_PARAMETER = 3,
+    ERROR_QUEUE_FULL = 4,
+    ERROR_NOT_FOUND = 5,
+
+    pub fn toI32(self: WEAVE_RESULT) i32 {
+        return @intFromEnum(self);
+    }
+};
+
 /// Wasm側から呼び出される publish API
 export fn os_api_publish(
     exec_env: wamr.wasm_exec_env_t,
