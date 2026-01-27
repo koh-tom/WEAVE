@@ -12,14 +12,25 @@ pub const Manifest = struct {
 
     /// JSONファイルからマニフェストを読み込む
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(Manifest) {
-        const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024);
-        defer allocator.free(content);
+        const file_content = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+        defer allocator.free(file_content);
 
-        // .allocate = .alloc_always を指定して、入力バッファから文字列をコピーさせる
-        return std.json.parseFromSlice(Manifest, allocator, content, .{
+        const parsed = try std.json.parseFromSlice(Manifest, allocator, file_content, .{
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
         });
+        errdefer parsed.deinit();
+
+        // バリデーションの実行
+        try parsed.value.validate();
+
+        return parsed;
+    }
+
+    /// マニフェストの内容を検証する
+    pub fn validate(self: Manifest) !void {
+        if (self.name.len == 0) return error.ManifestNameEmpty;
+        if (self.version.len == 0) return error.ManifestVersionEmpty;
     }
 
     /// 特定のトピックへのPublish権限があるかチェック
@@ -77,4 +88,20 @@ test "manifest parse test" {
     try std.testing.expect(!parsed.value.canPublish("sensor.hum"));
     try std.testing.expect(parsed.value.canSubscribe("command.start")); // wildcard command.*
     try std.testing.expect(!parsed.value.canSubscribe("event.any"));
+}
+
+test "manifest: invalid manifest" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "name": "",
+        \\  "version": "1.0.0",
+        \\  "permissions": { "publish": [], "subscribe": [] }
+        \\}
+    ;
+
+    const parsed = std.json.parseFromSlice(Manifest, allocator, json, .{}) catch unreachable;
+    defer parsed.deinit();
+
+    try std.testing.expectError(error.ManifestNameEmpty, parsed.value.validate());
 }
