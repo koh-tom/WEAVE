@@ -71,7 +71,7 @@ export fn os_reset_heap() void {
 // --- ヘルパー関数 ---
 
 /// ログ出力
-pub fn log(level: u32, msg: []const u8) void {
+pub fn log(level: i32, msg: []const u8) void {
     _ = os_api_log(level, msg.ptr, msg.len);
 }
 
