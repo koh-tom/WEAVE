@@ -7,7 +7,7 @@
             "sys.log"
         ],
         "subscribe": [
-            "ext.twitch.chat",
+            "ext.twitch.*",
             "test.stress"
         ]
     }
