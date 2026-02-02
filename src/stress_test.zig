@@ -18,6 +18,7 @@ pub fn main() !void {
     defer runtime.deinit();
 
     var bus = EventBus.init(allocator, 1000);
+    defer bus.deinit();
     bus.verbose = false;
     var pm = PluginManager.init(allocator);
     defer pm.deinit();
