@@ -4,7 +4,8 @@
     "permissions": {
         "publish": [
             "ext.twitch.chat",
-            "sys.log"
+            "sys.log",
+            "core.node.status"
         ],
         "subscribe": [
             "ext.twitch.*",

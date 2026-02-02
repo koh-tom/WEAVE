@@ -146,6 +146,8 @@ pub const EventBus = struct {
     mutex: std.Thread.Mutex,
     cond_idle: std.Thread.Condition, // 追加: アイドル状態通知用
     
+    last_messages: std.StringHashMap(EventMessage), // 追加: Transient用の最新メッセージ保持
+    
     // デッドロック回避用
     dispatcher_thread_id: std.atomic.Value(usize),
     // 配送中のメッセージ数
@@ -156,6 +158,7 @@ pub const EventBus = struct {
             .allocator = allocator,
             .subscribers = std.StringHashMap(std.ArrayListUnmanaged(Subscriber)).init(allocator),
             .queue = EventQueue.init(allocator, queue_capacity),
+            .last_messages = std.StringHashMap(EventMessage).init(allocator),
             .next_msg_id = 1,
             .verbose = true,
             .mutex = .{},
@@ -176,6 +179,14 @@ pub const EventBus = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.subscribers.deinit();
+
+        var last_it = self.last_messages.iterator();
+        while (last_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.last_messages.deinit();
+
         self.queue.deinit();
     }
 
@@ -231,6 +242,14 @@ pub const EventBus = struct {
             .callback = callback,
         });
         if (self.verbose) std.debug.print("Node {} subscribed to topic '{s}'\n", .{ node_id, topic });
+
+        // Transient QoS の最新メッセージがあれば即座に配送
+        if (self.last_messages.get(topic)) |msg| {
+            if (msg.source_node_id != node_id) {
+                if (self.verbose) std.debug.print("QoS: Dispatching Transient message to new subscriber (Topic: {s})\n", .{topic});
+                callback(context, &msg);
+            }
+        }
     }
 
     pub fn publish(
@@ -254,9 +273,23 @@ pub const EventBus = struct {
             .payload = payload,
         };
 
+        // Transient QoS の場合は最新メッセージとして保存
+        if (qos == .Transient) {
+            self.mutex.lock();
+            const gop = try self.last_messages.getOrPut(topic);
+            if (!gop.found_existing) {
+                gop.key_ptr.* = try self.allocator.dupe(u8, topic);
+            } else {
+                gop.value_ptr.deinit(self.allocator);
+            }
+            gop.value_ptr.* = try msg.clone(self.allocator);
+            self.mutex.unlock();
+        }
+
         var block = (qos == .Reliable);
         const tid = self.dispatcher_thread_id.load(.monotonic);
         if (tid != 0 and tid == @as(usize, @intCast(std.Thread.getCurrentId()))) {
+            // ディスパッチャスレッド自身によるPublishはデッドロック回避のためブロックしない
             block = false;
         }
 
@@ -309,3 +342,76 @@ pub const EventBus = struct {
         if (self.verbose) std.debug.print("Status: Event Dispatcher Thread stopped\n", .{});
     }
 };
+
+test "EventBus QoS: Reliable blocks when full" {
+    const allocator = std.testing.allocator;
+    var bus = EventBus.init(allocator, 2);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    try bus.publish("test", "1", .BestEffort, 1);
+    try bus.publish("test", "2", .BestEffort, 1);
+
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(b: *EventBus) void {
+            b.publish("test", "3", .Reliable, 1) catch {};
+        }
+    }.run, .{&bus});
+
+    // 待機
+    std.Thread.sleep(100 * std.time.ns_per_ms);
+    
+    // まだ 2 つのはず
+    bus.queue.mutex.lock();
+    try std.testing.expectEqual(@as(usize, 2), bus.queue.count);
+    bus.queue.mutex.unlock();
+
+    // 1つ取り出す
+    const m1 = bus.queue.pop().?;
+    m1.deinit(allocator);
+
+    thread.join();
+
+    // 3つ目が追加されているはず
+    bus.queue.mutex.lock();
+    try std.testing.expectEqual(@as(usize, 2), bus.queue.count);
+    bus.queue.mutex.unlock();
+}
+
+test "EventBus QoS: BestEffort drops when full" {
+    const allocator = std.testing.allocator;
+    var bus = EventBus.init(allocator, 1);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    try bus.publish("test", "1", .BestEffort, 1);
+    // これはドロップされる
+    try bus.publish("test", "2", .BestEffort, 1);
+
+    bus.queue.mutex.lock();
+    try std.testing.expectEqual(@as(usize, 1), bus.queue.count);
+    bus.queue.mutex.unlock();
+}
+
+test "EventBus QoS: Transient stores last message and dispatches to new subscriber" {
+    const allocator = std.testing.allocator;
+    var bus = EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    try bus.publish("state", "v1", .Transient, 1);
+    try bus.publish("state", "v2", .Transient, 1);
+
+    var received: bool = false;
+    const S = struct {
+        fn cb(ctx: ?*anyopaque, msg: *const EventMessage) void {
+            const rec_ptr = @as(*bool, @ptrCast(@alignCast(ctx)));
+            if (std.mem.eql(u8, msg.payload, "v2")) {
+                rec_ptr.* = true;
+            }
+        }
+    };
+    try bus.subscribe("state", 2, S.cb, &received);
+
+    try std.testing.expect(received);
+}

@@ -15,7 +15,13 @@ pub const Result = enum(i32) {
     ERROR_NOT_FOUND = 5,
 };
 
-extern fn os_api_publish(topic_ptr: [*]const u8, payload_ptr: [*]const u8, payload_len: u32) i32;
+pub const QoS = enum(u32) {
+    BestEffort = 0,
+    Reliable = 1,
+    Transient = 2,
+};
+
+extern fn os_api_publish(topic_ptr: [*]const u8, payload_ptr: [*]const u8, payload_len: u32, qos: u32) i32;
 extern fn os_api_subscribe(topic_ptr: [*]const u8) i32;
 extern fn os_api_log(level: i32, msg_ptr: [*]const u8, msg_len: u32) void;
 
@@ -76,8 +82,8 @@ pub fn log(level: i32, msg: []const u8) void {
 }
 
 /// 指定したトピックにイベントを発行する
-pub fn publish(topic: []const u8, payload: []const u8) Result {
-    const res = os_api_publish(topic.ptr, payload.ptr, @intCast(payload.len));
+pub fn publish(topic: []const u8, payload: []const u8, qos: QoS) Result {
+    const res = os_api_publish(topic.ptr, payload.ptr, @intCast(payload.len), @intFromEnum(qos));
     return @enumFromInt(res);
 }
 

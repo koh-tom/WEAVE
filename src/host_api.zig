@@ -31,6 +31,7 @@ export fn os_api_publish(
     topic_ptr: u32,
     payload_ptr: u32,
     payload_len: u32,
+    qos: u32,
 ) i32 {
     const bus = global_bus orelse return WEAVE_RESULT.ERROR_UNKNOWN.toI32();
     const pm = global_plugin_manager orelse return WEAVE_RESULT.ERROR_UNKNOWN.toI32();
@@ -60,7 +61,9 @@ export fn os_api_publish(
         return WEAVE_RESULT.ERROR_PERMISSION_DENIED.toI32();
     }
 
-    bus.publish(topic, payload, .BestEffort, meta.node_id) catch |err| {
+    const qos_val = if (qos >= 3) event_bus.QoS.BestEffort else @as(event_bus.QoS, @enumFromInt(@as(u8, @intCast(qos))));
+
+    bus.publish(topic, payload, qos_val, meta.node_id) catch |err| {
         if (err == error.QueueFull) return WEAVE_RESULT.ERROR_QUEUE_FULL.toI32();
         return WEAVE_RESULT.ERROR_UNKNOWN.toI32();
     };
@@ -128,7 +131,7 @@ export fn os_api_log(
 ///   log:       (level: i32, msg_ptr: i32, msg_len: i32) -> void             = "(iii)"
 pub fn getNativeSymbols() [3]wamr.NativeSymbol {
     return [_]wamr.NativeSymbol{
-        .{ .symbol = "os_api_publish", .func_ptr = @constCast(@ptrCast(&os_api_publish)), .signature = "(iii)i", .attachment = null },
+        .{ .symbol = "os_api_publish", .func_ptr = @constCast(@ptrCast(&os_api_publish)), .signature = "(iiii)i", .attachment = null },
         .{ .symbol = "os_api_subscribe", .func_ptr = @constCast(@ptrCast(&os_api_subscribe)), .signature = "(i)i", .attachment = null },
         .{ .symbol = "os_api_log", .func_ptr = @constCast(@ptrCast(&os_api_log)), .signature = "(iii)", .attachment = null },
     };
