@@ -5,6 +5,13 @@ const host_api = @import("host_api.zig");
 const WasmSubscriber = @import("wasm_subscriber.zig").WasmSubscriber;
 const WasmRuntime = @import("wasm_runtime.zig").WasmRuntime;
 const PluginManager = @import("plugin_manager.zig").PluginManager;
+const TwitchAdapter = @import("adapters/twitch.zig").TwitchAdapter;
+
+fn runTwitch(t: *TwitchAdapter) void {
+    t.run() catch |err| {
+        std.debug.print("TwitchAdapter Error: {any}\n", .{err});
+    };
+}
 
 pub fn main() !void {
     std.debug.print("========================================\n", .{});
@@ -30,6 +37,11 @@ pub fn main() !void {
     host_api.global_plugin_manager = &pm;
 
     const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
+
+    // Twitchアダプタの起動
+    var twitch = TwitchAdapter.init(allocator, &bus, 1, "xqc");
+    const twitch_thread = try std.Thread.spawn(.{}, runTwitch, .{&twitch});
+    defer twitch.deinit();
 
     var symbols = host_api.getNativeSymbols();
     try runtime.registerNatives("env", &symbols);
@@ -81,12 +93,9 @@ pub fn main() !void {
     // マニフェストに基づいた購読の自動登録
     try pm.applyManifestSubscriptions(module_inst, &bus);
 
-    // 5. 実行と待機
-    std.debug.print("Status: Running...\n", .{});
-    try bus.publish("ext.twitch.chat", "Hello WEAVE!", .Reliable, 0);
-    bus.waitIdle();
-
-    std.debug.print("Status: Success\n", .{});
+    // 5. デーモンモード — Twitchアダプタが終了するまで待機
+    std.debug.print("Status: Running... (Press Ctrl+C to stop)\n", .{});
+    twitch_thread.join();
 
     // 6. シャットダウン
     std.debug.print("Status: Shutting down...\n", .{});
