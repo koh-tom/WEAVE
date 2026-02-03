@@ -34,12 +34,12 @@ pub const Transport = struct {
 /// トランスポートを管理するためのコンテナ
 pub const TransportManager = struct {
     allocator: std.mem.Allocator,
-    transports: std.ArrayList(Transport),
+    transports: std.ArrayListUnmanaged(Transport),
 
     pub fn init(allocator: std.mem.Allocator) TransportManager {
         return TransportManager{
             .allocator = allocator,
-            .transports = std.ArrayList(Transport).init(allocator),
+            .transports = .{},
         };
     }
 
@@ -47,10 +47,20 @@ pub const TransportManager = struct {
         for (self.transports.items) |t| {
             t.deinit();
         }
-        self.transports.deinit();
+        self.transports.deinit(self.allocator);
     }
 
     pub fn register(self: *TransportManager, transport: Transport) !void {
-        try self.transports.append(transport);
+        try self.transports.append(self.allocator, transport);
+        std.debug.print("Transport: Registered '{s}'\n", .{transport.name()});
+    }
+
+    /// すべてのトランスポートにメッセージをブロードキャストする（ゲートウェイ用）
+    pub fn broadcast(self: *TransportManager, topic: []const u8, payload: []const u8, qos: event_bus.QoS) void {
+        for (self.transports.items) |t| {
+            t.send(topic, payload, qos) catch |err| {
+                std.debug.print("Transport: Failed to send to '{s}': {any}\n", .{ t.name(), err });
+            };
+        }
     }
 };

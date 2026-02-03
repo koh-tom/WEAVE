@@ -152,6 +152,12 @@ pub const EventBus = struct {
     dispatcher_thread_id: std.atomic.Value(usize),
     // 配送中のメッセージ数
     busy_count: std.atomic.Value(usize),
+    
+    /// 全イベントの配送時に呼ばれるグローバル・オブザーバー（トランスポート等で使用）
+    global_observer: ?struct {
+        ctx: *anyopaque,
+        callback: *const fn (ctx: *anyopaque, msg: *const EventMessage) void,
+    } = null,
 
     pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) EventBus {
         return EventBus{
@@ -322,6 +328,11 @@ pub const EventBus = struct {
                     sub.callback(sub.context, msg);
                 }
             }
+        }
+
+        // グローバル・オブザーバーへの通知
+        if (self.global_observer) |obs| {
+            obs.callback(obs.ctx, msg);
         }
     }
 
