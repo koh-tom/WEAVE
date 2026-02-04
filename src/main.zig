@@ -4,10 +4,17 @@ const host_api = @import("host_api.zig");
 const TwitchAdapter = @import("adapters/twitch.zig").TwitchAdapter;
 const Core = @import("core.zig").Core;
 const LogTransport = @import("transports/log_transport.zig").LogTransport;
+const WsGateway = @import("transports/ws_gateway.zig").WsGateway;
 
 fn runTwitch(t: *TwitchAdapter) void {
     t.run() catch |err| {
         std.debug.print("TwitchAdapter Error: {any}\n", .{err});
+    };
+}
+
+fn runWsGateway(w: *WsGateway) void {
+    w.run() catch |err| {
+        std.debug.print("WsGateway Error: {any}\n", .{err});
     };
 }
 
@@ -30,9 +37,16 @@ pub fn main() !void {
     // 2. トランスポートの設定
     var log_transport = LogTransport.init("DebugLogger");
     try core.tm.register(log_transport.asTransport());
+
+    var ws_gateway = try WsGateway.init(allocator, 8080);
+    defer ws_gateway.deinit();
+    try core.tm.register(ws_gateway.transport());
+
     try core.setupGateway();
 
     const dispatcher_thread = try std.Thread.spawn(.{}, @import("event_bus.zig").EventBus.runDispatcher, .{&core.bus});
+    const ws_thread = try std.Thread.spawn(.{}, runWsGateway, .{ws_gateway});
+    ws_thread.detach();
 
     // Twitchアダプタの起動 (Native Node)
     var twitch = TwitchAdapter.init(allocator, &core.bus, 1, "SqLA");
