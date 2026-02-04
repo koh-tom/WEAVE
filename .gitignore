@@ -1,18 +1,35 @@
 # Zig
 .zig-cache/
-.zig-out/
 zig-cache/
 zig-out/
 
 # Build Artifacts
 libevent_bus.a
+WEAVE
 main
 stress_test
 bus_test
+
+# Logs
+*.log
+build_err.log
+
+# Node.js (Tests & Tools)
+node_modules/
+package.json
+package-lock.json
+npm-debug.log*
+
+# Temporary Test Scripts
+test_ws.js
+test_node.js
 
 # Wasm Artifacts
 wasm-apps/*.wasm
 !wasm-apps/chat_node.wasm
 
-# OS
+# IDEs & OS
+.vscode/
+.idea/
 .DS_Store
+.history/
