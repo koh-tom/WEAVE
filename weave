@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# WEAVE CLI Wrapper
+# ROS2-like command interface for WEAVE Event OS
+
+case "$1" in
+    "build")
+        echo "Building WEAVE..."
+        zig build
+        ;;
+    "run")
+        echo "Starting WEAVE Core..."
+        zig build run
+        ;;
+    "test-node")
+        echo "Starting Remote Node (Node.js)..."
+        node test_node.js
+        ;;
+    "monitor")
+        echo "Connecting to WsGateway Monitor..."
+        if ! command -v wscat &> /dev/null; then
+            echo "Error: 'wscat' not found. Please install it with 'npm install -g wscat'."
+            exit 1
+        fi
+        wscat -c ws://localhost:8080
+        ;;
+    "stress")
+        echo "Running memory stress test..."
+        zig build stress
+        ;;
+    "bus-test")
+        echo "Running EventBus logic test..."
+        zig build bus_test
+        ;;
+    *)
+        echo "Usage: weave <command>"
+        echo ""
+        echo "Commands:"
+        echo "  build       Build the WEAVE core"
+        echo "  run         Run the WEAVE core"
+        echo "  test-node   Run a sample remote node (JavaScript)"
+        echo "  monitor     Monitor all events via WsGateway (requires wscat)"
+        echo "  stress      Run memory stress test"
+        echo "  bus-test    Run internal EventBus tests"
+        ;;
+esac
