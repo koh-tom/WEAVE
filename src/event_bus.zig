@@ -136,6 +136,12 @@ pub const EventQueue = struct {
     }
 };
 
+pub const IntrospectionLevel = enum {
+    off,
+    metadata,
+    contents,
+};
+
 /// Event Bus コア実装 (スレッドセーフ)
 pub const EventBus = struct {
     allocator: std.mem.Allocator,
@@ -159,6 +165,7 @@ pub const EventBus = struct {
         callback: *const fn (ctx: *anyopaque, msg: *const EventMessage) void,
     } = null,
     graph: ?*@import("graph.zig").SystemGraph = null,
+    introspection_level: IntrospectionLevel = .metadata,
 
     pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) EventBus {
         return EventBus{
@@ -173,6 +180,7 @@ pub const EventBus = struct {
             .dispatcher_thread_id = std.atomic.Value(usize).init(0),
             .busy_count = std.atomic.Value(usize).init(0),
             .graph = null,
+            .introspection_level = .metadata,
         };
     }
 
@@ -273,6 +281,20 @@ pub const EventBus = struct {
         qos: QoS,
         source_node_id: u32,
     ) !void {
+        // システム制御トピックの処理
+        if (std.mem.eql(u8, topic, "core.system.introspection")) {
+            if (std.mem.eql(u8, payload, "\"OFF\"") or std.mem.eql(u8, payload, "OFF")) {
+                self.introspection_level = .off;
+                std.debug.print("Introspection: Level changed to OFF\n", .{});
+            } else if (std.mem.eql(u8, payload, "\"METADATA\"") or std.mem.eql(u8, payload, "METADATA")) {
+                self.introspection_level = .metadata;
+                std.debug.print("Introspection: Level changed to METADATA\n", .{});
+            } else if (std.mem.eql(u8, payload, "\"CONTENTS\"") or std.mem.eql(u8, payload, "CONTENTS")) {
+                self.introspection_level = .contents;
+                std.debug.print("Introspection: Level changed to CONTENTS\n", .{});
+            }
+        }
+
         self.mutex.lock();
         const msg_id = self.next_msg_id;
         self.next_msg_id += 1;

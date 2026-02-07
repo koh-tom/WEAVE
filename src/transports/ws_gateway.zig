@@ -6,15 +6,17 @@ const event_bus = @import("../event_bus.zig");
 /// 全てのバスイベントをJSON形式で接続中のクライアントにブロードキャストします。
 pub const WsGateway = struct {
     allocator: std.mem.Allocator,
+    bus: *event_bus.EventBus,
     clients: std.ArrayListUnmanaged(std.net.Stream),
     mutex: std.Thread.Mutex,
     port: u16,
     running: bool,
 
-    pub fn init(allocator: std.mem.Allocator, port: u16) !*WsGateway {
+    pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, port: u16) !*WsGateway {
         const self = try allocator.create(WsGateway);
         self.* = .{
             .allocator = allocator,
+            .bus = bus,
             .clients = .{},
             .mutex = .{},
             .port = port,
@@ -116,13 +118,22 @@ pub const WsGateway = struct {
     fn send(ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: event_bus.QoS) anyerror!void {
         const self: *WsGateway = @ptrCast(@alignCast(ctx));
         
+        const level = self.bus.introspection_level;
+        if (level == .off) return;
+
         // JSONメッセージの構築
-        // ペイロードが既にJSONであることを期待し、ダブルクォートで囲まずに埋め込む
         var json_buf: [4096]u8 = undefined;
-        const json = std.fmt.bufPrint(&json_buf, 
-            "{{\"topic\":\"{s}\",\"payload\":{s},\"qos\":{}}}",
-            .{ topic, payload, @intFromEnum(qos) }
-        ) catch |err| {
+        const json = switch (level) {
+            .off => return,
+            .metadata => std.fmt.bufPrint(&json_buf, 
+                "{{\"topic\":\"{s}\",\"payload\":{{\"size\":{}}},\"qos\":{}}}",
+                .{ topic, payload.len, @intFromEnum(qos) }
+            ),
+            .contents => std.fmt.bufPrint(&json_buf, 
+                "{{\"topic\":\"{s}\",\"payload\":{s},\"qos\":{}}}",
+                .{ topic, payload, @intFromEnum(qos) }
+            ),
+        } catch |err| {
             // ペイロードが大きすぎる場合はエラーを返さずスキップ（ゲートウェイの安全のため）
             std.debug.print("WsGateway: Payload too large for gateway buffer: {any}\n", .{err});
             return;

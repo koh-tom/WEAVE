@@ -62,7 +62,7 @@ pub fn main() !void {
     var log_transport = LogTransport.init("DebugLogger");
     try core.tm.register(log_transport.asTransport());
 
-    var ws_gateway = try WsGateway.init(allocator, 8080);
+    var ws_gateway = try WsGateway.init(allocator, &core.bus, 8080);
     defer ws_gateway.deinit();
     try core.tm.register(ws_gateway.transport());
 
