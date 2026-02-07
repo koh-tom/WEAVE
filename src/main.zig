@@ -25,6 +25,21 @@ fn runNodeWs(n: *NodeWsTransport) void {
     };
 }
 
+fn runGraphPublisher(core: *Core) void {
+    while (true) {
+        const json = core.graph.toJson(core.allocator) catch |err| {
+            std.debug.print("GraphPublisher Error (JSON): {any}\n", .{err});
+            continue;
+        };
+        defer core.allocator.free(json);
+        
+        core.bus.publish("core.system.graph", json, .Transient, 0) catch |err| {
+            std.debug.print("GraphPublisher Error (Publish): {any}\n", .{err});
+        };
+        std.Thread.sleep(5 * std.time.ns_per_s);
+    }
+}
+
 pub fn main() !void {
     std.debug.print("========================================\n", .{});
     std.debug.print("   WEAVE: Streaming Event OS Core Daemon\n", .{});
@@ -37,6 +52,8 @@ pub fn main() !void {
     // 1. Coreの初期化 (EventBus, PluginManager, TransportManager, WasmRuntime)
     var core = try Core.init(allocator);
     defer core.deinit();
+
+    core.bus.graph = &core.graph;
 
     host_api.global_bus = &core.bus;
     host_api.global_plugin_manager = &core.pm;
@@ -61,6 +78,13 @@ pub fn main() !void {
 
     const node_ws_thread = try std.Thread.spawn(.{}, runNodeWs, .{node_ws});
     node_ws_thread.detach();
+
+    const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{&core});
+    graph_thread.detach();
+
+    // ノードの登録
+    try core.graph.registerNode(1, "TwitchAdapter", .native);
+    try core.graph.registerNode(100, "chat_node", .wasm);
 
     // Twitchアダプタの起動 (Native Node)
     var twitch = TwitchAdapter.init(allocator, &core.bus, 1, "SqLA");

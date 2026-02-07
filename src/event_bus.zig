@@ -158,6 +158,7 @@ pub const EventBus = struct {
         ctx: *anyopaque,
         callback: *const fn (ctx: *anyopaque, msg: *const EventMessage) void,
     } = null,
+    graph: ?*@import("graph.zig").SystemGraph = null,
 
     pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) EventBus {
         return EventBus{
@@ -171,6 +172,7 @@ pub const EventBus = struct {
             .cond_idle = .{},
             .dispatcher_thread_id = std.atomic.Value(usize).init(0),
             .busy_count = std.atomic.Value(usize).init(0),
+            .graph = null,
         };
     }
 
@@ -249,6 +251,12 @@ pub const EventBus = struct {
         });
         if (self.verbose) std.debug.print("Node {} subscribed to topic '{s}'\n", .{ node_id, topic });
 
+        if (self.graph) |g| {
+            g.updateSubscription(node_id, topic) catch |err| {
+                std.debug.print("EventBus: Failed to update graph subscription: {any}\n", .{err});
+            };
+        }
+
         // Transient QoS の最新メッセージがあれば即座に配送
         if (self.last_messages.get(topic)) |msg| {
             if (msg.source_node_id != node_id) {
@@ -269,6 +277,12 @@ pub const EventBus = struct {
         const msg_id = self.next_msg_id;
         self.next_msg_id += 1;
         self.mutex.unlock();
+
+        if (self.graph) |g| {
+            g.recordPublish(source_node_id, topic) catch |err| {
+                std.debug.print("EventBus: Failed to record graph publish: {any}\n", .{err});
+            };
+        }
 
         const msg = EventMessage{
             .id = msg_id,
