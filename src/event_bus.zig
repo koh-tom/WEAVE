@@ -238,6 +238,33 @@ pub const EventBus = struct {
         self.cond_idle.signal();
     }
 
+    fn traceMessage(self: *EventBus, msg: *const EventMessage) void {
+        if (self.introspection_level == .off) return;
+        // 自己再帰（トレースのトレース）を防止
+        if (std.mem.eql(u8, msg.topic, "core.system.event_traced")) return;
+        // グラフ更新は頻繁すぎるため、デバッグが煩雑になる場合は除外することも検討できるが、
+        // 現状は全件トレースを基本とする。
+
+        // ペイロードの処理（現在の観測レベルに従う）
+        const payload_json = if (self.introspection_level == .contents) 
+            msg.payload 
+        else 
+            "{\"hidden\":true}";
+
+        var buf: [2048]u8 = undefined;
+        const trace_json = std.fmt.bufPrint(&buf,
+            "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}",
+            .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json }
+        ) catch |err| {
+            if (self.verbose) std.debug.print("Tracing: Payload too large for trace buffer: {any}\n", .{err});
+            return;
+        };
+
+        // トレースメッセージ自体を再発行
+        // 配送ループに入らないように publish を呼び出すが、
+        // publish内でのトピックチェックにより安全。
+        _ = self.publish("core.system.event_traced", trace_json, .BestEffort, 0) catch {};
+    }
     pub fn registerDispatcherThread(self: *EventBus) void {
         const tid = @as(usize, @intCast(std.Thread.getCurrentId()));
         self.dispatcher_thread_id.store(tid, .monotonic);
@@ -370,6 +397,9 @@ pub const EventBus = struct {
         if (self.global_observer) |obs| {
             obs.callback(obs.ctx, msg);
         }
+
+        // イベント追跡トピックの発行
+        self.traceMessage(msg);
     }
 
     /// イベント配送ループの実行（別スレッドで呼ぶことを想定）
