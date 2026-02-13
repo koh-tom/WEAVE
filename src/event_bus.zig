@@ -42,6 +42,11 @@ pub const Subscriber = struct {
     callback: SubscribeCallback,
 };
 
+pub const WildcardSubscription = struct {
+    pattern: []const u8,
+    subscriber: Subscriber,
+};
+
 /// MPSC イベントキュー
 pub const EventQueue = struct {
     allocator: std.mem.Allocator,
@@ -146,6 +151,7 @@ pub const IntrospectionLevel = enum {
 pub const EventBus = struct {
     allocator: std.mem.Allocator,
     subscribers: std.StringHashMap(std.ArrayListUnmanaged(Subscriber)),
+    wildcard_subs: std.ArrayListUnmanaged(WildcardSubscription), // 追加: ワイルドカード購読
     queue: EventQueue,
     next_msg_id: u64,
     verbose: bool,
@@ -171,6 +177,7 @@ pub const EventBus = struct {
         return EventBus{
             .allocator = allocator,
             .subscribers = std.StringHashMap(std.ArrayListUnmanaged(Subscriber)).init(allocator),
+            .wildcard_subs = .{},
             .queue = EventQueue.init(allocator, queue_capacity),
             .last_messages = std.StringHashMap(EventMessage).init(allocator),
             .next_msg_id = 1,
@@ -195,6 +202,11 @@ pub const EventBus = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.subscribers.deinit();
+
+        for (self.wildcard_subs.items) |ws| {
+            self.allocator.free(ws.pattern);
+        }
+        self.wildcard_subs.deinit(self.allocator);
 
         var last_it = self.last_messages.iterator();
         while (last_it.next()) |entry| {
@@ -238,6 +250,31 @@ pub const EventBus = struct {
         self.cond_idle.signal();
     }
 
+    // ワイルドカードマッチングロジック (MQTT-like)
+    // + : single level
+    // # : multi level (must be at the end)
+    pub fn isMatch(pattern: []const u8, topic: []const u8) bool {
+        var p_it = std.mem.splitScalar(u8, pattern, '.');
+        var t_it = std.mem.splitScalar(u8, topic, '.');
+
+        while (true) {
+            const p_part = p_it.next();
+            const t_part = t_it.next();
+
+            if (p_part == null) return t_part == null;
+
+            if (std.mem.eql(u8, p_part.?, "#")) return true;
+
+            if (t_part == null) return false;
+
+            if (std.mem.eql(u8, p_part.?, "+") or std.mem.eql(u8, p_part.?, "*")) {
+                continue;
+            }
+
+            if (!std.mem.eql(u8, p_part.?, t_part.?)) return false;
+        }
+    }
+
     fn traceMessage(self: *EventBus, msg: *const EventMessage) void {
         if (self.introspection_level == .off) return;
         // 自己再帰（トレースのトレース）を防止
@@ -274,17 +311,33 @@ pub const EventBus = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const result = try self.subscribers.getOrPut(topic);
-        if (!result.found_existing) {
-            result.key_ptr.* = try self.allocator.dupe(u8, topic);
-            result.value_ptr.* = .{};
+        // ワイルドカードが含まれているかチェック
+        const is_wildcard = std.mem.indexOfScalar(u8, topic, '*') != null or 
+                           std.mem.indexOfScalar(u8, topic, '+') != null or 
+                           std.mem.indexOfScalar(u8, topic, '#') != null;
+
+        if (is_wildcard) {
+            try self.wildcard_subs.append(self.allocator, .{
+                .pattern = try self.allocator.dupe(u8, topic),
+                .subscriber = .{
+                    .node_id = node_id,
+                    .context = context,
+                    .callback = callback,
+                },
+            });
+        } else {
+            const result = try self.subscribers.getOrPut(topic);
+            if (!result.found_existing) {
+                result.key_ptr.* = try self.allocator.dupe(u8, topic);
+                result.value_ptr.* = std.ArrayListUnmanaged(Subscriber){};
+            }
+            try result.value_ptr.append(self.allocator, Subscriber{
+                .node_id = node_id,
+                .context = context,
+                .callback = callback,
+            });
         }
-        try result.value_ptr.append(self.allocator, Subscriber{
-            .node_id = node_id,
-            .context = context,
-            .callback = callback,
-        });
-        if (self.verbose) std.debug.print("Node {} subscribed to topic '{s}'\n", .{ node_id, topic });
+        if (self.verbose) std.debug.print("Node {} subscribed to topic pattern '{s}'\n", .{ node_id, topic });
 
         if (self.graph) |g| {
             g.updateSubscription(node_id, topic) catch |err| {
@@ -378,18 +431,35 @@ pub const EventBus = struct {
         defer _ = self.busy_count.fetchSub(1, .release);
 
         self.mutex.lock();
+        // 1. 完全一致の購読者
         const subs_snapshot = if (self.subscribers.getPtr(msg.topic)) |list|
             self.allocator.dupe(Subscriber, list.items) catch null
         else
             null;
+        
+        // 2. ワイルドカード一致の購読者
+        var wildcard_matches: std.ArrayListUnmanaged(Subscriber) = .{};
+        defer wildcard_matches.deinit(self.allocator);
+        for (self.wildcard_subs.items) |ws| {
+            if (EventBus.isMatch(ws.pattern, msg.topic)) {
+                wildcard_matches.append(self.allocator, ws.subscriber) catch {};
+            }
+        }
         self.mutex.unlock();
 
+        // 配送実行
         if (subs_snapshot) |snapshot| {
             defer self.allocator.free(snapshot);
             for (snapshot) |sub| {
                 if (sub.node_id != msg.source_node_id) {
                     sub.callback(sub.context, msg);
                 }
+            }
+        }
+        
+        for (wildcard_matches.items) |sub| {
+            if (sub.node_id != msg.source_node_id) {
+                sub.callback(sub.context, msg);
             }
         }
 
@@ -491,4 +561,58 @@ test "EventBus QoS: Transient stores last message and dispatches to new subscrib
     try bus.subscribe("state", 2, S.cb, &received);
 
     try std.testing.expect(received);
+}
+
+test "EventBus: Wildcard Matching" {
+    const isMatch = EventBus.isMatch;
+    
+    // Exact match
+    try std.testing.expect(isMatch("a.b.c", "a.b.c"));
+    try std.testing.expect(!isMatch("a.b.c", "a.b.d"));
+    
+    // + : Single level
+    try std.testing.expect(isMatch("a.+.c", "a.b.c"));
+    try std.testing.expect(isMatch("a.+", "a.b"));
+    try std.testing.expect(!isMatch("a.+", "a.b.c"));
+    
+    // * : Single level (WEAVE compatibility)
+    try std.testing.expect(isMatch("a.*.c", "a.b.c"));
+    
+    // # : Multi level
+    try std.testing.expect(isMatch("a.#", "a.b"));
+    try std.testing.expect(isMatch("a.#", "a.b.c"));
+    try std.testing.expect(isMatch("#", "a.b.c"));
+}
+
+test "EventBus: Wildcard Dispatch" {
+    const allocator = std.testing.allocator;
+    var bus = EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    var count: u32 = 0;
+    const S = struct {
+        fn cb(ctx: ?*anyopaque, _: *const EventMessage) void {
+            const c_ptr = @as(*u32, @ptrCast(@alignCast(ctx)));
+            c_ptr.* += 1;
+        }
+    };
+
+    try bus.subscribe("ext.twitch.#", 2, S.cb, &count);
+    try bus.subscribe("ext.+.chat.*", 3, S.cb, &count);
+    
+    const thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
+    
+    // Match 1 (Pattern 1 only)
+    try bus.publish("ext.twitch.connected", "{}", .BestEffort, 1);
+    // Match 2 (Both patterns)
+    try bus.publish("ext.twitch.chat.message", "{}", .BestEffort, 1);
+    // No match
+    try bus.publish("other.topic", "{}", .BestEffort, 1);
+
+    bus.waitIdle();
+    bus.stop();
+    thread.join();
+    
+    try std.testing.expectEqual(@as(u32, 3), count);
 }

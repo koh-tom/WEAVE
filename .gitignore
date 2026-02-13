@@ -13,6 +13,7 @@ bus_test
 # Logs
 *.log
 build_err.log
+build_error.txt
 
 # Node.js (Tests & Tools)
 node_modules/

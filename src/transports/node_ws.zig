@@ -47,15 +47,9 @@ pub const NodeWsTransport = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
             
-            // 簡易的な前方一致または完全一致チェック
-            // 本来はEventBusと同じワイルドカードロジックが望ましいが、MVPでは簡易版
             var it = self.subscriptions.keyIterator();
             while (it.next()) |sub| {
-                if (std.mem.eql(u8, sub.*, "*") or std.mem.eql(u8, sub.*, topic)) return true;
-                if (std.mem.endsWith(u8, sub.*, "*")) {
-                    const prefix = sub.*[0 .. sub.*.len - 1];
-                    if (std.mem.startsWith(u8, topic, prefix)) return true;
-                }
+                if (event_bus.EventBus.isMatch(sub.*, topic)) return true;
             }
             return false;
         }
