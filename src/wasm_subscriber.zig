@@ -5,13 +5,17 @@ const event_bus = @import("event_bus.zig");
 pub const WasmSubscriber = struct {
     instance: wamr.wasm_module_inst_t,
     exec_env: wamr.wasm_exec_env_t,
+    node_id: u32,
+    bus: *event_bus.EventBus,
 
-    pub fn init(instance: wamr.wasm_module_inst_t) !WasmSubscriber {
+    pub fn init(instance: wamr.wasm_module_inst_t, node_id: u32, bus: *event_bus.EventBus) !WasmSubscriber {
         const env = wamr.wasm_runtime_create_exec_env(instance, 16384);
         if (env == null) return error.ExecEnvCreationFailed;
         return WasmSubscriber{
             .instance = instance,
             .exec_env = env.?,
+            .node_id = node_id,
+            .bus = bus,
         };
     }
 
@@ -40,7 +44,15 @@ pub const WasmSubscriber = struct {
         // on_message実行
         if (wamr.wasm_runtime_lookup_function(self.instance, "on_message")) |func| {
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
-            _ = wamr.wasm_runtime_call_wasm(self.exec_env, func, 4, &msg_argv);
+            if (!wamr.wasm_runtime_call_wasm(self.exec_env, func, 4, &msg_argv)) {
+                std.debug.print("WasmSubscriber: on_message failed for Node {}\n", .{self.node_id});
+                if (self.bus.graph) |g| {
+                    g.updateNodeStatus(self.node_id, .fault);
+                    var buf: [128]u8 = undefined;
+                    const payload = std.fmt.bufPrint(&buf, "{{\"node_id\":{},\"status\":\"fault\"}}", .{self.node_id}) catch "";
+                    _ = self.bus.publish("core.node.status_changed", payload, .Transient, 0) catch {};
+                }
+            }
         }
 
         // メモリリセット (フェーズ 2.1)

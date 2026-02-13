@@ -84,7 +84,10 @@ pub fn main() !void {
 
     // ノードの登録
     try core.graph.registerNode(1, "TwitchAdapter", .native);
+    try core.bus.publish("core.node.registered", "{\"node_id\":1,\"name\":\"TwitchAdapter\",\"type\":\"native\"}", .Transient, 0);
+
     try core.graph.registerNode(100, "chat_node", .wasm);
+    try core.bus.publish("core.node.registered", "{\"node_id\":100,\"name\":\"chat_node\",\"type\":\"wasm\"}", .Transient, 0);
 
     // Twitchアダプタの起動 (Native Node)
     var twitch = TwitchAdapter.init(allocator, &core.bus, 1, "SqLA");
@@ -111,7 +114,7 @@ pub fn main() !void {
     else
         "wasm-apps/manifest.json";
 
-    const meta = try core.pm.registerPlugin(module_inst, manifest_path);
+    const meta = try core.pm.registerPlugin(module_inst, manifest_path, &core.bus);
     std.debug.print("Status: Registered plugin '{s}' as Node {}\n", .{
         meta.manifest_parsed.value.name,
         meta.node_id,

@@ -18,6 +18,7 @@ pub const NodeWsTransport = struct {
         subscriptions: std.StringHashMapUnmanaged(void),
         allocator: std.mem.Allocator,
         mutex: std.Thread.Mutex,
+        registered: bool,
 
         fn init(allocator: std.mem.Allocator, stream: std.net.Stream, node_id: u32) *Client {
             const self = allocator.create(Client) catch unreachable;
@@ -27,6 +28,7 @@ pub const NodeWsTransport = struct {
                 .subscriptions = .{},
                 .allocator = allocator,
                 .mutex = .{},
+                .registered = false,
             };
             return self;
         }
@@ -64,6 +66,19 @@ pub const NodeWsTransport = struct {
             if (self.subscriptions.contains(topic)) return;
             const copy = try self.allocator.dupe(u8, topic);
             try self.subscriptions.put(self.allocator, copy, {});
+        }
+
+        fn ensureRegistered(self: *Client, bus: *event_bus.EventBus) !void {
+            if (self.registered) return;
+            if (bus.graph) |g| {
+                var name_buf: [32]u8 = undefined;
+                const node_name = std.fmt.bufPrint(&name_buf, "RemoteNode_{}", .{self.node_id}) catch "RemoteNode";
+                try g.registerNode(self.node_id, node_name, .remote);
+                var buf: [128]u8 = undefined;
+                const payload = try std.fmt.bufPrint(&buf, "{{\"node_id\":{},\"name\":\"{s}\",\"type\":\"remote\"}}", .{ self.node_id, node_name });
+                try bus.publish("core.node.registered", payload, .Transient, 0);
+            }
+            self.registered = true;
         }
     };
 
@@ -171,9 +186,16 @@ pub const NodeWsTransport = struct {
     }
 
     fn clientLoop(self: *NodeWsTransport, client: *Client) void {
-        std.debug.print("NodeWsTransport: Client thread started\n", .{});
+        std.debug.print("NodeWsTransport: Client thread started (ID: {})\n", .{client.node_id});
         defer {
-            std.debug.print("NodeWsTransport: Client thread exiting\n", .{});
+            std.debug.print("NodeWsTransport: Client thread exiting (ID: {})\n", .{client.node_id});
+            if (self.bus.graph) |g| {
+                g.updateNodeStatus(client.node_id, .disconnected);
+                // ライフサイクルイベントのブロードキャスト
+                var buf: [128]u8 = undefined;
+                const payload = std.fmt.bufPrint(&buf, "{{\"node_id\":{},\"status\":\"disconnected\"}}", .{client.node_id}) catch "";
+                _ = self.bus.publish("core.node.status_changed", payload, .Transient, 0) catch {};
+            }
             self.removeClient(client);
             client.deinit();
         }
@@ -211,6 +233,7 @@ pub const NodeWsTransport = struct {
                 try client.addSubscription(topic.string);
                 std.debug.print("NodeWsTransport: Client {} subscribed to '{s}'\n", .{ client.node_id, topic.string });
                 
+                try client.ensureRegistered(self.bus);
                 if (self.bus.graph) |g| {
                     try g.updateSubscription(client.node_id, topic.string);
                 }
@@ -218,6 +241,8 @@ pub const NodeWsTransport = struct {
         } else if (std.mem.eql(u8, type_str, "publish")) {
             const topic = root.get("topic") orelse return;
             const payload = root.get("payload") orelse return;
+            
+            try client.ensureRegistered(self.bus);
             
             // ペイロードがオブジェクトや配列なら文字列化して転送
             var payload_str: []const u8 = undefined;
@@ -230,6 +255,11 @@ pub const NodeWsTransport = struct {
                 payload_str = try self.allocator.dupe(u8, out_buf.items);
             }
             defer if (payload != .string) self.allocator.free(payload_str);
+
+            // グラフの更新
+            if (self.bus.graph) |g| {
+                try g.recordPublish(client.node_id, topic.string);
+            }
 
             // 外部ノードからの発行として指定
             try self.bus.publish(topic.string, payload_str, .Transient, client.node_id);

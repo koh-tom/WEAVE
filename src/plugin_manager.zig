@@ -1,6 +1,7 @@
 const std = @import("std");
 const wamr = @import("wamr_libs.zig").wamr;
 const manifest = @import("manifest.zig");
+const event_bus = @import("event_bus.zig");
 const WasmSubscriber = @import("wasm_subscriber.zig").WasmSubscriber;
 
 pub const PluginMetadata = struct {
@@ -38,16 +39,17 @@ pub const PluginManager = struct {
     }
 
     /// プラグインを管理テーブルに登録する
-    pub fn registerPlugin(self: *PluginManager, instance: wamr.wasm_module_inst_t, manifest_path: []const u8) !*PluginMetadata {
+    pub fn registerPlugin(self: *PluginManager, instance: wamr.wasm_module_inst_t, manifest_path: []const u8, bus: *event_bus.EventBus) !*PluginMetadata {
         const parsed = try manifest.Manifest.load(self.allocator, manifest_path);
         errdefer parsed.deinit();
 
+        const node_id = self.next_node_id;
         const meta = try self.allocator.create(PluginMetadata);
         meta.* = .{
-            .node_id = self.next_node_id,
+            .node_id = node_id,
             .manifest_parsed = parsed,
             .instance = instance,
-            .subscriber = try WasmSubscriber.init(instance),
+            .subscriber = try WasmSubscriber.init(instance, node_id, bus),
         };
         self.next_node_id += 1;
 

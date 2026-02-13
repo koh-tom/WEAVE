@@ -85,6 +85,15 @@ pub const SystemGraph = struct {
         try node.pub_topics.append(self.allocator, try self.allocator.dupe(u8, topic));
     }
 
+    pub fn updateNodeStatus(self: *SystemGraph, node_id: u32, status: anytype) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.nodes.getPtr(node_id)) |node| {
+            node.status = status;
+        }
+    }
+
     /// グラフ全体をJSON形式でシリアライズする
     pub fn toJson(self: *SystemGraph, allocator: std.mem.Allocator) ![]const u8 {
         self.mutex.lock();
