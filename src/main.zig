@@ -57,6 +57,7 @@ pub fn main() !void {
 
     host_api.global_bus = &core.bus;
     host_api.global_plugin_manager = &core.pm;
+    core.pm.runtime = &core.runtime; // 追加: 再起動用
 
     // 2. トランスポートの設定
     var log_transport = LogTransport.init("DebugLogger");
@@ -114,7 +115,7 @@ pub fn main() !void {
     else
         "wasm-apps/manifest.json";
 
-    const meta = try core.pm.registerPlugin(module_inst, manifest_path, &core.bus);
+    const meta = try core.pm.registerPlugin(module_inst, wasm_path, manifest_path, &core.bus);
     std.debug.print("Status: Registered plugin '{s}' as Node {}\n", .{
         meta.manifest_parsed.value.name,
         meta.node_id,
