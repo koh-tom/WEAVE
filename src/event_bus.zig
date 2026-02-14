@@ -19,7 +19,7 @@ pub const EventMessage = struct {
     pub fn clone(self: EventMessage, allocator: std.mem.Allocator) !EventMessage {
         return EventMessage{
             .id = self.id,
-            .topic = try allocator.dupe(u8, self.topic),
+            .topic = self.topic, // topic はインターン化されている前提
             .timestamp = self.timestamp,
             .source_node_id = self.source_node_id,
             .qos = self.qos,
@@ -28,7 +28,6 @@ pub const EventMessage = struct {
     }
 
     pub fn deinit(self: EventMessage, allocator: std.mem.Allocator) void {
-        allocator.free(self.topic);
         allocator.free(self.payload);
     }
 };
@@ -50,28 +49,29 @@ pub const WildcardSubscription = struct {
 /// MPSC イベントキュー
 pub const EventQueue = struct {
     allocator: std.mem.Allocator,
-    list: std.DoublyLinkedList = .{},
+    messages: []EventMessage,
     mutex: std.Thread.Mutex,
     cond_not_full: std.Thread.Condition,
     cond_not_empty: std.Thread.Condition,
     is_shutdown: bool,
     capacity: usize,
     count: usize,
+    head: usize = 0,
+    tail: usize = 0,
 
-    const Node = struct {
-        data: EventMessage,
-        node: std.DoublyLinkedList.Node = .{},
-    };
-
-    pub fn init(allocator: std.mem.Allocator, capacity: usize) EventQueue {
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !EventQueue {
+        const messages = try allocator.alloc(EventMessage, capacity);
         return EventQueue{
             .allocator = allocator,
+            .messages = messages,
             .mutex = .{},
             .cond_not_full = .{},
             .cond_not_empty = .{},
             .is_shutdown = false,
             .capacity = capacity,
             .count = 0,
+            .head = 0,
+            .tail = 0,
         };
     }
 
@@ -79,11 +79,12 @@ pub const EventQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         
-        while (self.list.popFirst()) |n| {
-            const node: *Node = @fieldParentPtr("node", n);
-            node.data.deinit(self.allocator);
-            self.allocator.destroy(node);
+        while (self.count > 0) {
+            self.messages[self.head].deinit(self.allocator);
+            self.head = (self.head + 1) % self.capacity;
+            self.count -= 1;
         }
+        self.allocator.free(self.messages);
     }
 
     pub fn shutdown(self: *EventQueue) void {
@@ -107,12 +108,8 @@ pub const EventQueue = struct {
             if (self.is_shutdown) return error.QueueShutdown;
         }
 
-        const node = try self.allocator.create(Node);
-        node.* = .{
-            .data = try msg.clone(self.allocator),
-            .node = .{},
-        };
-        self.list.append(&node.node);
+        self.messages[self.tail] = msg;
+        self.tail = (self.tail + 1) % self.capacity;
         self.count += 1;
         
         self.cond_not_empty.signal();
@@ -127,17 +124,11 @@ pub const EventQueue = struct {
             self.cond_not_empty.wait(&self.mutex);
         }
 
-        if (self.list.popFirst()) |n| {
-            const node: *Node = @fieldParentPtr("node", n);
-            const msg = node.data;
-            self.allocator.destroy(node);
-            self.count -= 1;
-            
-            self.cond_not_full.signal();
-            return msg;
-        }
-
-        return null;
+        const msg = self.messages[self.head];
+        self.head = (self.head + 1) % self.capacity;
+        self.count -= 1;
+        self.cond_not_full.signal();
+        return msg;
     }
 };
 
@@ -151,7 +142,8 @@ pub const IntrospectionLevel = enum {
 pub const EventBus = struct {
     allocator: std.mem.Allocator,
     subscribers: std.StringHashMap(std.ArrayListUnmanaged(Subscriber)),
-    wildcard_subs: std.ArrayListUnmanaged(WildcardSubscription), // 追加: ワイルドカード購読
+    wildcard_subs: std.ArrayListUnmanaged(WildcardSubscription),
+    topic_cache: std.StringHashMap([]const u8), // 追加: トピック名のインターン化用
     queue: EventQueue,
     next_msg_id: u64,
     verbose: bool,
@@ -173,12 +165,13 @@ pub const EventBus = struct {
     graph: ?*@import("graph.zig").SystemGraph = null,
     introspection_level: IntrospectionLevel = .metadata,
 
-    pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) EventBus {
+    pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) !EventBus {
         return EventBus{
             .allocator = allocator,
             .subscribers = std.StringHashMap(std.ArrayListUnmanaged(Subscriber)).init(allocator),
             .wildcard_subs = .{},
-            .queue = EventQueue.init(allocator, queue_capacity),
+            .topic_cache = std.StringHashMap([]const u8).init(allocator),
+            .queue = try EventQueue.init(allocator, queue_capacity),
             .last_messages = std.StringHashMap(EventMessage).init(allocator),
             .next_msg_id = 1,
             .verbose = true,
@@ -207,6 +200,13 @@ pub const EventBus = struct {
             self.allocator.free(ws.pattern);
         }
         self.wildcard_subs.deinit(self.allocator);
+
+        // トピックキャッシュの解放
+        var tc_it = self.topic_cache.iterator();
+        while (tc_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.topic_cache.deinit();
 
         var last_it = self.last_messages.iterator();
         while (last_it.next()) |entry| {
@@ -307,6 +307,15 @@ pub const EventBus = struct {
         self.dispatcher_thread_id.store(tid, .monotonic);
     }
 
+    fn getInternedTopic(self: *EventBus, topic: []const u8) ![]const u8 {
+        if (self.topic_cache.get(topic)) |cached| {
+            return cached;
+        }
+        const duped = try self.allocator.dupe(u8, topic);
+        try self.topic_cache.put(duped, duped);
+        return duped;
+    }
+
     pub fn subscribe(self: *EventBus, topic: []const u8, node_id: u32, callback: SubscribeCallback, context: ?*anyopaque) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -378,29 +387,30 @@ pub const EventBus = struct {
         self.mutex.lock();
         const msg_id = self.next_msg_id;
         self.next_msg_id += 1;
+        const interned_topic = try self.getInternedTopic(topic);
         self.mutex.unlock();
 
         if (self.graph) |g| {
-            g.recordPublish(source_node_id, topic) catch |err| {
+            g.recordPublish(source_node_id, interned_topic) catch |err| {
                 std.debug.print("EventBus: Failed to record graph publish: {any}\n", .{err});
             };
         }
 
         const msg = EventMessage{
             .id = msg_id,
-            .topic = topic,
+            .topic = interned_topic,
             .timestamp = std.time.milliTimestamp(),
             .source_node_id = source_node_id,
             .qos = qos,
-            .payload = payload,
+            .payload = try self.allocator.dupe(u8, payload),
         };
 
         // Transient QoS の場合は最新メッセージとして保存
         if (qos == .Transient) {
             self.mutex.lock();
-            const gop = try self.last_messages.getOrPut(topic);
+            const gop = try self.last_messages.getOrPut(interned_topic);
             if (!gop.found_existing) {
-                gop.key_ptr.* = try self.allocator.dupe(u8, topic);
+                gop.key_ptr.* = interned_topic;
             } else {
                 gop.value_ptr.deinit(self.allocator);
             }
@@ -492,7 +502,7 @@ pub const EventBus = struct {
 
 test "EventBus QoS: Reliable blocks when full" {
     const allocator = std.testing.allocator;
-    var bus = EventBus.init(allocator, 2);
+    var bus = try EventBus.init(allocator, 2);
     defer bus.deinit();
     bus.verbose = false;
 
@@ -527,7 +537,7 @@ test "EventBus QoS: Reliable blocks when full" {
 
 test "EventBus QoS: BestEffort drops when full" {
     const allocator = std.testing.allocator;
-    var bus = EventBus.init(allocator, 1);
+    var bus = try EventBus.init(allocator, 1);
     defer bus.deinit();
     bus.verbose = false;
 
@@ -542,7 +552,7 @@ test "EventBus QoS: BestEffort drops when full" {
 
 test "EventBus QoS: Transient stores last message and dispatches to new subscriber" {
     const allocator = std.testing.allocator;
-    var bus = EventBus.init(allocator, 10);
+    var bus = try EventBus.init(allocator, 10);
     defer bus.deinit();
     bus.verbose = false;
 
@@ -586,7 +596,7 @@ test "EventBus: Wildcard Matching" {
 
 test "EventBus: Wildcard Dispatch" {
     const allocator = std.testing.allocator;
-    var bus = EventBus.init(allocator, 10);
+    var bus = try EventBus.init(allocator, 10);
     defer bus.deinit();
     bus.verbose = false;
 

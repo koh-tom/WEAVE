@@ -16,7 +16,7 @@ pub const Core = struct {
     pub fn init(allocator: std.mem.Allocator) !Core {
         return Core{
             .allocator = allocator,
-            .bus = EventBus.init(allocator, 1000),
+            .bus = try EventBus.init(allocator, 1000),
             .pm = PluginManager.init(allocator),
             .tm = TransportManager.init(allocator),
             .runtime = try WasmRuntime.init(),
