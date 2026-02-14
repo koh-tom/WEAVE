@@ -7,6 +7,7 @@ pub const WasmSubscriber = struct {
     exec_env: wamr.wasm_exec_env_t,
     node_id: u32,
     bus: *event_bus.EventBus,
+    mutex: std.Thread.Mutex = .{}, // 追加: 並行実行防止用
 
     pub fn init(instance: wamr.wasm_module_inst_t, node_id: u32, bus: *event_bus.EventBus) !WasmSubscriber {
         const env = wamr.wasm_runtime_create_exec_env(instance, 16384);
@@ -16,6 +17,7 @@ pub const WasmSubscriber = struct {
             .exec_env = env.?,
             .node_id = node_id,
             .bus = bus,
+            .mutex = .{},
         };
     }
 
@@ -25,6 +27,10 @@ pub const WasmSubscriber = struct {
 
     pub fn callback(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
         const self: *WasmSubscriber = @ptrCast(@alignCast(ctx orelse return));
+        
+        // 排他制御のロック
+        self.mutex.lock();
+        defer self.mutex.unlock();
         
         const alloc_func = wamr.wasm_runtime_lookup_function(self.instance, "os_alloc");
         if (alloc_func == null) return;
@@ -55,7 +61,7 @@ pub const WasmSubscriber = struct {
             }
         }
 
-        // メモリリセット (フェーズ 2.1)
+        // メモリリセット
         if (wamr.wasm_runtime_lookup_function(self.instance, "os_reset_heap")) |reset_func| {
             var reset_argv = [_]u32{0};
             _ = wamr.wasm_runtime_call_wasm(self.exec_env, reset_func, 0, &reset_argv);
