@@ -33,10 +33,10 @@ fn runGraphPublisher(core: *Core) void {
         };
         defer core.allocator.free(json);
         
-        core.bus.publish("core.system.graph", json, .Transient, 0) catch |err| {
+        core.bus.publish("core.system.graph.full", json, .Transient, 0) catch |err| {
             std.debug.print("GraphPublisher Error (Publish): {any}\n", .{err});
         };
-        std.Thread.sleep(5 * std.time.ns_per_s);
+        std.Thread.sleep(60 * std.time.ns_per_s);
     }
 }
 
@@ -54,6 +54,7 @@ pub fn main() !void {
     defer core.deinit();
 
     core.bus.graph = &core.graph;
+    core.graph.bus = &core.bus; // 追加: 差分発行用
 
     host_api.global_bus = &core.bus;
     host_api.global_plugin_manager = &core.pm;

@@ -369,7 +369,7 @@ pub const EventBus = struct {
         payload: []const u8,
         qos: QoS,
         source_node_id: u32,
-    ) !void {
+    ) anyerror!void {
         // システム制御トピックの処理
         if (std.mem.eql(u8, topic, "core.system.introspection")) {
             if (std.mem.eql(u8, payload, "\"OFF\"") or std.mem.eql(u8, payload, "OFF")) {

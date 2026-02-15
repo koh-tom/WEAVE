@@ -20,12 +20,14 @@ pub const SystemGraph = struct {
     allocator: std.mem.Allocator,
     nodes: std.AutoHashMapUnmanaged(u32, NodeInfo),
     mutex: std.Thread.Mutex,
+    bus: ?*event_bus.EventBus = null, // 追加: 差分配信先
 
     pub fn init(allocator: std.mem.Allocator) SystemGraph {
         return .{
             .allocator = allocator,
             .nodes = .{},
             .mutex = .{},
+            .bus = null,
         };
     }
 
@@ -43,54 +45,81 @@ pub const SystemGraph = struct {
 
     pub fn registerNode(self: *SystemGraph, id: u32, name: []const u8, node_type: NodeType) !void {
         self.mutex.lock();
-        defer self.mutex.unlock();
-
         if (self.nodes.getPtr(id)) |node| {
             self.allocator.free(node.name);
             node.name = try self.allocator.dupe(u8, name);
             node.node_type = node_type;
             node.status = .active;
-            return;
+        } else {
+            try self.nodes.put(self.allocator, id, .{
+                .id = id,
+                .name = try self.allocator.dupe(u8, name),
+                .node_type = node_type,
+                .status = .active,
+                .pub_topics = .{},
+                .sub_topics = .{},
+            });
         }
+        self.mutex.unlock();
 
-        try self.nodes.put(self.allocator, id, .{
-            .id = id,
-            .name = try self.allocator.dupe(u8, name),
-            .node_type = node_type,
-            .status = .active,
-            .pub_topics = .{},
-            .sub_topics = .{},
-        });
+        if (self.bus) |bus| {
+            var buf: [256]u8 = undefined;
+            const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"node_reg\",\"id\":{},\"name\":\"{s}\",\"node_type\":\"{any}\"}}", .{id, name, node_type}) catch "";
+            if (payload.len > 0) {
+                _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
+            }
+        }
     }
 
     pub fn updateSubscription(self: *SystemGraph, node_id: u32, topic: []const u8) !void {
         self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const node = self.nodes.getPtr(node_id) orelse return error.NodeNotFound;
+        const node = self.nodes.getPtr(node_id) orelse { self.mutex.unlock(); return error.NodeNotFound; };
         for (node.sub_topics.items) |t| {
-            if (std.mem.eql(u8, t, topic)) return;
+            if (std.mem.eql(u8, t, topic)) { self.mutex.unlock(); return; }
         }
         try node.sub_topics.append(self.allocator, try self.allocator.dupe(u8, topic));
+        self.mutex.unlock();
+
+        if (self.bus) |bus| {
+            var buf: [256]u8 = undefined;
+            const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"link_sub\",\"id\":{},\"topic\":\"{s}\"}}", .{node_id, topic}) catch "";
+            if (payload.len > 0) {
+                _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
+            }
+        }
     }
 
     pub fn recordPublish(self: *SystemGraph, node_id: u32, topic: []const u8) !void {
         self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const node = self.nodes.getPtr(node_id) orelse return;
+        const node = self.nodes.getPtr(node_id) orelse { self.mutex.unlock(); return; };
         for (node.pub_topics.items) |t| {
-            if (std.mem.eql(u8, t, topic)) return;
+            if (std.mem.eql(u8, t, topic)) { self.mutex.unlock(); return; }
         }
         try node.pub_topics.append(self.allocator, try self.allocator.dupe(u8, topic));
+        self.mutex.unlock();
+
+        if (self.bus) |bus| {
+            var buf: [256]u8 = undefined;
+            const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"link_pub\",\"id\":{},\"topic\":\"{s}\"}}", .{node_id, topic}) catch "";
+            if (payload.len > 0) {
+                _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
+            }
+        }
     }
 
     pub fn updateNodeStatus(self: *SystemGraph, node_id: u32, status: anytype) void {
         self.mutex.lock();
-        defer self.mutex.unlock();
-
         if (self.nodes.getPtr(node_id)) |node| {
             node.status = status;
+            self.mutex.unlock();
+
+            if (self.bus) |bus| {
+                var buf: [128]u8 = undefined;
+                const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"node_status\",\"id\":{},\"status\":\"{any}\"}}", .{node_id, status}) catch "";
+                _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
+            }
+        } else {
+            self.mutex.unlock();
         }
     }
 
