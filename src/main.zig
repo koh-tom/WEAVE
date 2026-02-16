@@ -68,7 +68,7 @@ pub fn main() !void {
     defer ws_gateway.deinit();
     try core.tm.register(ws_gateway.transport());
 
-    var node_ws = try NodeWsTransport.init(allocator, &core.bus, 8081);
+    var node_ws = try NodeWsTransport.init(allocator, &core.bus, 8081, "weave-secret-2026");
     defer node_ws.deinit();
     try core.tm.register(node_ws.transport());
 

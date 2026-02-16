@@ -11,6 +11,7 @@ pub const NodeWsTransport = struct {
     mutex: std.Thread.Mutex,
     port: u16,
     running: bool,
+    secret_token: ?[]const u8, // 追加: 認証用トークン
 
     const Client = struct {
         node_id: u32,
@@ -76,7 +77,7 @@ pub const NodeWsTransport = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, port: u16) !*NodeWsTransport {
+    pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, port: u16, secret_token: ?[]const u8) !*NodeWsTransport {
         const self = try allocator.create(NodeWsTransport);
         self.* = .{
             .allocator = allocator,
@@ -85,6 +86,7 @@ pub const NodeWsTransport = struct {
             .mutex = .{},
             .port = port,
             .running = false,
+            .secret_token = if (secret_token) |t| try allocator.dupe(u8, t) else null,
         };
         return self;
     }
@@ -97,6 +99,7 @@ pub const NodeWsTransport = struct {
         }
         self.clients.deinit(self.allocator);
         self.mutex.unlock();
+        if (self.secret_token) |t| self.allocator.free(t);
         self.allocator.destroy(self);
     }
 
@@ -157,6 +160,23 @@ pub const NodeWsTransport = struct {
         const key_start = key_idx + key_header.len;
         const key_end = std.mem.indexOfPos(u8, request, key_start, "\r\n") orelse return error.InvalidRequest;
         const key = request[key_start..key_end];
+
+        // 認証チェック
+        if (self.secret_token) |token| {
+            const auth_header = "X-WEAVE-Token: ";
+            if (std.mem.indexOf(u8, request, auth_header)) |idx| {
+                const start = idx + auth_header.len;
+                const end = std.mem.indexOfPos(u8, request, start, "\r\n") orelse request.len;
+                const received = std.mem.trim(u8, request[start..end], " \t\r");
+                if (!std.mem.eql(u8, received, token)) {
+                    try stream.writeAll("HTTP/1.1 401 Unauthorized\r\n\r\n");
+                    return error.Unauthorized;
+                }
+            } else {
+                try stream.writeAll("HTTP/1.1 401 Unauthorized\r\n\r\n");
+                return error.AuthenticationRequired;
+            }
+        }
 
         const magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         var combined: [128]u8 = undefined;
