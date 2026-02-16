@@ -106,6 +106,17 @@ pub const ObsEgressNode = struct {
                 };
             } else if (op_int == 2) { // Identified
                 std.debug.print("{s}: Successfully identified with OBS\n", .{SELF_NAME});
+            } else if (op_int == 5) { // Event
+                if (parsed.value.object.get("d")) |d| {
+                    if (d.object.get("eventType")) |event_type| {
+                        var topic_buf: [128]u8 = undefined;
+                        if (std.fmt.bufPrint(&topic_buf, "core.obs.event.{s}", .{event_type.string})) |topic| {
+                            self.bus.publish(topic, frame.payload, .Transient, self.node_id) catch |err| {
+                                std.debug.print("{s}: Failed to publish OBS event: {any}\n", .{ SELF_NAME, err });
+                            };
+                        } else |_| {}
+                    }
+                }
             }
         }
         self.running = false;
