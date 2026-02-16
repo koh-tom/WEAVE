@@ -93,6 +93,12 @@ pub fn build(b: *std.Build) void {
     }.apply;
 
     // --- Main Executable ---
+    const zap = b.dependency("zap", .{
+        .target = target,
+        .optimize = optimize,
+        .openssl = false,
+    });
+
     const exe = b.addExecutable(.{
         .name = "WEAVE",
         .root_module = b.createModule(.{
@@ -101,6 +107,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.addImport("zap", zap.module("zap"));
+    // exe.linkLibrary(zap.artifact("facil.io"));
+
     addWamrDeps(b, exe, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
     b.installArtifact(exe);
 

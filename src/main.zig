@@ -1,4 +1,5 @@
 const std = @import("std");
+const zap = @import("zap");
 const wamr = @import("wamr_libs.zig").wamr;
 const host_api = @import("host_api.zig");
 const TwitchAdapter = @import("adapters/twitch.zig").TwitchAdapter;
