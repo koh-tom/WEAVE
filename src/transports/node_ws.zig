@@ -149,7 +149,6 @@ pub const NodeWsTransport = struct {
     }
 
     fn handleHandshake(self: *NodeWsTransport, stream: std.net.Stream) !void {
-        _ = self;
         var buf: [2048]u8 = undefined;
         const n = try stream.read(&buf);
         if (n == 0) return error.EmptyRequest;
