@@ -6,6 +6,8 @@ const Core = @import("core.zig").Core;
 const LogTransport = @import("transports/log_transport.zig").LogTransport;
 const WsGateway = @import("transports/ws_gateway.zig").WsGateway;
 const NodeWsTransport = @import("transports/node_ws.zig").NodeWsTransport;
+const ObsEgressNode = @import("nodes/obs_egress.zig").ObsEgressNode;
+
 
 fn runTwitch(t: *TwitchAdapter) void {
     t.run() catch |err| {
@@ -95,6 +97,13 @@ pub fn main() !void {
     var twitch = TwitchAdapter.init(allocator, &core.bus, 1, "SqLA");
     const twitch_thread = try std.Thread.spawn(.{}, runTwitch, .{&twitch});
     defer twitch.deinit();
+
+    // OBSアダプタの起動
+    var obs = try ObsEgressNode.init(allocator, &core.bus, 2, "obs-password");
+    defer obs.deinit();
+    obs.connect("127.0.0.1", 4455) catch |err| {
+        std.debug.print("Main: OBS connect failed (optional): {any}\n", .{err});
+    };
 
     var symbols = host_api.getNativeSymbols();
     try core.runtime.registerNatives("env", &symbols);
