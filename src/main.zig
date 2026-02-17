@@ -8,6 +8,7 @@ const LogTransport = @import("transports/log_transport.zig").LogTransport;
 const WsGateway = @import("transports/ws_gateway.zig").WsGateway;
 const NodeWsTransport = @import("transports/node_ws.zig").NodeWsTransport;
 const ObsEgressNode = @import("nodes/obs_egress.zig").ObsEgressNode;
+const DashboardNode = @import("nodes/dashboard.zig").DashboardNode;
 
 
 fn runTwitch(t: *TwitchAdapter) void {
@@ -105,6 +106,11 @@ pub fn main() !void {
     obs.connect("127.0.0.1", 4455) catch |err| {
         std.debug.print("Main: OBS connect failed (optional): {any}\n", .{err});
     };
+
+    // Dashboardの起動 (Port 3000)
+    var dashboard = try DashboardNode.init(allocator, &core.bus, 100, 3000);
+    defer dashboard.deinit();
+    try dashboard.start();
 
     var symbols = host_api.getNativeSymbols();
     try core.runtime.registerNatives("env", &symbols);

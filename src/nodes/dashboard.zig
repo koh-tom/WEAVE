@@ -48,57 +48,61 @@ pub const DashboardNode = struct {
     }
 
     /// HTTPリクエストハンドラ
-    fn handleHttpRequest(r: zap.Request) void {
-        r.sendBody("<h1>WEAVE Dashboard</h1><p>Connect via WebSocket at /ws</p>") catch return;
+    fn handleHttpRequest(r: zap.Request) anyerror!void {
+        try r.sendBody("<h1>WEAVE Dashboard</h1><p>Connect via WebSocket at /ws</p>");
     }
 
-    /// WebSocketアップグレードハンドラ
-    fn handleWebSocketUpgrade(r: zap.Request, protocol: []const u8) void {
-        if (std.mem.eql(u8, protocol, "websocket")) {
-            _ = zap.WebsocketUpgrade.upgrade(r.h, &websocket_handler, null) catch return;
-        }
-    }
+    /// WebSocket用ハンドラ型
+    const WsHandler = zap.WebSockets.Handler(DashboardNode);
 
-    /// WebSocketの各種イベントコールバック
-    var websocket_handler = zap.WebsocketHandler{
+    var ws_settings: WsHandler.WebSocketSettings = .{
         .on_open = onWebsocketOpen,
         .on_message = onWebsocketMessage,
         .on_close = onWebsocketClose,
     };
 
-    fn onWebsocketOpen(context: ?*anyopaque, handle: zap.WebsocketHandle) void {
-        _ = context;
-        std.debug.print("Dashboard: Client connected to WebSocket (handle: {d})\n", .{handle});
+    /// WebSocketアップグレードハンドラ
+    fn handleWebSocketUpgrade(r: zap.Request, protocol: []const u8) anyerror!void {
+        if (std.mem.eql(u8, protocol, "websocket")) {
+            // Contextを渡す場合はsettings.contextを設定
+            // 今回はシングルトン的に全WebSocketへブロードキャストするので一旦contextは不要でも動く
+            try WsHandler.upgrade(r.h, &ws_settings);
+        }
     }
 
-    fn onWebsocketMessage(context: ?*anyopaque, handle: zap.WebsocketHandle, message: []const u8, is_binary: bool) void {
+    fn onWebsocketOpen(context: ?*DashboardNode, handle: zap.WebSockets.WsHandle) anyerror!void {
+        _ = context;
+        std.debug.print("Dashboard: Client connected to WebSocket (handle: {any})\n", .{handle});
+    }
+
+    fn onWebsocketMessage(context: ?*DashboardNode, handle: zap.WebSockets.WsHandle, message: []const u8, is_text: bool) anyerror!void {
         _ = context;
         _ = handle;
         _ = message;
-        _ = is_binary;
+        _ = is_text;
     }
 
-    fn onWebsocketClose(context: ?*anyopaque, handle: zap.WebsocketHandle) void {
+    fn onWebsocketClose(context: ?*DashboardNode, uuid: isize) anyerror!void {
         _ = context;
-        _ = handle;
-        std.debug.print("Dashboard: Client disconnected\n");
+        std.debug.print("Dashboard: Client disconnected (uuid: {d})\n", .{uuid});
     }
 
     /// EventBusからのトレースメッセージを受信してWebSocketに流す
     fn onTraceMessage(context: ?*anyopaque, msg: *const event_bus.EventMessage) void {
-        const self: *SELF = @ptrCast(@alignCast(context));
+        _ = context; // 現時点ではselfを使用しない
         
         // JSONメッセージの構築
-        // format: { "topic": "...", "payload": "...", "origin": 0 }
         var buf: [4096]u8 = undefined;
         const json = std.fmt.bufPrint(&buf, 
             "{{\"topic\":\"{s}\",\"payload\":\"{s}\",\"origin\":{d}}}",
-            .{ msg.topic, msg.payload, msg.origin_node_id }
+            .{ msg.topic, msg.payload, msg.source_node_id }
         ) catch return;
 
-        // 全クライアントにブロードキャスト
-        zap.WebsocketHandler.broadcast(json, false) catch |err| {
-            std.debug.print("Dashboard: Broadcast error: {any}\n", .{err});
-        };
+        // 全クライアントにブロードキャスト（ZAP v0.10+のpublishを使用）
+        WsHandler.publish(.{
+            .channel = "dashboard", // ブロードキャスト用のチャンネル名（登録が必要かもしれません）
+            .message = json,
+            .is_json = true,
+        });
     }
 };
