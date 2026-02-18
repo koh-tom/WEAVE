@@ -192,7 +192,6 @@ pub const EventBus = struct {
         while (it.next()) |entry| {
             var list = entry.value_ptr.*;
             list.deinit(self.allocator);
-            self.allocator.free(entry.key_ptr.*);
         }
         self.subscribers.deinit();
 
@@ -210,7 +209,6 @@ pub const EventBus = struct {
 
         var last_it = self.last_messages.iterator();
         while (last_it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(self.allocator);
         }
         self.last_messages.deinit();
@@ -318,7 +316,6 @@ pub const EventBus = struct {
 
     pub fn subscribe(self: *EventBus, topic: []const u8, node_id: u32, callback: SubscribeCallback, context: ?*anyopaque) !void {
         self.mutex.lock();
-        defer self.mutex.unlock();
 
         // ワイルドカードが含まれているかチェック
         const is_wildcard = std.mem.indexOfScalar(u8, topic, '*') != null or 
@@ -346,6 +343,11 @@ pub const EventBus = struct {
                 .callback = callback,
             });
         }
+        
+        // 購読リストへの追加が終わったのでアンロック (Deadlock回避)
+        // 以降の graph.updateSubscription 内での publish 呼び出しを安全にする
+        self.mutex.unlock();
+
         if (self.verbose) std.debug.print("Node {} subscribed to topic pattern '{s}'\n", .{ node_id, topic });
 
         if (self.graph) |g| {
@@ -355,6 +357,8 @@ pub const EventBus = struct {
         }
 
         // Transient QoS の最新メッセージがあれば即座に配送
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.last_messages.get(topic)) |msg| {
             if (msg.source_node_id != node_id) {
                 if (self.verbose) std.debug.print("QoS: Dispatching Transient message to new subscriber (Topic: {s})\n", .{topic});
