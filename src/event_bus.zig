@@ -252,6 +252,8 @@ pub const EventBus = struct {
     // + : single level
     // # : multi level (must be at the end)
     pub fn isMatch(pattern: []const u8, topic: []const u8) bool {
+        if (std.mem.eql(u8, pattern, "#")) return true;
+        
         var p_it = std.mem.splitScalar(u8, pattern, '.');
         var t_it = std.mem.splitScalar(u8, topic, '.');
 
@@ -259,16 +261,24 @@ pub const EventBus = struct {
             const p_part = p_it.next();
             const t_part = t_it.next();
 
-            if (p_part == null) return t_part == null;
+            // パターンが終了
+            if (p_part == null) {
+                // トピックも終了していればマッチ
+                return t_part == null;
+            }
 
+            // MQTT形式の '#' : それ以降全てにマッチ
             if (std.mem.eql(u8, p_part.?, "#")) return true;
 
+            // トピックが先に終わってしまったら不一致（'#' の場合を除く）
             if (t_part == null) return false;
 
+            // '+' または '*' : この階層だけスキップして次へ
             if (std.mem.eql(u8, p_part.?, "+") or std.mem.eql(u8, p_part.?, "*")) {
                 continue;
             }
 
+            // 文字列の完全一致を確認
             if (!std.mem.eql(u8, p_part.?, t_part.?)) return false;
         }
     }
