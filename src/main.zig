@@ -107,8 +107,8 @@ pub fn main() !void {
         std.debug.print("Main: OBS connect failed (optional): {any}\n", .{err});
     };
 
-    // Dashboardの起動 (Port 3000)
-    var dashboard = try DashboardNode.init(allocator, &core.bus, 100, 3000);
+    // Dashboardの起動 (Port 3030)
+    var dashboard = try DashboardNode.init(allocator, &core.bus, 100, 3030);
     defer dashboard.deinit();
     try dashboard.start();
 
