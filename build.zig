@@ -108,6 +108,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("zap", zap.module("zap"));
+    // Workaround: omarchyOS (GCC 16 / glibc 2.43+) の .sframe セクションに
+    // Zig のセルフホストリンカーが未対応のため、LLVM/LLD を使用する
+    exe.use_llvm = true;
+    exe.use_lld = true;
     // exe.linkLibrary(zap.artifact("facil.io"));
 
     addWamrDeps(b, exe, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
@@ -130,6 +134,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    stress_exe.use_llvm = true;
+    stress_exe.use_lld = true;
     addWamrDeps(b, stress_exe, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
 
     const run_stress_cmd = b.addRunArtifact(stress_exe);
@@ -145,6 +151,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    bus_test_exe.use_llvm = true;
+    bus_test_exe.use_lld = true;
     const run_bus_test = b.addRunArtifact(bus_test_exe);
     const bus_test_step = b.step("bus_test", "Run pure Zig EventBus test");
     bus_test_step.dependOn(&run_bus_test.step);
