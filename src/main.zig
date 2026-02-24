@@ -37,7 +37,7 @@ fn runGraphPublisher(core: *Core) void {
         };
         defer core.allocator.free(json);
         
-        core.bus.publish("core.system.graph.full", 0, json, .Transient) catch |err| {
+        core.bus.publish("core.system.graph.full", json, .Transient, 0) catch |err| {
             std.debug.print("GraphPublisher Error (Publish): {any}\n", .{err});
         };
         std.Thread.sleep(60 * std.time.ns_per_s);
