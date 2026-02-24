@@ -2,6 +2,7 @@
 .zig-cache/
 zig-cache/
 zig-out/
+zig-pkg/
 
 # Build Artifacts
 libevent_bus.a
@@ -10,15 +11,15 @@ main
 stress_test
 bus_test
 
-# Logs
+# Logs / Temp
 *.log
 build_err.log
 build_error.txt
+build_out*.txt
+scratch/
 
 # Node.js (Tests & Tools)
 node_modules/
-package.json
-package-lock.json
 npm-debug.log*
 
 # Temporary Test Scripts
