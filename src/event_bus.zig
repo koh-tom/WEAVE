@@ -1,11 +1,8 @@
 const std = @import("std");
+const common = @import("common/types.zig");
 
 /// イベントのQoSレベル
-pub const QoS = enum(u8) {
-    BestEffort = 0,
-    Reliable = 1,
-    Transient = 2,
-};
+pub const QoS = common.QoS;
 
 /// ホスト内で管理されるメッセージのエンベロープ
 pub const EventMessage = struct {
@@ -132,11 +129,7 @@ pub const EventQueue = struct {
     }
 };
 
-pub const IntrospectionLevel = enum {
-    off,
-    metadata,
-    contents,
-};
+pub const IntrospectionLevel = common.IntrospectionLevel;
 
 /// Event Bus コア実装 (スレッドセーフ)
 pub const EventBus = struct {
