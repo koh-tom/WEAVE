@@ -1,25 +1,11 @@
 // ========================================================
-// WEAVE Plugin SDK (Wasm側)
-// std ライブラリに依存しないバンプアロケータ実装
-// Reference Types 問題を完全に回避する
-// ========================================================
+const common = @import("common/types.zig");
 
 // --- Host API (extern宣言) ---
 /// WEAVE API 戻り値定義 (Host側と共通)
-pub const Result = enum(i32) {
-    SUCCESS = 0,
-    ERROR_UNKNOWN = 1,
-    ERROR_PERMISSION_DENIED = 2,
-    ERROR_INVALID_PARAMETER = 3,
-    ERROR_QUEUE_FULL = 4,
-    ERROR_NOT_FOUND = 5,
-};
+pub const Result = common.ResultCode;
 
-pub const QoS = enum(u32) {
-    BestEffort = 0,
-    Reliable = 1,
-    Transient = 2,
-};
+pub const QoS = common.QoS;
 
 extern fn os_api_publish(topic_ptr: [*]const u8, payload_ptr: [*]const u8, payload_len: u32, qos: u32) i32;
 extern fn os_api_subscribe(topic_ptr: [*]const u8) i32;
