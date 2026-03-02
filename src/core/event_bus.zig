@@ -155,7 +155,7 @@ pub const EventBus = struct {
         ctx: *anyopaque,
         callback: *const fn (ctx: *anyopaque, msg: *const EventMessage) void,
     } = null,
-    graph: ?*@import("../graph.zig").SystemGraph = null,
+    graph: ?*@import("graph.zig").SystemGraph = null,
     introspection_level: IntrospectionLevel = .metadata,
 
     pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) !EventBus {
