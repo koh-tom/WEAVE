@@ -1,14 +1,14 @@
 const std = @import("std");
 const zap = @import("zap");
-const wamr = @import("wamr_libs.zig").wamr;
-const host_api = @import("host_api.zig");
-const TwitchAdapter = @import("adapters/twitch.zig").TwitchAdapter;
-const Core = @import("core.zig").Core;
-const LogTransport = @import("transports/log_transport.zig").LogTransport;
-const WsGateway = @import("transports/ws_gateway.zig").WsGateway;
-const NodeWsTransport = @import("transports/node_ws.zig").NodeWsTransport;
-const ObsEgressNode = @import("nodes/obs_egress.zig").ObsEgressNode;
-const DashboardNode = @import("nodes/dashboard.zig").DashboardNode;
+const wamr = @import("core/wamr_libs.zig").wamr;
+const host_api = @import("api/host_api.zig");
+const TwitchAdapter = @import("builtin/twitch.zig").TwitchAdapter;
+const Core = @import("core/core.zig").Core;
+const LogTransport = @import("transport/log_transport.zig").LogTransport;
+const WsGateway = @import("transport/ws_gateway.zig").WsGateway;
+const NodeWsTransport = @import("transport/node_ws.zig").NodeWsTransport;
+const ObsEgressNode = @import("builtin/obs.zig").ObsEgressNode;
+const DashboardNode = @import("builtin/dashboard.zig").DashboardNode;
 
 
 fn runTwitch(t: *TwitchAdapter) void {
@@ -78,7 +78,7 @@ pub fn main() !void {
 
     try core.setupGateway();
 
-    const dispatcher_thread = try std.Thread.spawn(.{}, @import("event_bus.zig").EventBus.runDispatcher, .{&core.bus});
+    const dispatcher_thread = try std.Thread.spawn(.{}, @import("core/event_bus.zig").EventBus.runDispatcher, .{&core.bus});
     const ws_thread = try std.Thread.spawn(.{}, runWsGateway, .{ws_gateway});
     ws_thread.detach();
 
