@@ -129,7 +129,7 @@ pub fn build(b: *std.Build) void {
     const stress_exe = b.addExecutable(.{
         .name = "stress_test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/stress_test.zig"),
+            .root_source_file = b.path("src/tests/stress_test.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
     const bus_test_exe = b.addExecutable(.{
         .name = "bus_test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/test_event_bus.zig"),
+            .root_source_file = b.path("src/tests/bus_test.zig"),
             .target = target,
             .optimize = optimize,
         }),

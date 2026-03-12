@@ -1,5 +1,5 @@
 const std = @import("std");
-const TcpClient = @import("../net/tcp_client.zig").TcpClient;
+const TcpClient = @import("../transport/net/tcp_client.zig").TcpClient;
 const EventBus = @import("../core/event_bus.zig").EventBus;
 
 pub const TwitchAdapter = struct {
