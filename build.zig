@@ -4,6 +4,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Wasmターゲットの設定
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+
+    // 共通モジュールの定義 (Host/Wasmで共有)
+    const common_module = b.createModule(.{
+        .root_source_file = b.path("src/common/types.zig"),
+    });
+
+    // Wasm SDKモジュールの定義
+    const sdk_module = b.createModule(.{
+        .root_source_file = b.path("wasm-apps/plugin_sdk.zig"),
+    });
+    sdk_module.addImport("common", common_module);
+
     const wamr_dir = "deps/wasm-micro-runtime";
 
     // WAMRのインクルードパス (共通)
@@ -108,6 +125,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("zap", zap.module("zap"));
+    exe.root_module.addImport("common", common_module);
     // Workaround: omarchyOS (GCC 16 / glibc 2.43+) の .sframe セクションに
     // Zig のセルフホストリンカーが未対応のため、LLVM/LLD を使用する
     exe.use_llvm = true;
@@ -156,4 +174,31 @@ pub fn build(b: *std.Build) void {
     const run_bus_test = b.addRunArtifact(bus_test_exe);
     const bus_test_step = b.step("bus_test", "Run pure Zig EventBus test");
     bus_test_step.dependOn(&run_bus_test.step);
+
+    // --- Wasm Plugin Build ---
+    const chat_node = b.addExecutable(.{
+        .name = "chat_node",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("wasm-apps/chat_node.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+        }),
+    });
+    chat_node.root_module.addImport("plugin_sdk", sdk_module);
+    chat_node.root_module.addImport("common", common_module);
+
+    // Wasm特有の設定: エクスポート関数を保持し、mainを要求しない
+    chat_node.rdynamic = true;
+    chat_node.entry = .disabled;
+
+    // ビルド成果物を wasm-apps/ にコピーするステップ
+    const install_wasm = b.addInstallArtifact(chat_node, .{
+        .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
+    });
+    
+    const wasm_step = b.step("wasm", "Build Wasm plugins");
+    wasm_step.dependOn(&install_wasm.step);
+
+    // デフォルトの install ステップが Wasm ビルドにも依存するようにする
+    b.getInstallStep().dependOn(wasm_step);
 }
