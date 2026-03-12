@@ -1,5 +1,6 @@
 const std = @import("std");
-const EventBus = @import("event_bus.zig").EventBus;
+const event_bus = @import("event_bus.zig");
+const EventBus = event_bus.EventBus;
 const PluginManager = @import("plugin_manager.zig").PluginManager;
 const TransportManager = @import("../transport/interface.zig").TransportManager;
 const WasmRuntime = @import("wasm_runtime.zig").WasmRuntime;
@@ -37,7 +38,7 @@ pub const Core = struct {
         self.bus.global_observer = .{
             .ctx = &self.tm,
             .callback = struct {
-                fn cb(ctx: *anyopaque, msg: *const @import("event_bus.zig").EventMessage) void {
+                fn cb(ctx: *anyopaque, msg: *const event_bus.EventMessage) void {
                     const tm: *TransportManager = @ptrCast(@alignCast(ctx));
                     tm.broadcast(msg.topic, msg.payload, msg.qos);
                 }
