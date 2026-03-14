@@ -1,5 +1,5 @@
 // ========================================================
-const common = @import("common/types.zig");
+const common = @import("common");
 
 // --- Host API (extern宣言) ---
 /// WEAVE API 戻り値定義 (Host側と共通)

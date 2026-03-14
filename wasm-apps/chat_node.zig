@@ -1,4 +1,4 @@
-const sdk = @import("plugin_sdk.zig");
+const sdk = @import("plugin_sdk");
 
 // WAMR runtime が期待するエクスポート
 // plugin_sdk.zig で定義された os_alloc, os_dealloc が利用可能
