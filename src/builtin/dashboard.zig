@@ -64,7 +64,8 @@ pub const DashboardNode = struct {
         
         self.thread = try std.Thread.spawn(.{}, struct {
             fn run() void {
-                zap.start(.{ .threads = 2, .workers = 1 });
+                zap.start(.{ .threads = 2, .workers = 0 });
+                std.process.exit(0);
             }
         }.run, .{});
 
@@ -97,7 +98,6 @@ pub const DashboardNode = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.clients.put(handle, {});
-        // std.debug.print("Dashboard: Client connected\n", .{});
     }
 
     fn onWebsocketMessage(context: ?*SELF, handle: zap.WebSockets.WsHandle, message: []const u8, is_text: bool) anyerror!void {

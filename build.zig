@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag = .freestanding,
+        .cpu_model = .{ .explicit = &std.Target.wasm.cpu.mvp },
     });
 
     // 共通モジュールの定義 (Host/Wasmで共有)
@@ -130,7 +131,6 @@ pub fn build(b: *std.Build) void {
     // Zig のセルフホストリンカーが未対応のため、LLVM/LLD を使用する
     exe.use_llvm = true;
     exe.use_lld = true;
-    // exe.linkLibrary(zap.artifact("facil.io"));
 
     addWamrDeps(b, exe, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
     b.installArtifact(exe);
