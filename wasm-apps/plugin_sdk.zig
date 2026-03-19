@@ -1,4 +1,4 @@
-// ========================================================
+const std = @import("std");
 const common = @import("common");
 
 // --- Host API (extern宣言) ---
@@ -60,6 +60,50 @@ export fn os_reset_heap() void {
     bump_offset = 0;
 }
 
+// --- Allocator Interface ---
+
+/// SDKが使用するアロケータ（バンプアロケータのラッパー）
+pub const allocator = std.mem.Allocator{
+    .ptr = undefined,
+    .vtable = &.{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    },
+};
+
+fn allocFn(_: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+    _ = ptr_align;
+    _ = ret_addr;
+    const ptr = os_alloc(@intCast(len));
+    if (ptr == 0) return null;
+    return @ptrFromInt(ptr);
+}
+
+fn resizeFn(_: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+    _ = buf;
+    _ = buf_align;
+    _ = new_len;
+    _ = ret_addr;
+    return false; // バンプアロケータなのでリサイズ不可
+}
+
+fn remapFn(_: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+    _ = buf;
+    _ = buf_align;
+    _ = new_len;
+    _ = ret_addr;
+    return null; // バンプアロケータなのでリマップ不可
+}
+
+fn freeFn(_: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
+    _ = buf;
+    _ = buf_align;
+    _ = ret_addr;
+    // 解放は行わない
+}
+
 // --- ヘルパー関数 ---
 
 /// ログ出力
@@ -77,4 +121,10 @@ pub fn publish(topic: []const u8, payload: []const u8, qos: QoS) Result {
 pub fn subscribe(topic: []const u8) Result {
     const res = os_api_subscribe(topic.ptr);
     return @enumFromInt(res);
+}
+
+/// JSONペイロードを構造体に変換する
+/// 戻り値の Parsed(T) は deinit() を呼ぶことでメモリ管理される（実際にはバンプアロケータのリセットに依存）
+pub fn parseJson(comptime T: type, payload: []const u8) !std.json.Parsed(T) {
+    return std.json.parseFromSlice(T, allocator, payload, .{ .ignore_unknown_fields = true });
 }
