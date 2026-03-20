@@ -10,6 +10,74 @@ const ObsEgressNode = @import("builtin/obs.zig").ObsEgressNode;
 const DashboardNode = @import("builtin/dashboard.zig").DashboardNode;
 
 
+const Config = struct {
+    ws_gateway_port: u16 = 8080,
+    node_ws_port: u16 = 8081,
+    dashboard_port: u16 = 3030,
+    twitch_channel: []const u8 = "SqLA",
+    obs_host: []const u8 = "127.0.0.1",
+    obs_port: u16 = 4455,
+    obs_password: []const u8 = "obs-password",
+
+    pub fn parse(allocator: std.mem.Allocator) !Config {
+        var self = Config{};
+        const args = try std.process.argsAlloc(allocator);
+        defer std.process.argsFree(allocator, args);
+
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--ws-port")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.ws_gateway_port = try std.fmt.parseInt(u16, args[i], 10);
+            } else if (std.mem.eql(u8, arg, "--node-port")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.node_ws_port = try std.fmt.parseInt(u16, args[i], 10);
+            } else if (std.mem.eql(u8, arg, "--dash-port")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.dashboard_port = try std.fmt.parseInt(u16, args[i], 10);
+            } else if (std.mem.eql(u8, arg, "--twitch")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.twitch_channel = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--obs-host")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.obs_host = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--obs-port")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.obs_port = try std.fmt.parseInt(u16, args[i], 10);
+            } else if (std.mem.eql(u8, arg, "--obs-pass")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.obs_password = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--help")) {
+                std.debug.print(
+                    \\Usage: WEAVE [options]
+                    \\Options:
+                    \\  --ws-port <port>     Port for WebSocket Gateway (default: 8080)
+                    \\  --node-port <port>   Port for Node WebSocket Transport (default: 8081)
+                    \\  --dash-port <port>   Port for Dashboard HTTP Server (default: 3030)
+                    \\  --twitch <channel>   Twitch channel to join (default: SqLA)
+                    \\  --obs-host <host>    OBS WebSocket host (default: 127.0.0.1)
+                    \\  --obs-port <port>    OBS WebSocket port (default: 4455)
+                    \\  --obs-pass <pass>    OBS WebSocket password (default: obs-password)
+                    \\  --help               Show this help
+                    \\
+                , .{});
+                std.process.exit(0);
+            } else {
+                std.debug.print("Warning: Unknown argument '{s}'\n", .{arg});
+            }
+        }
+        return self;
+    }
+};
+
 fn runTwitch(t: *TwitchAdapter) void {
     t.run() catch |err| {
         std.debug.print("TwitchAdapter Error: {any}\n", .{err});
@@ -44,13 +112,20 @@ fn runGraphPublisher(core: *Core) void {
 }
 
 pub fn main() !void {
-    std.debug.print("========================================\n", .{});
-    std.debug.print("   WEAVE: Streaming Event OS Core Daemon\n", .{});
-    std.debug.print("========================================\n", .{});
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    const config = try Config.parse(allocator);
+
+    std.debug.print("========================================\n", .{});
+    std.debug.print("   WEAVE: Streaming Event OS Core Daemon\n", .{});
+    std.debug.print("========================================\n", .{});
+    std.debug.print("Config: Dashboard: http://localhost:{d}\n", .{config.dashboard_port});
+    std.debug.print("Config: WS Gateway: ws://localhost:{d}\n", .{config.ws_gateway_port});
+    std.debug.print("Config: Node WS: ws://localhost:{d}\n", .{config.node_ws_port});
+    std.debug.print("Config: Twitch: {s}, OBS: {s}:{d}\n", .{config.twitch_channel, config.obs_host, config.obs_port});
+    std.debug.print("----------------------------------------\n", .{});
 
     // 1. Coreの初期化 (EventBus, PluginManager, TransportManager, WasmRuntime)
     var core = try Core.init(allocator);
@@ -67,11 +142,11 @@ pub fn main() !void {
     var log_transport = LogTransport.init("DebugLogger");
     try core.tm.register(log_transport.asTransport());
 
-    var ws_gateway = try WsGateway.init(allocator, &core.bus, 8080);
+    var ws_gateway = try WsGateway.init(allocator, &core.bus, config.ws_gateway_port);
     defer ws_gateway.deinit();
     try core.tm.register(ws_gateway.transport());
 
-    var node_ws = try NodeWsTransport.init(allocator, &core.bus, 8081, "weave-secret-2026");
+    var node_ws = try NodeWsTransport.init(allocator, &core.bus, config.node_ws_port, "weave-secret-2026");
     defer node_ws.deinit();
     try core.tm.register(node_ws.transport());
 
@@ -95,19 +170,19 @@ pub fn main() !void {
     try core.bus.publish("core.node.registered", "{\"node_id\":100,\"name\":\"chat_node\",\"type\":\"wasm\"}", .Transient, 0);
 
     // Twitchアダプタの起動 (Native Node)
-    var twitch = TwitchAdapter.init(allocator, &core.bus, 1, "SqLA");
+    var twitch = TwitchAdapter.init(allocator, &core.bus, 1, config.twitch_channel);
     const twitch_thread = try std.Thread.spawn(.{}, runTwitch, .{&twitch});
     defer twitch.deinit();
 
     // OBSアダプタの起動
-    var obs = try ObsEgressNode.init(allocator, &core.bus, 2, "obs-password");
+    var obs = try ObsEgressNode.init(allocator, &core.bus, 2, config.obs_password);
     defer obs.deinit();
-    obs.connect("127.0.0.1", 4455) catch |err| {
+    obs.connect(config.obs_host, config.obs_port) catch |err| {
         std.debug.print("Main: OBS connect failed (optional): {any}\n", .{err});
     };
 
-    // Dashboardの起動 (Port 3030)
-    var dashboard = try DashboardNode.init(allocator, &core.bus, 100, 3030);
+    // Dashboardの起動
+    var dashboard = try DashboardNode.init(allocator, &core.bus, 100, config.dashboard_port);
     defer dashboard.deinit();
     try dashboard.start();
 
