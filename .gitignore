@@ -28,7 +28,6 @@ test_node.js
 
 # Wasm Artifacts
 wasm-apps/*.wasm
-!wasm-apps/chat_node.wasm
 
 # IDEs & OS
 .vscode/

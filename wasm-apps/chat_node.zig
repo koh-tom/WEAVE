@@ -1,7 +1,10 @@
+const std = @import("std");
 const sdk = @import("plugin_sdk");
 
-// WAMR runtime が期待するエクスポート
-// plugin_sdk.zig で定義された os_alloc, os_dealloc が利用可能
+const TwitchMessage = struct {
+    user: []const u8,
+    message: []const u8,
+};
 
 export fn on_init() i32 {
     sdk.log(1, "Hello WEAVE! Twitch Monitor Node active.");
@@ -14,11 +17,18 @@ export fn on_init() i32 {
 }
 
 export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_len: u32) void {
-    _ = topic_ptr;
-    _ = topic_len;
-    // ポインタからスライスを復元
+    const topic = @as([*]const u8, @ptrFromInt(topic_ptr))[0..topic_len];
     const payload = @as([*]const u8, @ptrFromInt(payload_ptr))[0..payload_len];
 
-    sdk.log(1, "Twitch Event Received!");
-    sdk.log(1, payload);
+    if (std.mem.eql(u8, topic, "ext.twitch.chat.message")) {
+        const parsed = sdk.parseJson(TwitchMessage, payload) catch {
+            sdk.log(1, "Error: Failed to parse JSON payload");
+            return;
+        };
+        defer parsed.deinit();
+
+        var buf: [256]u8 = undefined;
+        const log_msg = std.fmt.bufPrint(&buf, "[Twitch] {s}: {s}", .{parsed.value.user, parsed.value.message}) catch return;
+        sdk.log(1, log_msg);
+    }
 }
