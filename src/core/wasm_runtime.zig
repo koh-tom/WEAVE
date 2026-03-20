@@ -1,5 +1,5 @@
 const std = @import("std");
-const wamr = @import("wamr_libs.zig").wamr;
+pub const wamr = @import("wamr_libs.zig").wamr;
 
 pub const WasmRuntime = struct {
     pub fn init() !WasmRuntime {
