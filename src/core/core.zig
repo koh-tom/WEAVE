@@ -46,4 +46,47 @@ pub const Core = struct {
         };
         std.debug.print("Core: Gateway bridge established (EventBus -> TransportManager)\n", .{});
     }
+
+    /// Wasmプラグインをロードして初期化する
+    pub fn loadPlugin(self: *Core, wasm_path: []const u8) !void {
+        const wasm_buffer = try std.fs.cwd().readFileAlloc(self.allocator, wasm_path, 1024 * 1024);
+        defer self.allocator.free(wasm_buffer);
+
+        const module = try self.runtime.loadModule(wasm_buffer);
+        // 注意: モジュールはランタイムが管理するが、個別のアンロード戦略は将来課題
+
+        const module_inst = try self.runtime.instantiate(module, 64 * 1024, 64 * 1024);
+
+        // マニフェストパスの推測 (plugin.wasm -> plugin.json)
+        var manifest_path_buf: [256]u8 = undefined;
+        const manifest_path = if (std.mem.endsWith(u8, wasm_path, ".wasm"))
+            try std.fmt.bufPrint(&manifest_path_buf, "{s}.json", .{wasm_path[0 .. wasm_path.len - 5]})
+        else
+            "wasm-apps/manifest.json";
+
+        // グラフへの登録 (Wasm) - 先に登録しておかないと初期購読(subscribe)時に NodeNotFound になる
+        const node_id = self.pm.next_node_id;
+        try self.graph.registerNode(node_id, wasm_path, .wasm); // 仮名
+
+        const meta = try self.pm.registerPlugin(module_inst, wasm_path, manifest_path, &self.bus);
+        
+        // 名前の更新（マニフェストから正確な名前を取得）
+        try self.graph.registerNode(node_id, meta.manifest_parsed.value.name, .wasm);
+        
+        try self.bus.publish("core.node.registered", "{\"type\":\"wasm\"}", .Transient, 0); 
+
+        // on_init 呼び出し
+        const wamr = @import("wasm_runtime.zig").wamr;
+        if (wamr.wasm_runtime_lookup_function(module_inst, "on_init")) |func| {
+            const env = wamr.wasm_runtime_create_exec_env(module_inst, 16384);
+            defer wamr.wasm_runtime_destroy_exec_env(env);
+            var argv = [_]u32{0};
+            _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
+        }
+
+        // マニフェストに基づいたSubscribe適用
+        try self.pm.applyManifestSubscriptions(module_inst, &self.bus);
+
+        std.debug.print("Core: Loaded plugin '{s}' (Node {})\n", .{ meta.manifest_parsed.value.name, meta.node_id });
+    }
 };
