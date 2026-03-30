@@ -34,7 +34,7 @@ pub const TwitchAdapter = struct {
         var retry_count: u32 = 0;
 
         while (self.running) {
-            self.connectAndLoop() catch |err| {
+            self.connectAndLoop(&retry_count) catch |err| {
                 std.debug.print("TwitchAdapter: Connection error: {any}\n", .{err});
             };
 
@@ -50,7 +50,7 @@ pub const TwitchAdapter = struct {
         }
     }
 
-    fn connectAndLoop(self: *TwitchAdapter) !void {
+    fn connectAndLoop(self: *TwitchAdapter, retry_count: *u32) !void {
         std.debug.print("TwitchAdapter: Connecting to {s}:{}...\n", .{ TWITCH_HOST, TWITCH_PORT });
         try self.client.connect(TWITCH_HOST, TWITCH_PORT);
         std.debug.print("TwitchAdapter: Connected. Logging in anonymously...\n", .{});
@@ -61,6 +61,9 @@ pub const TwitchAdapter = struct {
         var join_buf: [256]u8 = undefined;
         const join_cmd = try std.fmt.bufPrint(&join_buf, "JOIN #{s}\r\n", .{self.channel});
         try self.client.send(join_cmd);
+
+        // 接続とログインが成功したらリトライ回数をリセット
+        retry_count.* = 0;
 
         while (self.running) {
             const line = try self.client.readLine(self.allocator) orelse {

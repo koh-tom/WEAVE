@@ -58,7 +58,7 @@ pub const ObsEgressNode = struct {
     fn runRetryLoop(self: *ObsEgressNode) void {
         var retry_count: u32 = 0;
         while (self.running) {
-            self.doConnectAndReceive() catch |err| {
+            self.doConnectAndReceive(&retry_count) catch |err| {
                 if (err != error.EndOfStream) {
                     std.debug.print("ObsEgress: Connection failed: {any}\n", .{ err });
                 }
@@ -74,7 +74,7 @@ pub const ObsEgressNode = struct {
         }
     }
 
-    fn doConnectAndReceive(self: *ObsEgressNode) !void {
+    fn doConnectAndReceive(self: *ObsEgressNode, retry_count: *u32) !void {
         const host = self.host orelse return;
         const address = try std.net.Address.parseIp(host, self.port);
         
@@ -88,6 +88,9 @@ pub const ObsEgressNode = struct {
         std.debug.print("ObsEgress: Connected to OBS. Starting handshake...\n", .{});
         try self.clientHandshake(host, self.port);
         std.debug.print("ObsEgress: WebSocket handshake completed.\n", .{});
+        
+        // 接続とハンドシェイクが成功したらリトライ回数をリセット
+        retry_count.* = 0;
         
         try self.receiverLoop();
     }
