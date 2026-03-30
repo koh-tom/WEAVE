@@ -11,8 +11,8 @@ pub const ObsEgressNode = struct {
     password: ?[]const u8,
     running: bool,
     mutex: std.Thread.Mutex,
-
-    const SELF_NAME = "ObsEgress";
+    host: ?[]const u8,
+    port: u16,
 
     pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, node_id: u32, password: ?[]const u8) !*ObsEgressNode {
         const self = try allocator.create(ObsEgressNode);
@@ -24,6 +24,8 @@ pub const ObsEgressNode = struct {
             .password = if (password) |p| try allocator.dupe(u8, p) else null,
             .running = false,
             .mutex = .{},
+            .host = null,
+            .port = 0,
         };
         return self;
     }
@@ -32,32 +34,62 @@ pub const ObsEgressNode = struct {
         self.running = false;
         if (self.stream) |s| s.close();
         if (self.password) |p| self.allocator.free(p);
+        if (self.host) |h| self.allocator.free(h);
         self.allocator.destroy(self);
     }
 
-    /// OBSへの接続と認証プロセスを開始する
+    /// OBSへの接続と認証プロセスをバックグラウンドで開始する
     pub fn connect(self: *ObsEgressNode, host: []const u8, port: u16) !void {
-        std.debug.print("{s}: Connecting to OBS at {s}:{}...\n", .{ SELF_NAME, host, port });
-        const address = try std.net.Address.parseIp(host, port);
-        const stream = try std.net.tcpConnectToAddress(address);
-        self.stream = stream;
+        self.host = try self.allocator.dupe(u8, host);
+        self.port = port;
         self.running = true;
-
-        // WebSocketハンドシェイク (Client側)
-        try self.clientHandshake(host, port);
         
-        // 購読開始
+        // 購読開始（接続前でも行っておく）
         try self.bus.subscribe("core.obs.request.*", self.node_id, ObsEgressNode.onMessage, self);
         
         // グラフ登録
         if (self.bus.graph) |g| {
-            try g.registerNode(self.node_id, SELF_NAME, .native);
+            try g.registerNode(self.node_id, "ObsEgress", .native);
         }
 
-        std.debug.print("{s}: WebSocket handshake completed.\n", .{SELF_NAME});
+        _ = try std.Thread.spawn(.{}, ObsEgressNode.runRetryLoop, .{self});
+    }
+
+    fn runRetryLoop(self: *ObsEgressNode) void {
+        var retry_count: u32 = 0;
+        while (self.running) {
+            self.doConnectAndReceive() catch |err| {
+                if (err != error.EndOfStream) {
+                    std.debug.print("ObsEgress: Connection failed: {any}\n", .{ err });
+                }
+            };
+            
+            if (!self.running) break;
+
+            const shift = @as(u6, @intCast(@min(10, retry_count)));
+            const backoff: u64 = @min(30, @as(u64, 1) << shift);
+            std.debug.print("ObsEgress: Retrying in {d} seconds...\n", .{ backoff });
+            std.Thread.sleep(backoff * std.time.ns_per_s);
+            retry_count += 1;
+        }
+    }
+
+    fn doConnectAndReceive(self: *ObsEgressNode) !void {
+        const host = self.host orelse return;
+        const address = try std.net.Address.parseIp(host, self.port);
         
-        // 受信ループ
-        _ = try std.Thread.spawn(.{}, receiverLoop, .{self});
+        const stream = try std.net.tcpConnectToAddress(address);
+        
+        self.mutex.lock();
+        if (self.stream) |s| s.close();
+        self.stream = stream;
+        self.mutex.unlock();
+
+        std.debug.print("ObsEgress: Connected to OBS. Starting handshake...\n", .{});
+        try self.clientHandshake(host, self.port);
+        std.debug.print("ObsEgress: WebSocket handshake completed.\n", .{});
+        
+        try self.receiverLoop();
     }
 
     fn clientHandshake(self: *ObsEgressNode, host: []const u8, port: u16) !void {
@@ -81,14 +113,9 @@ pub const ObsEgressNode = struct {
         }
     }
 
-    fn receiverLoop(self: *ObsEgressNode) void {
+    fn receiverLoop(self: *ObsEgressNode) !void {
         while (self.running) {
-            const frame = self.readFrame() catch |err| {
-                if (err != error.EndOfStream) {
-                    std.debug.print("{s}: Read error: {any}\n", .{ SELF_NAME, err });
-                }
-                break;
-            };
+            const frame = try self.readFrame();
             defer self.allocator.free(frame.payload);
 
             if (frame.opcode == 0x8) break; // Close
@@ -97,29 +124,31 @@ pub const ObsEgressNode = struct {
             defer parsed.deinit();
 
             const op = parsed.value.object.get("op") orelse continue;
-            const op_int = op.integer;
-
-            if (op_int == 0) { // Hello
-                self.handleHello(parsed.value.object) catch |err| {
-                    std.debug.print("{s}: Auth failed: {any}\n", .{ SELF_NAME, err });
-                    break;
-                };
-            } else if (op_int == 2) { // Identified
-                std.debug.print("{s}: Successfully identified with OBS\n", .{SELF_NAME});
-            } else if (op_int == 5) { // Event
-                if (parsed.value.object.get("d")) |d| {
-                    if (d.object.get("eventType")) |event_type| {
-                        var topic_buf: [128]u8 = undefined;
-                        if (std.fmt.bufPrint(&topic_buf, "core.obs.event.{s}", .{event_type.string})) |topic| {
-                            self.bus.publish(topic, frame.payload, .Transient, self.node_id) catch |err| {
-                                std.debug.print("{s}: Failed to publish OBS event: {any}\n", .{ SELF_NAME, err });
-                            };
-                        } else |_| {}
+            switch (op) {
+                .integer => |op_int| {
+                    if (op_int == 0) { // Hello
+                        self.handleHello(parsed.value.object) catch |err| {
+                            std.debug.print("ObsEgress: Auth failed: {any}\n", .{ err });
+                            return err;
+                        };
+                    } else if (op_int == 2) { // Identified
+                        std.debug.print("ObsEgress: Successfully identified with OBS\n", .{});
+                    } else if (op_int == 5) { // Event
+                        if (parsed.value.object.get("d")) |d| {
+                            if (d.object.get("eventType")) |event_type| {
+                                var topic_buf: [128]u8 = undefined;
+                                if (std.fmt.bufPrint(&topic_buf, "core.obs.event.{s}", .{event_type.string})) |topic| {
+                                    self.bus.publish(topic, frame.payload, .Transient, self.node_id) catch |err| {
+                                        std.debug.print("ObsEgress: Failed to publish OBS event: {any}\n", .{ err });
+                                    };
+                                } else |_| {}
+                            }
+                        }
                     }
-                }
+                },
+                else => continue,
             }
         }
-        self.running = false;
     }
 
     fn handleHello(self: *ObsEgressNode, hello: std.json.ObjectMap) !void {
@@ -206,8 +235,9 @@ pub const ObsEgressNode = struct {
         }
         self.mutex.lock();
         defer self.mutex.unlock();
-        try self.stream.?.writeAll(head[0..h_len]);
-        try self.stream.?.writeAll(data);
+        const s = self.stream orelse return error.NotConnected;
+        try s.writeAll(head[0..h_len]);
+        try s.writeAll(data);
     }
 
 
@@ -217,7 +247,7 @@ pub const ObsEgressNode = struct {
         
         // そのまま転送（payloadは既にOBS v5のリクエストJSONであることを期待）
         self.sendFrame(msg.payload) catch |err| {
-            std.debug.print("{s}: Failed to send frame to OBS: {any}\n", .{ SELF_NAME, err });
+            std.debug.print("ObsEgress: Failed to send frame to OBS: {any}\n", .{ err });
         };
     }
 
