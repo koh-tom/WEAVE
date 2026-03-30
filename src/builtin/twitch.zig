@@ -14,12 +14,13 @@ pub const TwitchAdapter = struct {
     const TWITCH_PORT = 6667;
 
     pub fn init(allocator: std.mem.Allocator, bus: *EventBus, node_id: u32, channel: []const u8) TwitchAdapter {
-        return .{
+        return TwitchAdapter{
             .allocator = allocator,
             .bus = bus,
             .client = TcpClient.init(allocator),
             .node_id = node_id,
             .channel = channel,
+            .running = false,
         };
     }
 
@@ -27,8 +28,29 @@ pub const TwitchAdapter = struct {
         self.client.deinit();
     }
 
-    /// Twitchへの接続とメインループの開始
+    /// Twitchへの接続とメインループの開始（自動再接続付き）
     pub fn run(self: *TwitchAdapter) !void {
+        self.running = true;
+        var retry_count: u32 = 0;
+
+        while (self.running) {
+            self.connectAndLoop() catch |err| {
+                std.debug.print("TwitchAdapter: Connection error: {any}\n", .{err});
+            };
+
+            if (!self.running) break;
+
+            // 指数バックオフ (1, 2, 4, 8, 16, 30, 30...)
+            const shift = @as(u6, @intCast(@min(10, retry_count)));
+            const backoff_secs: u64 = @min(30, @as(u64, 1) << shift);
+            std.debug.print("TwitchAdapter: Reconnecting in {d} seconds...\n", .{backoff_secs});
+            
+            std.Thread.sleep(backoff_secs * std.time.ns_per_s);
+            retry_count += 1;
+        }
+    }
+
+    fn connectAndLoop(self: *TwitchAdapter) !void {
         std.debug.print("TwitchAdapter: Connecting to {s}:{}...\n", .{ TWITCH_HOST, TWITCH_PORT });
         try self.client.connect(TWITCH_HOST, TWITCH_PORT);
         std.debug.print("TwitchAdapter: Connected. Logging in anonymously...\n", .{});
@@ -40,16 +62,12 @@ pub const TwitchAdapter = struct {
         const join_cmd = try std.fmt.bufPrint(&join_buf, "JOIN #{s}\r\n", .{self.channel});
         try self.client.send(join_cmd);
 
-        self.running = true;
         while (self.running) {
             const line = try self.client.readLine(self.allocator) orelse {
                 std.debug.print("TwitchAdapter: Connection closed by server.\n", .{});
-                break;
+                return; // ループを抜けて再試行へ
             };
             defer self.allocator.free(line);
-
-            // ログ出力（デバッグ用）
-            // std.debug.print("Twitch IRC: {s}\n", .{line});
 
             try self.handleIrcLine(line);
         }
