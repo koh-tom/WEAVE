@@ -28,6 +28,12 @@ pub const TcpClient = struct {
 
     /// ホスト名とポートを指定してTCP接続する
     pub fn connect(self: *TcpClient, host: []const u8, port: u16) !void {
+        if (self.stream) |s| {
+            s.close();
+            self.stream = null;
+        }
+        self.buf_start = 0;
+        self.buf_end = 0;
         self.stream = try net.tcpConnectToHost(self.allocator, host, port);
     }
 
