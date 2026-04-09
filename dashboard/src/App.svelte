@@ -1,89 +1,83 @@
-<script>
-  import svelteLogo from './assets/svelte.svg'
-  import viteLogo from './assets/vite.svg'
-  import heroImg from './assets/hero.png'
-  import Counter from './lib/Counter.svelte'
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { connect } from './lib/websocket';
+  import { metrics, eventLogs } from './lib/stores';
+
+  onMount(() => {
+    // WEAVE Core への接続開始
+    connect();
+  });
 </script>
 
-<section id="center">
-  <div class="hero">
-    <img src={heroImg} class="base" width="170" height="179" alt="" />
-    <img src={svelteLogo} class="framework" alt="Svelte logo" />
-    <img src={viteLogo} class="vite" alt="Vite logo" />
-  </div>
-  <div>
-    <h1>Get started</h1>
-    <p>Edit <code>src/App.svelte</code> and save to test <code>HMR</code></p>
-  </div>
-  <Counter />
-</section>
+<main class="h-screen bg-[#050508] text-[#c0caf5] flex flex-col overflow-hidden">
+  <!-- Header -->
+  <header class="h-16 border-b border-white/5 flex items-center px-8 justify-between shrink-0">
+    <div class="flex items-center gap-3">
+        <div class="w-3 h-3 bg-[#7aa2f7] rounded-sm shadow-[0_0_15px_#7aa2f7]"></div>
+        <h1 class="text-xl font-black tracking-tight">WEAVE <span class="font-light opacity-50 uppercase text-sm tracking-widest ml-2">Dashboard</span></h1>
+    </div>
+    
+    <div class="flex items-center gap-8">
+        <div class="flex flex-col items-end">
+            <span class="text-[10px] uppercase font-bold text-[#565f89] tracking-widest">Throughput</span>
+            <span class="font-mono text-lg text-[#9ece6a]">{$metrics.eps} <span class="text-xs opacity-50">EPS</span></span>
+        </div>
+        <div class="flex flex-col items-end">
+            <span class="text-[10px] uppercase font-bold text-[#565f89] tracking-widest">Total Events</span>
+            <span class="font-mono text-lg">{$metrics.totalEvents}</span>
+        </div>
+    </div>
+  </header>
 
-<div class="ticks"></div>
+  <div class="flex-1 flex overflow-hidden">
+    <!-- Sidebar -->
+    <aside class="w-64 border-r border-white/5 bg-[#0d0d16] p-6 flex flex-col gap-6 shrink-0">
+        <div>
+            <h2 class="text-[10px] font-bold uppercase text-[#565f89] tracking-[0.2em] mb-4">System Status</h2>
+            <div class="flex items-center gap-2 px-3 py-2 bg-[#9ece6a]/10 border border-[#9ece6a]/20 rounded-lg">
+                <div class="w-2 h-2 bg-[#9ece6a] rounded-full animate-pulse"></div>
+                <span class="text-xs font-bold text-[#9ece6a]">GATEWAY ONLINE</span>
+            </div>
+        </div>
+        
+        <div>
+            <h2 class="text-[10px] font-bold uppercase text-[#565f89] tracking-[0.2em] mb-4">Navigation</h2>
+            <nav class="flex flex-col gap-1">
+                <button class="px-3 py-2 text-left text-sm rounded-md bg-white/5 text-white font-medium">Event Stream</button>
+                <button class="px-3 py-2 text-left text-sm rounded-md text-[#565f89] hover:bg-white/5 hover:text-white transition-colors">Node Topology</button>
+                <button class="px-3 py-2 text-left text-sm rounded-md text-[#565f89] hover:bg-white/5 hover:text-white transition-colors">Wasm Runtime</button>
+            </nav>
+        </div>
+    </aside>
 
-<section id="next-steps">
-  <div id="docs">
-    <svg class="icon" role="presentation" aria-hidden="true">
-      <use href="/icons.svg#documentation-icon"></use>
-    </svg>
-    <h2>Documentation</h2>
-    <p>Your questions, answered</p>
-    <ul>
-      <li>
-        <a href="https://vite.dev/" target="_blank" rel="noreferrer">
-          <img class="logo" src={viteLogo} alt="" />
-          Explore Vite
-        </a>
-      </li>
-      <li>
-        <a href="https://svelte.dev/" target="_blank" rel="noreferrer">
-          <img class="button-icon" src={svelteLogo} alt="" />
-          Learn more
-        </a>
-      </li>
-    </ul>
+    <!-- Content Area (Event Stream) -->
+    <section class="flex-1 flex flex-col p-8 overflow-hidden">
+        <div class="flex items-center justify-between mb-6">
+            <h2 class="text-lg font-bold flex items-center gap-2">
+                Live Event Stream
+                <span class="text-[10px] bg-white/5 px-2 py-0.5 rounded text-[#565f89] font-mono">DEBUG MODE</span>
+            </h2>
+        </div>
+        
+        <div class="flex-1 overflow-y-auto space-y-1 font-mono text-[11px]">
+            {#each $eventLogs as log (log.ts + log.topic + Math.random())}
+                <div class="flex gap-4 p-2 hover:bg-white/[0.02] border-l-2 border-transparent hover:border-[#7aa2f7] transition-colors group">
+                    <span class="text-[#565f89] shrink-0">{new Date(log.ts).toLocaleTimeString()}</span>
+                    <span class="text-[#primary] shrink-0 font-bold w-48 truncate">[{log.topic}]</span>
+                    <span class="text-[#c0caf5] opacity-80 break-all">{JSON.stringify(log.payload)}</span>
+                </div>
+            {/each}
+            
+            {#if $eventLogs.length === 0}
+                <div class="h-full flex items-center justify-center text-[#565f89] italic">
+                    Waiting for events...
+                </div>
+            {/if}
+        </div>
+    </section>
   </div>
-  <div id="social">
-    <svg class="icon" role="presentation" aria-hidden="true">
-      <use href="/icons.svg#social-icon"></use>
-    </svg>
-    <h2>Connect with us</h2>
-    <p>Join the Vite community</p>
-    <ul>
-      <li>
-        <a href="https://github.com/vitejs/vite" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#github-icon"></use>
-          </svg>
-          GitHub
-        </a>
-      </li>
-      <li>
-        <a href="https://chat.vite.dev/" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#discord-icon"></use>
-          </svg>
-          Discord
-        </a>
-      </li>
-      <li>
-        <a href="https://x.com/vite_js" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#x-icon"></use>
-          </svg>
-          X.com
-        </a>
-      </li>
-      <li>
-        <a href="https://bsky.app/profile/vite.dev" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#bluesky-icon"></use>
-          </svg>
-          Bluesky
-        </a>
-      </li>
-    </ul>
-  </div>
-</section>
+</main>
 
-<div class="ticks"></div>
-<section id="spacer"></section>
+<style>
+  /* 必要に応じてスタイルを追記 */
+</style>
