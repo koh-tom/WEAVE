@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { connect } from './lib/websocket';
   import { metrics, eventLogs } from './lib/stores';
+  import MetricCard from './lib/components/MetricCard.svelte';
 
   onMount(() => {
     // WEAVE Core への接続開始
@@ -17,14 +18,11 @@
         <h1 class="text-xl font-black tracking-tight">WEAVE <span class="font-light opacity-50 uppercase text-sm tracking-widest ml-2">Dashboard</span></h1>
     </div>
     
-    <div class="flex items-center gap-8">
-        <div class="flex flex-col items-end">
-            <span class="text-[10px] uppercase font-bold text-[#565f89] tracking-widest">Throughput</span>
-            <span class="font-mono text-lg text-[#9ece6a]">{$metrics.eps} <span class="text-xs opacity-50">EPS</span></span>
-        </div>
-        <div class="flex flex-col items-end">
+    <div class="flex items-center gap-4">
+        <MetricCard label="Throughput" unit="EPS" />
+        <div class="bg-white/5 px-4 py-2 rounded-xl border border-white/5 flex flex-col items-end justify-center">
             <span class="text-[10px] uppercase font-bold text-[#565f89] tracking-widest">Total Events</span>
-            <span class="font-mono text-lg">{$metrics.totalEvents}</span>
+            <span class="font-mono text-lg leading-tight">{$metrics.totalEvents}</span>
         </div>
     </div>
   </header>
@@ -38,6 +36,11 @@
                 <div class="w-2 h-2 bg-[#9ece6a] rounded-full animate-pulse"></div>
                 <span class="text-xs font-bold text-[#9ece6a]">GATEWAY ONLINE</span>
             </div>
+        </div>
+        
+        <div class="flex flex-col gap-3">
+            <h2 class="text-[10px] font-bold uppercase text-[#565f89] tracking-[0.2em]">Real-time Metrics</h2>
+            <MetricCard label="Core Flow" color="#bb9af7" />
         </div>
         
         <div>
