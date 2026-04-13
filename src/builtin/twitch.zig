@@ -89,17 +89,27 @@ pub const TwitchAdapter = struct {
         // 例: :user!user@user.tmi.twitch.tv PRIVMSG #channel :message
         if (std.mem.indexOf(u8, line, " PRIVMSG ")) |idx| {
             const user_end = std.mem.indexOf(u8, line, "!") orelse return;
-            const user = line[1..user_end];
+            // 先頭の ':' を除外
+            const user = if (line[0] == ':') line[1..user_end] else line[0..user_end];
             
             const msg_start_idx = std.mem.indexOfPos(u8, line, idx + 9, " :") orelse return;
-            const message = line[msg_start_idx + 2 ..];
+            
+            // 行末の \r を除去
+            var message = line[msg_start_idx + 2 ..];
+            if (message.len > 0 and message[message.len - 1] == '\r') {
+                message = message[0 .. message.len - 1];
+            }
 
-            // JSONを構築してEventBusにPublish
-            // {"user": "...", "msg": "..."}
-            var json_buf: [1024]u8 = undefined;
-            const json_payload = try std.fmt.bufPrint(&json_buf, "{{\"user\": \"{s}\", \"msg\": \"{s}\"}}", .{ user, message });
+            // JSONを安全に構築
+            const json_payload = try std.fmt.allocPrint(self.allocator, "{f}", .{
+                std.json.fmt(.{ .user = user, .message = message }, .{})
+            });
+            defer self.allocator.free(json_payload);
             
             try self.bus.publish("ext.twitch.chat.message", json_payload, .BestEffort, self.node_id);
+        } else {
+            // PRIVMSG 以外（ログイン応答など）をコンソールに出力して接続状況を確認
+            std.debug.print("Twitch IRC: {s}\n", .{line});
         }
     }
 };
