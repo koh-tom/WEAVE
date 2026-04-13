@@ -94,7 +94,22 @@ pub const DashboardNode = struct {
     }
 
     fn onWebsocketMessage(context: ?*SELF, handle: zap.WebSockets.WsHandle, message: []const u8, is_text: bool) anyerror!void {
-        _ = context; _ = handle; _ = message; _ = is_text;
+        _ = handle; _ = is_text;
+        const self = context orelse return;
+        
+        const parsed = std.json.parseFromSlice(struct {
+            topic: []const u8,
+            payload: std.json.Value,
+        }, self.allocator, message, .{ .ignore_unknown_fields = true }) catch return;
+        defer parsed.deinit();
+
+        if (std.mem.eql(u8, parsed.value.topic, "core.system.graph.request")) {
+            if (self.bus.graph) |graph| {
+                const json = try graph.toJson(self.allocator);
+                defer self.allocator.free(json);
+                try self.bus.publish("core.system.graph.full", json, .Transient, self.node_id);
+            }
+        }
     }
 
     fn onWebsocketClose(context: ?*SELF, uuid: isize) anyerror!void {

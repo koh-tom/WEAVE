@@ -21,6 +21,8 @@ export function connect(url: string = `ws://${window.location.host}/ws`) {
             clearTimeout(reconnectTimeout);
             reconnectTimeout = null;
         }
+        // 接続時に現在のトポロジー情報をリクエストする
+        send('core.system.graph.request', {});
     };
 
     socket.onmessage = (event) => {
@@ -33,8 +35,27 @@ export function connect(url: string = `ws://${window.location.host}/ws`) {
 
             // 2. トピックに応じた特殊な状態更新
             // ※今後、Core側が送信するトポロジー情報のトピックに合わせて拡張します
-            if (data.topic === 'core.system.graph.full') {
-                systemGraph.set(data.payload);
+            if (data.topic === 'core.system.graph.request' || data.topic === 'core.system.graph.full') {
+                const rawNodes = data.payload.nodes || [];
+                const rawEdges = data.payload.edges || [];
+
+                const sfNodes = rawNodes.map((n: any, index: number) => ({
+                    id: String(n.id),
+                    // 簡易的な自動整列 (横に並べる)
+                    position: { x: 50 + (index % 3) * 200, y: 100 + Math.floor(index / 3) * 100 },
+                    data: { label: n.name || `Node ${n.id}` },
+                    type: 'default',
+                    style: "border: 2px solid #0A1C56; border-radius: 4px; padding: 10px; font-weight: bold;"
+                }));
+
+                const sfEdges = rawEdges.map((e: any) => ({
+                    id: `e-${e.source}-${e.target}`,
+                    source: String(e.source),
+                    target: String(e.target),
+                    animated: true
+                }));
+
+                systemGraph.set({ nodes: sfNodes, edges: sfEdges });
             }
             
         } catch (err) {
