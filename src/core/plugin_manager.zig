@@ -8,6 +8,7 @@ pub const PluginMetadata = struct {
     node_id: u32,
     wasm_path: []const u8, // 追加: 再起動用
     manifest_path: []const u8, // 追加: 再起動用
+    wasm_buffer: []const u8, // WAMR要求によりメモリに保持
     manifest_parsed: std.json.Parsed(manifest.Manifest),
     instance: wamr.wasm_module_inst_t,
     subscriber: ?WasmSubscriber = null,
@@ -17,6 +18,7 @@ pub const PluginMetadata = struct {
         self.manifest_parsed.deinit();
         allocator.free(self.wasm_path);
         allocator.free(self.manifest_path);
+        allocator.free(self.wasm_buffer);
     }
 };
 
@@ -45,7 +47,7 @@ pub const PluginManager = struct {
     }
 
     /// プラグインを管理テーブルに登録する
-    pub fn registerPlugin(self: *PluginManager, instance: wamr.wasm_module_inst_t, wasm_path: []const u8, manifest_path: []const u8, bus: *event_bus.EventBus) !*PluginMetadata {
+    pub fn registerPlugin(self: *PluginManager, instance: wamr.wasm_module_inst_t, wasm_path: []const u8, manifest_path: []const u8, wasm_buffer: []const u8, bus: *event_bus.EventBus) !*PluginMetadata {
         const parsed = try manifest.Manifest.load(self.allocator, manifest_path);
         errdefer parsed.deinit();
 
@@ -55,6 +57,7 @@ pub const PluginManager = struct {
             .node_id = node_id,
             .wasm_path = try self.allocator.dupe(u8, wasm_path),
             .manifest_path = try self.allocator.dupe(u8, manifest_path),
+            .wasm_buffer = wasm_buffer,
             .manifest_parsed = parsed,
             .instance = instance,
             .subscriber = try WasmSubscriber.init(instance, node_id, bus, self),
@@ -87,20 +90,28 @@ pub const PluginManager = struct {
         std.debug.print("PluginManager: Restarting Node {} ({s})...\n", .{ node_id, meta.wasm_path });
 
         // 1. 旧インスタンスの破棄
-        if (meta.subscriber) |*sub| sub.deinit();
+        // WasmSubscriberはEventBusに登録済みのポインタを維持するためdeinitしない
         wamr.wasm_runtime_deinstantiate(meta.instance);
 
         // 2. 新インスタンスの作成
         const wasm_buffer = try std.fs.cwd().readFileAlloc(self.allocator, meta.wasm_path, 1024 * 1024);
-        defer self.allocator.free(wasm_buffer);
+        errdefer self.allocator.free(wasm_buffer);
 
         const module = try runtime.loadModule(wasm_buffer);
         // Note: モジュール管理の詳細は簡略化
-        const new_inst = try runtime.instantiate(module, 64 * 1024, 64 * 1024);
+        const new_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
 
-        // 3. メタデータの更新
+        // 3. メタデータの更新 (wasm_bufferの差し替え: WAMRはバッファの生存を要求する)
+        self.allocator.free(meta.wasm_buffer);
+        meta.wasm_buffer = wasm_buffer;
         meta.instance = new_inst;
-        meta.subscriber = try WasmSubscriber.init(new_inst, node_id, bus, self);
+        var needs_subscription = false;
+        if (meta.subscriber) |*sub| {
+            sub.instance = new_inst;
+        } else {
+            meta.subscriber = try WasmSubscriber.init(new_inst, node_id, bus, self);
+            needs_subscription = true;
+        }
         try self.plugins.put(new_inst, meta);
 
         // 4. 初期化と購読再開
@@ -111,7 +122,10 @@ pub const PluginManager = struct {
             _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
         }
 
-        try self.applyManifestSubscriptions(new_inst, bus);
+        // 新規作成された場合のみ購読を適用（既存の購読はEventBusに残っているため）
+        if (needs_subscription) {
+            try self.applyManifestSubscriptions(new_inst, bus);
+        }
         
         if (bus.graph) |g| {
             g.updateNodeStatus(node_id, .active);

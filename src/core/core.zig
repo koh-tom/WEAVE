@@ -50,12 +50,13 @@ pub const Core = struct {
     /// Wasmプラグインをロードして初期化する
     pub fn loadPlugin(self: *Core, wasm_path: []const u8) !void {
         const wasm_buffer = try std.fs.cwd().readFileAlloc(self.allocator, wasm_path, 1024 * 1024);
-        defer self.allocator.free(wasm_buffer);
+        // 注意: モジュールが生きている間は wasm_buffer を解放してはいけない（WAMRの仕様）
+        // defer self.allocator.free(wasm_buffer);
 
         const module = try self.runtime.loadModule(wasm_buffer);
         // 注意: モジュールはランタイムが管理するが、個別のアンロード戦略は将来課題
 
-        const module_inst = try self.runtime.instantiate(module, 64 * 1024, 64 * 1024);
+        const module_inst = try self.runtime.instantiate(module, 128 * 1024, 64 * 1024);
 
         // マニフェストパスの推測 (plugin.wasm -> plugin.json)
         var manifest_path_buf: [256]u8 = undefined;
@@ -68,7 +69,7 @@ pub const Core = struct {
         const node_id = self.pm.next_node_id;
         try self.graph.registerNode(node_id, wasm_path, .wasm); // 仮名
 
-        const meta = try self.pm.registerPlugin(module_inst, wasm_path, manifest_path, &self.bus);
+        const meta = try self.pm.registerPlugin(module_inst, wasm_path, manifest_path, wasm_buffer, &self.bus);
         
         // 名前の更新（マニフェストから正確な名前を取得）
         try self.graph.registerNode(node_id, meta.manifest_parsed.value.name, .wasm);
