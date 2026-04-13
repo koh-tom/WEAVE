@@ -4,27 +4,35 @@ const event_bus = @import("event_bus.zig");
 
 pub const WasmSubscriber = struct {
     instance: wamr.wasm_module_inst_t,
-    exec_env: wamr.wasm_exec_env_t,
     node_id: u32,
     bus: *event_bus.EventBus,
     manager: *@import("plugin_manager.zig").PluginManager, // 追加
     mutex: std.Thread.Mutex = .{},
 
+    // リスタートスロットリング用
+    consecutive_failures: u32 = 0,
+    last_failure_time: i64 = 0,
+
+    const MAX_RESTART_ATTEMPTS: u32 = 5;
+    const BASE_BACKOFF_MS: i64 = 1000; // 1秒
+
+    // WASM exec_env のスタックサイズ (Zig std.json の再帰に対応)
+    const EXEC_ENV_STACK_SIZE: u32 = 128 * 1024;
+
     pub fn init(instance: wamr.wasm_module_inst_t, node_id: u32, bus: *event_bus.EventBus, manager: *@import("plugin_manager.zig").PluginManager) !WasmSubscriber {
-        const env = wamr.wasm_runtime_create_exec_env(instance, 16384);
-        if (env == null) return error.ExecEnvCreationFailed;
         return WasmSubscriber{
             .instance = instance,
-            .exec_env = env.?,
             .node_id = node_id,
             .bus = bus,
             .manager = manager,
             .mutex = .{},
+            .consecutive_failures = 0,
+            .last_failure_time = 0,
         };
     }
 
     pub fn deinit(self: *WasmSubscriber) void {
-        wamr.wasm_runtime_destroy_exec_env(self.exec_env);
+        _ = self;
     }
 
     pub fn callback(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
@@ -33,26 +41,42 @@ pub const WasmSubscriber = struct {
         // 排他制御のロック
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        // リスタート上限に達している場合はコールバックを無視
+        if (self.consecutive_failures >= MAX_RESTART_ATTEMPTS) {
+            return;
+        }
+
+        // 呼び出しスレッドごとにexec_envを作成（WAMRスレッドセーフティ）
+        const env = wamr.wasm_runtime_create_exec_env(self.instance, EXEC_ENV_STACK_SIZE);
+        if (env == null) return;
+        defer wamr.wasm_runtime_destroy_exec_env(env);
         
         const alloc_func = wamr.wasm_runtime_lookup_function(self.instance, "os_alloc");
         if (alloc_func == null) return;
 
         // Topicコピー
         var argv_t = [_]u32{@intCast(msg.topic.len)};
-        if (!wamr.wasm_runtime_call_wasm(self.exec_env, alloc_func, 1, &argv_t)) return;
+        if (!wamr.wasm_runtime_call_wasm(env, alloc_func, 1, &argv_t)) return;
         const t_ptr = argv_t[0];
         @memcpy(@as([*]u8, @ptrCast(wamr.wasm_runtime_addr_app_to_native(self.instance, t_ptr).?))[0..msg.topic.len], msg.topic);
 
         // Payloadコピー
         var argv_p = [_]u32{@intCast(msg.payload.len)};
-        if (!wamr.wasm_runtime_call_wasm(self.exec_env, alloc_func, 1, &argv_p)) return;
+        if (!wamr.wasm_runtime_call_wasm(env, alloc_func, 1, &argv_p)) return;
         const p_ptr = argv_p[0];
         @memcpy(@as([*]u8, @ptrCast(wamr.wasm_runtime_addr_app_to_native(self.instance, p_ptr).?))[0..msg.payload.len], msg.payload);
 
         // on_message実行
         if (wamr.wasm_runtime_lookup_function(self.instance, "on_message")) |func| {
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
-            if (!wamr.wasm_runtime_call_wasm(self.exec_env, func, 4, &msg_argv)) {
+            if (!wamr.wasm_runtime_call_wasm(env, func, 4, &msg_argv)) {
+                if (wamr.wasm_runtime_get_exception(self.instance)) |exc| {
+                    std.debug.print("WasmSubscriber: Execution TRAPPED! Exception: {s}\n", .{exc});
+                } else {
+                    std.debug.print("WasmSubscriber: Execution failed without exception.\n", .{});
+                }
+                
                 if (self.bus.graph) |g| {
                     g.updateNodeStatus(self.node_id, .fault);
                     var buf: [128]u8 = undefined;
@@ -60,18 +84,41 @@ pub const WasmSubscriber = struct {
                     _ = self.bus.publish("core.node.status_changed", payload, .Transient, 0) catch {};
                 }
                 
+                // リスタートスロットリング
+                self.consecutive_failures += 1;
+                const now = std.time.milliTimestamp();
+                
+                if (self.consecutive_failures >= MAX_RESTART_ATTEMPTS) {
+                    std.debug.print("WasmSubscriber: Node {} has failed {} times. Giving up on automatic restart.\n", .{self.node_id, self.consecutive_failures});
+                    return;
+                }
+                
+                // 指数バックオフチェック
+                const backoff_ms = BASE_BACKOFF_MS * (@as(i64, 1) << @intCast(@min(self.consecutive_failures - 1, 10)));
+                const elapsed = now - self.last_failure_time;
+                if (self.last_failure_time > 0 and elapsed < backoff_ms) {
+                    std.debug.print("WasmSubscriber: Node {} restart throttled (attempt {}/{}, backoff {}ms, elapsed {}ms)\n", 
+                        .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS, backoff_ms, elapsed});
+                    return;
+                }
+                self.last_failure_time = now;
+                
                 // 自動復旧 (Restart) のトリガー
-                std.debug.print("WasmSubscriber: Triggering automatic restart for Node {}\n", .{self.node_id});
+                std.debug.print("WasmSubscriber: Triggering automatic restart for Node {} (attempt {}/{})\n", .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS});
                 self.manager.restartPlugin(self.node_id, self.bus) catch |err| {
                     std.debug.print("WasmSubscriber: Auto-restart failed for Node {}: {any}\n", .{self.node_id, err});
                 };
+                return; // ← インスタンスが再生成されたため、旧インスタンスのメモリリセットに進まない
             }
         }
+
+        // 成功した場合は連続失敗カウンタをリセット
+        self.consecutive_failures = 0;
 
         // メモリリセット
         if (wamr.wasm_runtime_lookup_function(self.instance, "os_reset_heap")) |reset_func| {
             var reset_argv = [_]u32{0};
-            _ = wamr.wasm_runtime_call_wasm(self.exec_env, reset_func, 0, &reset_argv);
+            _ = wamr.wasm_runtime_call_wasm(env, reset_func, 0, &reset_argv);
         }
     }
 };
