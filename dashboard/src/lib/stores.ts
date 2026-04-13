@@ -47,7 +47,7 @@ export const eventLogs = writable<EventMessage[]>([]);
 /**
  * イベント履歴に新しいログを追加し、最大数を超えたら古いものを削除する
  */
-export function addEventLog(event: EventMessage, maxLogs = 100) {
+export function addEventLog(event: EventMessage, maxLogs = 50) {
     eventLogs.update((logs) => {
         const newLogs = [event, ...logs];
         return newLogs.slice(0, maxLogs);
