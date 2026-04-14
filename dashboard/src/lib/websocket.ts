@@ -34,7 +34,11 @@ export function connect(url: string = `ws://${window.location.host}/ws`) {
             epsCounter++;
 
             // 2. トピックに応じた特殊な状態更新
-            // ※今後、Core側が送信するトポロジー情報のトピックに合わせて拡張します
+            // デルタ（変更）が来たら、手抜き（Pure Projection）として全体の再送を要求する
+            if (data.topic === 'core.system.graph.delta') {
+                send('core.system.graph.request', {});
+            }
+
             if (data.topic === 'core.system.graph.request' || data.topic === 'core.system.graph.full') {
                 const rawNodes = data.payload.nodes || [];
                 const sfEdges: any[] = [];
