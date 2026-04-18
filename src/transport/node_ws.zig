@@ -12,6 +12,7 @@ pub const NodeWsTransport = struct {
     port: u16,
     running: bool,
     secret_token: ?[]const u8, // 追加: 認証用トークン
+    server: ?std.net.Server = null,
 
     const Client = struct {
         node_id: u32,
@@ -125,8 +126,8 @@ pub const NodeWsTransport = struct {
 
         var node_id_counter: u32 = 200;
         while (self.running) {
-            const server = self.server orelse break;
-            const conn = server.accept() catch |err| {
+            if (self.server == null) break;
+            const conn = self.server.?.accept() catch |err| {
                 if (!self.running) break;
                 std.debug.print("NodeWsTransport: Accept error: {any}\n", .{err});
                 continue;

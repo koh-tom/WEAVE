@@ -61,8 +61,8 @@ pub const WsGateway = struct {
         std.debug.print("WsGateway: Listening on ws://0.0.0.0:{}\n", .{self.port});
 
         while (self.running) {
-            const server = self.server orelse break;
-            const conn = server.accept() catch |err| {
+            if (self.server == null) break;
+            const conn = self.server.?.accept() catch |err| {
                 if (!self.running) break;
                 std.debug.print("WsGateway: Accept error: {any}\n", .{err});
                 continue;

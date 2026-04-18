@@ -52,7 +52,7 @@ fn runGraphPublisher(core: *Core, running_ptr: *std.atomic.Value(bool)) void {
 
 var running = std.atomic.Value(bool).init(true);
 
-fn sigHandler(sig: i32) callconv(.C) void {
+fn sigHandler(sig: i32) callconv(.c) void {
     _ = sig;
     running.store(false, .release);
 }
@@ -65,7 +65,7 @@ pub fn main() !void {
     // シグナルハンドラの設定
     const act = std.os.linux.Sigaction{
         .handler = .{ .handler = sigHandler },
-        .mask = std.os.linux.empty_sigset,
+        .mask = std.mem.zeroes(std.os.linux.sigset_t),
         .flags = 0,
     };
     _ = std.os.linux.sigaction(std.os.linux.SIG.INT, &act, null);
