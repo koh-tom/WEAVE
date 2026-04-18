@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("common/log.zig");
 const wamr = @import("core/wamr_libs.zig").wamr;
 const host_api = @import("api/host_api.zig");
 const TwitchAdapter = @import("builtin/twitch.zig").TwitchAdapter;
@@ -14,32 +15,32 @@ const Config = @import("common/config.zig").Config;
 
 fn runTwitch(t: *TwitchAdapter) void {
     t.run() catch |err| {
-        std.debug.print("TwitchAdapter Error: {any}\n", .{err});
+        log.err("TwitchAdapter Error: {any}", .{err});
     };
 }
 
 fn runWsGateway(w: *WsGateway) void {
     w.run() catch |err| {
-        std.debug.print("WsGateway Error: {any}\n", .{err});
+        log.err("WsGateway Error: {any}", .{err});
     };
 }
 
 fn runNodeWs(n: *NodeWsTransport) void {
     n.run() catch |err| {
-        std.debug.print("NodeWsTransport Error: {any}\n", .{err});
+        log.err("NodeWsTransport Error: {any}", .{err});
     };
 }
 
 fn runGraphPublisher(core: *Core, running_ptr: *std.atomic.Value(bool)) void {
     while (running_ptr.load(.acquire)) {
         const json = core.graph.toJson(core.allocator) catch |err| {
-            std.debug.print("GraphPublisher Error (JSON): {any}\n", .{err});
+            log.err("GraphPublisher Error (JSON): {any}", .{err});
             continue;
         };
         defer core.allocator.free(json);
         
         core.bus.publish("core.system.graph.full", json, .Transient, 0) catch |err| {
-            std.debug.print("GraphPublisher Error (Publish): {any}\n", .{err});
+            log.err("GraphPublisher Error (Publish): {any}", .{err});
         };
         
         // 1秒ごとにフラグチェック、60秒ごとにパブリッシュ
@@ -74,14 +75,18 @@ pub fn main() !void {
     var config = try Config.parse(allocator);
     defer config.deinit(allocator);
 
-    std.debug.print("========================================\n", .{});
-    std.debug.print("   WEAVE: Streaming Event OS Core Daemon\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("Config: Dashboard: http://localhost:{d}\n", .{config.dashboard_port});
-    std.debug.print("Config: WS Gateway: ws://localhost:{d}\n", .{config.ws_gateway_port});
-    std.debug.print("Config: Node WS: ws://localhost:{d}\n", .{config.node_ws_port});
-    std.debug.print("Config: Twitch: {s}, OBS: {s}:{d}\n", .{config.twitch_channel, config.obs_host, config.obs_port});
-    std.debug.print("----------------------------------------\n", .{});
+    // ログレベルの設定を反映
+    log.current_level = config.log_level;
+
+    log.info("========================================", .{});
+    log.info("   WEAVE: Streaming Event OS Core Daemon", .{});
+    log.info("========================================", .{});
+    log.info("Config: Dashboard: http://localhost:{d}", .{config.dashboard_port});
+    log.info("Config: WS Gateway: ws://localhost:{d}", .{config.ws_gateway_port});
+    log.info("Config: Node WS: ws://localhost:{d}", .{config.node_ws_port});
+    log.info("Config: Twitch: {s}, OBS: {s}:{d}", .{config.twitch_channel, config.obs_host, config.obs_port});
+    log.info("Config: Log Level: {s}", .{@tagName(config.log_level)});
+    log.info("----------------------------------------", .{});
 
     // 1. Coreの初期化 (EventBus, PluginManager, TransportManager, WasmRuntime)
     var core = try Core.init(allocator);
@@ -127,7 +132,7 @@ pub fn main() !void {
     var obs = try ObsEgressNode.init(allocator, &core.bus, 2, config.obs_password);
     defer obs.deinit();
     obs.connect(config.obs_host, config.obs_port) catch |err| {
-        std.debug.print("Main: OBS connect failed (optional): {any}\n", .{err});
+        log.warn("Main: OBS connect failed (optional): {any}", .{err});
     };
 
     // Dashboardの起動
@@ -141,19 +146,19 @@ pub fn main() !void {
 
     for (config.plugins.items) |path| {
         core.loadPlugin(path) catch |err| {
-            std.debug.print("Error: Failed to load plugin '{s}': {any}\n", .{path, err});
+            log.err("Failed to load plugin '{s}': {any}", .{path, err});
         };
     }
 
     // 5. 実行
-    std.debug.print("Status: Running... (Press Ctrl+C to stop)\n", .{});
+    log.info("Status: Running... (Press Ctrl+C to stop)", .{});
     
     // 終了フラグを監視
     while (running.load(.acquire)) {
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 
-    std.debug.print("\nStatus: Shutdown signal received. Cleaning up...\n", .{});
+    log.info("\nStatus: Shutdown signal received. Cleaning up...", .{});
 
     // 6. シャットダウンシーケンス
     twitch.stop(); // Twitchスレッドを停止
@@ -170,5 +175,5 @@ pub fn main() !void {
     core.bus.stop(); // Dispatcherを停止
     dispatcher_thread.join();
 
-    std.debug.print("Status: Shutdown complete.\n", .{});
+    log.info("Status: Shutdown complete.", .{});
 }

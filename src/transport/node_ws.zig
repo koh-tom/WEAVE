@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../common/log.zig");
 const transport_if = @import("interface.zig");
 const event_bus = @import("../core/event_bus.zig");
 
@@ -122,14 +123,14 @@ pub const NodeWsTransport = struct {
         self.server = try address.listen(.{ .reuse_address = true });
 
         self.running = true;
-        std.debug.print("NodeWsTransport: Listening on ws://0.0.0.0:{}\n", .{self.port});
+        log.info("NodeWsTransport: Listening on ws://0.0.0.0:{}", .{self.port});
 
         var node_id_counter: u32 = 200;
         while (self.running) {
             if (self.server == null) break;
             const conn = self.server.?.accept() catch |err| {
                 if (!self.running) break;
-                std.debug.print("NodeWsTransport: Accept error: {any}\n", .{err});
+                log.err("NodeWsTransport: Accept error: {any}", .{err});
                 continue;
             };
 
@@ -140,7 +141,7 @@ pub const NodeWsTransport = struct {
             
             // ハンドシェイク
             self.handleHandshake(client.stream) catch |err| {
-                std.debug.print("NodeWsTransport: Handshake failed: {any}\n", .{err});
+                log.warn("NodeWsTransport: Handshake failed: {any}", .{err});
                 client.deinit();
                 continue;
             };
