@@ -87,32 +87,45 @@ pub const NodeWsTransport = struct {
             .port = port,
             .running = false,
             .secret_token = if (secret_token) |t| try allocator.dupe(u8, t) else null,
+            .server = null,
         };
         return self;
     }
 
     pub fn deinit(self: *NodeWsTransport) void {
+        self.stop();
         self.mutex.lock();
-        self.running = false;
-        for (self.clients.items) |client| {
-            client.deinit();
-        }
         self.clients.deinit(self.allocator);
         self.mutex.unlock();
         if (self.secret_token) |t| self.allocator.free(t);
         self.allocator.destroy(self);
     }
 
+    pub fn stop(self: *NodeWsTransport) void {
+        self.running = false;
+        if (self.server) |*s| {
+            s.deinit();
+            self.server = null;
+        }
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.clients.items) |client| {
+            client.deinit();
+        }
+        self.clients.clearRetainingCapacity();
+    }
+
     pub fn run(self: *NodeWsTransport) !void {
         const address = try std.net.Address.parseIp("0.0.0.0", self.port);
-        var server = try address.listen(.{ .reuse_address = true });
-        defer server.deinit();
+        self.server = try address.listen(.{ .reuse_address = true });
 
         self.running = true;
         std.debug.print("NodeWsTransport: Listening on ws://0.0.0.0:{}\n", .{self.port});
 
         var node_id_counter: u32 = 200;
         while (self.running) {
+            const server = self.server orelse break;
             const conn = server.accept() catch |err| {
                 if (!self.running) break;
                 std.debug.print("NodeWsTransport: Accept error: {any}\n", .{err});

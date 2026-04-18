@@ -30,8 +30,8 @@ fn runNodeWs(n: *NodeWsTransport) void {
     };
 }
 
-fn runGraphPublisher(core: *Core) void {
-    while (true) {
+fn runGraphPublisher(core: *Core, running_ptr: *std.atomic.Value(bool)) void {
+    while (running_ptr.load(.acquire)) {
         const json = core.graph.toJson(core.allocator) catch |err| {
             std.debug.print("GraphPublisher Error (JSON): {any}\n", .{err});
             continue;
@@ -41,14 +41,35 @@ fn runGraphPublisher(core: *Core) void {
         core.bus.publish("core.system.graph.full", json, .Transient, 0) catch |err| {
             std.debug.print("GraphPublisher Error (Publish): {any}\n", .{err});
         };
-        std.Thread.sleep(60 * std.time.ns_per_s);
+        
+        // 1秒ごとにフラグチェック、60秒ごとにパブリッシュ
+        var i: u32 = 0;
+        while (i < 60 and running_ptr.load(.acquire)) : (i += 1) {
+            std.Thread.sleep(1 * std.time.ns_per_s);
+        }
     }
+}
+
+var running = std.atomic.Value(bool).init(true);
+
+fn sigHandler(sig: i32) callconv(.C) void {
+    _ = sig;
+    running.store(false, .release);
 }
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    // シグナルハンドラの設定
+    const act = std.os.linux.Sigaction{
+        .handler = .{ .handler = sigHandler },
+        .mask = std.os.linux.empty_sigset,
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(std.os.linux.SIG.INT, &act, null);
+    _ = std.os.linux.sigaction(std.os.linux.SIG.TERM, &act, null);
 
     var config = try Config.parse(allocator);
     defer config.deinit(allocator);
@@ -88,14 +109,12 @@ pub fn main() !void {
     try core.setupGateway();
 
     const dispatcher_thread = try std.Thread.spawn(.{}, @import("core/event_bus.zig").EventBus.runDispatcher, .{&core.bus});
+    
+    // スレッド管理用に保持
     const ws_thread = try std.Thread.spawn(.{}, runWsGateway, .{ws_gateway});
-    ws_thread.detach();
-
     const node_ws_thread = try std.Thread.spawn(.{}, runNodeWs, .{node_ws});
-    node_ws_thread.detach();
-
-    const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{&core});
-    graph_thread.detach();
+    
+    const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{&core, &running});
 
     // ネイティブノードの登録と起動
     try core.graph.registerNode(1, "TwitchAdapter", .native);
@@ -128,9 +147,28 @@ pub fn main() !void {
 
     // 5. 実行
     std.debug.print("Status: Running... (Press Ctrl+C to stop)\n", .{});
+    
+    // 終了フラグを監視
+    while (running.load(.acquire)) {
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+    }
+
+    std.debug.print("\nStatus: Shutdown signal received. Cleaning up...\n", .{});
+
+    // 6. シャットダウンシーケンス
+    twitch.stop(); // Twitchスレッドを停止
     twitch_thread.join();
 
-    // 6. シャットダウン
-    core.bus.stop();
+    ws_gateway.stop(); // facil.io を停止
+    ws_thread.join();
+    
+    node_ws.stop();
+    node_ws_thread.join();
+
+    graph_thread.join();
+
+    core.bus.stop(); // Dispatcherを停止
     dispatcher_thread.join();
+
+    std.debug.print("Status: Shutdown complete.\n", .{});
 }

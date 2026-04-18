@@ -11,6 +11,7 @@ pub const WsGateway = struct {
     mutex: std.Thread.Mutex,
     port: u16,
     running: bool,
+    server: ?std.net.Server = null,
 
     pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, port: u16) !*WsGateway {
         const self = try allocator.create(WsGateway);
@@ -21,31 +22,46 @@ pub const WsGateway = struct {
             .mutex = .{},
             .port = port,
             .running = false,
+            .server = null,
         };
         return self;
     }
 
     pub fn deinit(self: *WsGateway) void {
+        self.stop();
         self.mutex.lock();
-        self.running = false;
-        for (self.clients.items) |client| {
-            client.close();
-        }
         self.clients.deinit(self.allocator);
         self.mutex.unlock();
         self.allocator.destroy(self);
     }
 
+    pub fn stop(self: *WsGateway) void {
+        self.running = false;
+        if (self.server) |*s| {
+            // 注意: accept中に別スレッドから閉じるとエラーになるので、それを捕捉して抜ける
+            s.deinit();
+            self.server = null;
+        }
+        
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.clients.items) |client| {
+            client.close();
+        }
+        self.clients.clearRetainingCapacity();
+    }
+
     /// 接続待ち受けループ（別スレッドで実行することを想定）
     pub fn run(self: *WsGateway) !void {
         const address = try std.net.Address.parseIp("0.0.0.0", self.port);
-        var server = try address.listen(.{ .reuse_address = true });
-        defer server.deinit();
+        self.server = try address.listen(.{ .reuse_address = true });
+        // stop() 内で deinit されるため、ここでの defer は不要（あるいは running チェック後の最後に呼ぶ）
 
         self.running = true;
         std.debug.print("WsGateway: Listening on ws://0.0.0.0:{}\n", .{self.port});
 
         while (self.running) {
+            const server = self.server orelse break;
             const conn = server.accept() catch |err| {
                 if (!self.running) break;
                 std.debug.print("WsGateway: Accept error: {any}\n", .{err});
