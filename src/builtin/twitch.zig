@@ -28,6 +28,11 @@ pub const TwitchAdapter = struct {
         self.client.deinit();
     }
 
+    pub fn stop(self: *TwitchAdapter) void {
+        self.running = false;
+        self.client.deinit(); // これにより readLine がエラーで終了しループを抜ける
+    }
+
     /// Twitchへの接続とメインループの開始（自動再接続付き）
     pub fn run(self: *TwitchAdapter) !void {
         self.running = true;
