@@ -67,6 +67,9 @@ pub const WasmSubscriber = struct {
         const p_ptr = argv_p[0];
         @memcpy(@as([*]u8, @ptrCast(wamr.wasm_runtime_addr_app_to_native(self.instance, p_ptr).?))[0..msg.payload.len], msg.payload);
 
+        // 計測開始
+        const start_time = std.time.nanoTimestamp();
+
         // on_message実行
         if (wamr.wasm_runtime_lookup_function(self.instance, "on_message")) |func| {
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
@@ -95,10 +98,10 @@ pub const WasmSubscriber = struct {
                 
                 // 指数バックオフチェック
                 const backoff_ms = BASE_BACKOFF_MS * (@as(i64, 1) << @intCast(@min(self.consecutive_failures - 1, 10)));
-                const elapsed = now - self.last_failure_time;
-                if (self.last_failure_time > 0 and elapsed < backoff_ms) {
+                const elapsed_retry = now - self.last_failure_time;
+                if (self.last_failure_time > 0 and elapsed_retry < backoff_ms) {
                     std.debug.print("WasmSubscriber: Node {} restart throttled (attempt {}/{}, backoff {}ms, elapsed {}ms)\n", 
-                        .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS, backoff_ms, elapsed});
+                        .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS, backoff_ms, elapsed_retry});
                     return;
                 }
                 self.last_failure_time = now;
@@ -109,6 +112,30 @@ pub const WasmSubscriber = struct {
                     std.debug.print("WasmSubscriber: Auto-restart failed for Node {}: {any}\n", .{self.node_id, err});
                 };
                 return; // ← インスタンスが再生成されたため、旧インスタンスのメモリリセットに進まない
+            }
+
+            // 計測終了とパブリッシュ
+            const end_time = std.time.nanoTimestamp();
+            const exec_time_ns = end_time - start_time;
+            
+            // メモリサイズ取得 (WAMR API)
+            // wasm_runtime_get_app_addr_range を使用してリニアメモリの範囲を取得
+            var start_offset: u64 = 0;
+            var end_offset: u64 = 0;
+            const success = wamr.wasm_runtime_get_app_addr_range(self.instance, @as(u64, 0), &start_offset, &end_offset);
+            const mem_size = if (success)
+                end_offset - start_offset
+            else
+                0;
+
+            var metric_buf: [256]u8 = undefined;
+            const metric_payload = std.fmt.bufPrint(&metric_buf, 
+                "{{\"node_id\":{},\"exec_time_ns\":{},\"memory_bytes\":{}}}", 
+                .{self.node_id, exec_time_ns, mem_size}
+            ) catch "";
+            
+            if (metric_payload.len > 0) {
+                _ = self.bus.publish("core.node.metrics", metric_payload, .BestEffort, self.node_id) catch {};
             }
         }
 
