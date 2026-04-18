@@ -128,3 +128,10 @@ pub fn subscribe(topic: []const u8) Result {
 pub fn parseJson(comptime T: type, payload: []const u8) !std.json.Parsed(T) {
     return std.json.parseFromSlice(T, allocator, payload, .{ .ignore_unknown_fields = true });
 }
+
+/// 構造体をJSONシリアライズしてパブリッシュする
+pub fn publishJson(topic: []const u8, value: anytype, qos: QoS) !Result {
+    var list = std.ArrayList(u8).init(allocator);
+    try std.json.stringify(value, .{}, list.writer());
+    return publish(topic, list.items, qos);
+}
