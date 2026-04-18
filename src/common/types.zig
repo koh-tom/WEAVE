@@ -23,3 +23,18 @@ pub const ResultCode = enum(i32) {
     ERROR_QUEUE_FULL = 4,
     ERROR_NOT_FOUND = 5,
 };
+
+/// ログレベル
+pub const LogLevel = enum(u32) {
+    debug = 0,
+    info = 1,
+    warn = 2,
+    err = 3,
+
+    pub fn fromString(s: []const u8) LogLevel {
+        if (std.mem.eql(u8, s, "debug")) return .debug;
+        if (std.mem.eql(u8, s, "warn")) return .warn;
+        if (std.mem.eql(u8, s, "error")) return .err;
+        return .info;
+    }
+};

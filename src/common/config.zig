@@ -1,4 +1,5 @@
 const std = @import("std");
+const LogLevel = @import("types.zig").LogLevel;
 
 pub const Config = struct {
     ws_gateway_port: u16 = 8080,
@@ -8,12 +9,20 @@ pub const Config = struct {
     obs_host: []const u8 = "127.0.0.1",
     obs_port: u16 = 4455,
     obs_password: []const u8 = "obs-password",
+    log_level: LogLevel = .info,
     plugins: std.ArrayListUnmanaged([]const u8),
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
             .plugins = .{},
         };
+
+        // 1. 環境変数のチェック
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_LOG_LEVEL")) |val| {
+            defer allocator.free(val);
+            self.log_level = LogLevel.fromString(val);
+        } else |_| {}
+
         const args = try std.process.argsAlloc(allocator);
         defer std.process.argsFree(allocator, args);
 
@@ -48,6 +57,10 @@ pub const Config = struct {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
                 self.obs_password = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--log-level")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.log_level = LogLevel.fromString(args[i]);
             } else if (std.mem.eql(u8, arg, "--help")) {
                 printHelp();
                 std.process.exit(0);
