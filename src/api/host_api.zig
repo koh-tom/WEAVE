@@ -1,5 +1,6 @@
 const std = @import("std");
 const common = @import("../common/types.zig");
+const log = @import("../common/log.zig");
 const wamr = @import("../core/wamr_libs.zig").wamr;
 const event_bus = @import("../core/event_bus.zig");
 const plugin_manager = @import("../core/plugin_manager.zig");
@@ -83,7 +84,7 @@ export fn os_api_subscribe(
 
     // 権限チェック (ACL)
     if (!meta.manifest_parsed.value.canSubscribe(topic)) {
-        if (enable_log) std.debug.print("Security Error: Plugin '{s}' (Node {}) attempted to subscribe to unauthorized topic '{s}'\n", .{
+        log.err("Security Error: Plugin '{s}' (Node {}) attempted to subscribe to unauthorized topic '{s}'", .{
             meta.manifest_parsed.value.name,
             meta.node_id,
             topic,
@@ -96,7 +97,7 @@ export fn os_api_subscribe(
         bus.subscribe(topic, meta.node_id, WasmSubscriber.callback, sub) catch return toI32(.ERROR_UNKNOWN);
     } else return toI32(.ERROR_UNKNOWN);
 
-    if (enable_log) std.debug.print("Node {} subscribed to topic '{s}'\n", .{ meta.node_id, topic });
+    log.debug("Node {} subscribed to topic '{s}'", .{ meta.node_id, topic });
     return toI32(.SUCCESS);
 }
 
@@ -108,19 +109,27 @@ export fn os_api_log(
     msg_ptr: u32,
     msg_len: u32,
 ) void {
-    if (!enable_log) return;
-
     const module_inst = wamr.wasm_runtime_get_module_inst(exec_env);
+    const pm = global_plugin_manager orelse return;
+    const meta = pm.getMetadata(module_inst);
+    const name = if (meta) |m| m.manifest_parsed.value.name else "unknown-wasm";
+
     const native_ptr = wamr.wasm_runtime_addr_app_to_native(module_inst, msg_ptr);
     if (native_ptr) |ptr| {
         const msg = @as([*]const u8, @ptrCast(ptr))[0..msg_len];
-        std.debug.print("[WASM LOG LVL:{}] {s}\n", .{ level, msg });
+        switch (level) {
+            0 => log.debug("[{s}] {s}", .{ name, msg }),
+            1 => log.info("[{s}] {s}", .{ name, msg }),
+            2 => log.warn("[{s}] {s}", .{ name, msg }),
+            3 => log.err("[{s}] {s}", .{ name, msg }),
+            else => log.info("[{s}] {s}", .{ name, msg }),
+        }
     }
 }
 
 /// WAMRに登録するネイティブ関数のリスト
 /// シグネチャはWasm側から見た型（exec_envは含めない）
-///   publish:   (topic_ptr: i32, payload_ptr: i32, payload_len: i32) -> i32  = "(iii)i"
+///   publish:   (topic_ptr: i32, payload_ptr: i32, payload_len: i32) -> i32  = "(iiii)i"
 ///   subscribe: (topic_ptr: i32) -> i32                                      = "(i)i"
 ///   log:       (level: i32, msg_ptr: i32, msg_len: i32) -> void             = "(iii)"
 pub fn getNativeSymbols() [3]wamr.NativeSymbol {
