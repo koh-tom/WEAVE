@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../common/log.zig");
 const transport_if = @import("interface.zig");
 const event_bus = @import("../core/event_bus.zig");
 
@@ -58,24 +59,24 @@ pub const WsGateway = struct {
         // stop() 内で deinit されるため、ここでの defer は不要（あるいは running チェック後の最後に呼ぶ）
 
         self.running = true;
-        std.debug.print("WsGateway: Listening on ws://0.0.0.0:{}\n", .{self.port});
+        log.info("WsGateway: Listening on ws://0.0.0.0:{}", .{self.port});
 
         while (self.running) {
             if (self.server == null) break;
             const conn = self.server.?.accept() catch |err| {
                 if (!self.running) break;
-                std.debug.print("WsGateway: Accept error: {any}\n", .{err});
+                log.err("WsGateway: Accept error: {any}", .{err});
                 continue;
             };
 
             // ハンドシェイクの実行
             self.handleHandshake(conn.stream) catch |err| {
-                std.debug.print("WsGateway: Handshake failed for {any}: {any}\n", .{ conn.address, err });
+                log.warn("WsGateway: Handshake failed for {any}: {any}", .{ conn.address, err });
                 conn.stream.close();
                 continue;
             };
 
-            std.debug.print("WsGateway: New dashboard connected from {any}\n", .{conn.address});
+            log.info("WsGateway: New dashboard connected from {any}", .{conn.address});
 
             self.mutex.lock();
             try self.clients.append(self.allocator, conn.stream);

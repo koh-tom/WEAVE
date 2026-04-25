@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../common/log.zig");
 const TcpClient = @import("../transport/net/tcp_client.zig").TcpClient;
 const EventBus = @import("../core/event_bus.zig").EventBus;
 
@@ -40,7 +41,7 @@ pub const TwitchAdapter = struct {
 
         while (self.running) {
             self.connectAndLoop(&retry_count) catch |err| {
-                std.debug.print("TwitchAdapter: Connection error: {any}\n", .{err});
+                log.err("TwitchAdapter: Connection error: {any}", .{err});
             };
 
             if (!self.running) break;
@@ -48,7 +49,7 @@ pub const TwitchAdapter = struct {
             // 指数バックオフ (1, 2, 4, 8, 16, 30, 30...)
             const shift = @as(u6, @intCast(@min(10, retry_count)));
             const backoff_secs: u64 = @min(30, @as(u64, 1) << shift);
-            std.debug.print("TwitchAdapter: Reconnecting in {d} seconds...\n", .{backoff_secs});
+            log.info("TwitchAdapter: Reconnecting in {d} seconds...", .{backoff_secs});
             
             std.Thread.sleep(backoff_secs * std.time.ns_per_s);
             retry_count += 1;
@@ -56,9 +57,9 @@ pub const TwitchAdapter = struct {
     }
 
     fn connectAndLoop(self: *TwitchAdapter, retry_count: *u32) !void {
-        std.debug.print("TwitchAdapter: Connecting to {s}:{}...\n", .{ TWITCH_HOST, TWITCH_PORT });
+        log.info("TwitchAdapter: Connecting to {s}:{}...", .{ TWITCH_HOST, TWITCH_PORT });
         try self.client.connect(TWITCH_HOST, TWITCH_PORT);
-        std.debug.print("TwitchAdapter: Connected. Logging in anonymously...\n", .{});
+        log.info("TwitchAdapter: Connected. Logging in anonymously...", .{});
 
         // 匿名ログイン (PASSは不要)
         try self.client.send("NICK justinfan12345\r\n");
@@ -114,7 +115,7 @@ pub const TwitchAdapter = struct {
             try self.bus.publish("ext.twitch.chat.message", json_payload, .BestEffort, self.node_id);
         } else {
             // PRIVMSG 以外（ログイン応答など）をコンソールに出力して接続状況を確認
-            std.debug.print("Twitch IRC: {s}\n", .{line});
+            log.debug("Twitch IRC: {s}", .{line});
         }
     }
 };
