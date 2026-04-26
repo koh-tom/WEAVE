@@ -75,9 +75,9 @@ pub const WasmSubscriber = struct {
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
             if (!wamr.wasm_runtime_call_wasm(env, func, 4, &msg_argv)) {
                 if (wamr.wasm_runtime_get_exception(self.instance)) |exc| {
-                    std.debug.print("WasmSubscriber: Execution TRAPPED! Exception: {s}\n", .{exc});
+                    log.err("WasmSubscriber: Execution TRAPPED! Exception: {s}", .{exc});
                 } else {
-                    std.debug.print("WasmSubscriber: Execution failed without exception.\n", .{});
+                    log.err("WasmSubscriber: Execution failed without exception.", .{});
                 }
                 
                 if (self.bus.graph) |g| {
@@ -92,7 +92,7 @@ pub const WasmSubscriber = struct {
                 const now = std.time.milliTimestamp();
                 
                 if (self.consecutive_failures >= MAX_RESTART_ATTEMPTS) {
-                    std.debug.print("WasmSubscriber: Node {} has failed {} times. Giving up on automatic restart.\n", .{self.node_id, self.consecutive_failures});
+                    log.err("WasmSubscriber: Node {} has failed {} times. Giving up on automatic restart.", .{self.node_id, self.consecutive_failures});
                     return;
                 }
                 
@@ -100,16 +100,16 @@ pub const WasmSubscriber = struct {
                 const backoff_ms = BASE_BACKOFF_MS * (@as(i64, 1) << @intCast(@min(self.consecutive_failures - 1, 10)));
                 const elapsed_retry = now - self.last_failure_time;
                 if (self.last_failure_time > 0 and elapsed_retry < backoff_ms) {
-                    std.debug.print("WasmSubscriber: Node {} restart throttled (attempt {}/{}, backoff {}ms, elapsed {}ms)\n", 
+                    log.warn("WasmSubscriber: Node {} restart throttled (attempt {}/{}, backoff {}ms, elapsed {}ms)", 
                         .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS, backoff_ms, elapsed_retry});
                     return;
                 }
                 self.last_failure_time = now;
                 
                 // 自動復旧 (Restart) のトリガー
-                std.debug.print("WasmSubscriber: Triggering automatic restart for Node {} (attempt {}/{})\n", .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS});
+                log.info("WasmSubscriber: Triggering automatic restart for Node {} (attempt {}/{})", .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS});
                 self.manager.restartPlugin(self.node_id, self.bus) catch |err| {
-                    std.debug.print("WasmSubscriber: Auto-restart failed for Node {}: {any}\n", .{self.node_id, err});
+                    log.err("WasmSubscriber: Auto-restart failed for Node {}: {any}", .{self.node_id, err});
                 };
                 return; // ← インスタンスが再生成されたため、旧インスタンスのメモリリセットに進まない
             }
@@ -118,15 +118,14 @@ pub const WasmSubscriber = struct {
             const end_time = std.time.nanoTimestamp();
             const exec_time_ns = end_time - start_time;
             
-            // メモリサイズ取得 (WAMR API)
-            // wasm_runtime_get_app_addr_range を使用してリニアメモリの範囲を取得
-            var start_offset: u64 = 0;
-            var end_offset: u64 = 0;
-            const success = wamr.wasm_runtime_get_app_addr_range(self.instance, @as(u64, 0), &start_offset, &end_offset);
-            const mem_size = if (success)
-                end_offset - start_offset
-            else
-                0;
+            // メモリサイズ取得 (正確な heap usage を Wasm 側から取得)
+            var mem_size: u32 = 0;
+            if (wamr.wasm_runtime_lookup_function(self.instance, "os_api_get_heap_usage")) |usage_func| {
+                var usage_argv = [_]u32{0};
+                if (wamr.wasm_runtime_call_wasm(env, usage_func, 0, &usage_argv)) {
+                    mem_size = usage_argv[0];
+                }
+            }
 
             var metric_buf: [256]u8 = undefined;
             const metric_payload = std.fmt.bufPrint(&metric_buf, 

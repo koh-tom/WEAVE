@@ -60,6 +60,11 @@ export fn os_reset_heap() void {
     bump_offset = 0;
 }
 
+/// 現在のヒープ使用量を取得
+export fn os_api_get_heap_usage() u32 {
+    return bump_offset;
+}
+
 // --- Allocator Interface ---
 
 /// SDKが使用するアロケータ（バンプアロケータのラッパー）
