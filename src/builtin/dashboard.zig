@@ -1,6 +1,7 @@
 const std = @import("std");
 const zap = @import("zap");
 const event_bus = @import("../core/event_bus.zig");
+const log = @import("../common/log.zig");
 
 /// Dashboard サーバーノード
 pub const DashboardNode = struct {
@@ -54,19 +55,18 @@ pub const DashboardNode = struct {
 
     pub fn deinit(self: *SELF) void {
         zap.stop();
-        if (self.thread) |t| t.detach();
+        if (self.thread) |t| t.join();
         self.clients.deinit();
         self.allocator.destroy(self);
     }
 
     pub fn start(self: *SELF) !void {
-        std.debug.print("Dashboard: Starting server on port {d}...\n", .{self.port});
+        log.info("Dashboard: Starting server on port {d}...", .{self.port});
         try self.listener.listen();
         
         self.thread = try std.Thread.spawn(.{}, struct {
             fn run() void {
                 zap.start(.{ .threads = 2, .workers = 0 });
-                std.process.exit(0);
             }
         }.run, .{});
 
@@ -132,8 +132,7 @@ pub const DashboardNode = struct {
         var it = self.clients.keyIterator();
         while (it.next()) |handle_ptr| {
             WsHandler.write(handle_ptr.*, json, true) catch {
-                // 送信失敗したクライアントは本来ここで消すべきだが、
-                // 次のループや定期クリーンアップで対応可能
+                // 送信失敗したクライアント
             };
         }
     }
