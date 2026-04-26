@@ -137,6 +137,7 @@ pub fn parseJson(comptime T: type, payload: []const u8) !std.json.Parsed(T) {
 /// 構造体をJSONシリアライズしてパブリッシュする
 pub fn publishJson(topic: []const u8, value: anytype, qos: QoS) !Result {
     var list = std.ArrayList(u8).init(allocator);
+    defer list.deinit();
     try std.json.stringify(value, .{}, list.writer());
     return publish(topic, list.items, qos);
 }
