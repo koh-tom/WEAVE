@@ -10,7 +10,6 @@ const NodeWsTransport = @import("transport/node_ws.zig").NodeWsTransport;
 const ObsEgressNode = @import("builtin/obs.zig").ObsEgressNode;
 const DashboardNode = @import("builtin/dashboard.zig").DashboardNode;
 
-
 const Config = @import("common/config.zig").Config;
 
 fn runTwitch(t: *TwitchAdapter) void {
@@ -88,7 +87,7 @@ pub fn main() !void {
     log.info("Config: Log Level: {s}", .{@tagName(config.log_level)});
     log.info("----------------------------------------", .{});
 
-    // 1. Coreの初期化 (EventBus, PluginManager, TransportManager, WasmRuntime)
+    // 1. Coreの初期化
     var core = try Core.init(allocator);
     defer core.deinit();
 
@@ -115,13 +114,11 @@ pub fn main() !void {
 
     const dispatcher_thread = try std.Thread.spawn(.{}, @import("core/event_bus.zig").EventBus.runDispatcher, .{&core.bus});
     
-    // スレッド管理用に保持
     const ws_thread = try std.Thread.spawn(.{}, runWsGateway, .{ws_gateway});
     const node_ws_thread = try std.Thread.spawn(.{}, runNodeWs, .{node_ws});
-    
     const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{&core, &running});
 
-    // ネイティブノードの登録と起動
+    // 3. ネイティブノード
     try core.graph.registerNode(1, "TwitchAdapter", .native);
     try core.bus.publish("core.node.registered", "{\"node_id\":1,\"name\":\"TwitchAdapter\",\"type\":\"native\"}", .Transient, 0);
 
@@ -135,12 +132,11 @@ pub fn main() !void {
         log.warn("Main: OBS connect failed (optional): {any}", .{err});
     };
 
-    // Dashboardの起動
+    // 4. Dashboard (zap)
     var dashboard = try DashboardNode.init(allocator, &core.bus, 100, config.dashboard_port);
-    defer dashboard.deinit();
     try dashboard.start();
 
-    // Wasmプラグインのロード
+    // 5. Wasmプラグイン
     var symbols = host_api.getNativeSymbols();
     try core.runtime.registerNatives("env", &symbols);
 
@@ -150,21 +146,21 @@ pub fn main() !void {
         };
     }
 
-    // 5. 実行
     log.info("Status: Running... (Press Ctrl+C to stop)", .{});
     
-    // 終了フラグを監視
     while (running.load(.acquire)) {
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 
     log.info("\nStatus: Shutdown signal received. Cleaning up...", .{});
 
-    // 6. シャットダウンシーケンス
-    twitch.stop(); // Twitchスレッドを停止
+    // 6. シャットダウンシーケンス (逆順に慎重に停止)
+    dashboard.deinit(); // zap.stop() してスレッドを join() する
+
+    twitch.stop();
     twitch_thread.join();
 
-    ws_gateway.stop(); // facil.io を停止
+    ws_gateway.stop();
     ws_thread.join();
     
     node_ws.stop();
@@ -172,7 +168,7 @@ pub fn main() !void {
 
     graph_thread.join();
 
-    core.bus.stop(); // Dispatcherを停止
+    core.bus.stop();
     dispatcher_thread.join();
 
     log.info("Status: Shutdown complete.", .{});
