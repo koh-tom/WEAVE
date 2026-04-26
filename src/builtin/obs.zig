@@ -60,7 +60,7 @@ pub const ObsEgressNode = struct {
         while (self.running) {
             self.doConnectAndReceive(&retry_count) catch |err| {
                 if (err != error.EndOfStream) {
-                    std.debug.print("ObsEgress: Connection failed: {any}\n", .{ err });
+                    log.err("ObsEgress: Connection failed: {any}", .{ err });
                 }
             };
             
@@ -68,8 +68,13 @@ pub const ObsEgressNode = struct {
 
             const shift = @as(u6, @intCast(@min(10, retry_count)));
             const backoff: u64 = @min(30, @as(u64, 1) << shift);
-            std.debug.print("ObsEgress: Retrying in {d} seconds...\n", .{ backoff });
-            std.Thread.sleep(backoff * std.time.ns_per_s);
+            log.info("ObsEgress: Retrying in {d} seconds...", .{ backoff });
+            var slept_ns: u64 = 0;
+            const target_ns = backoff * std.time.ns_per_s;
+            while (slept_ns < target_ns and self.running) {
+                std.Thread.sleep(100 * std.time.ns_per_ms);
+                slept_ns += 100 * std.time.ns_per_ms;
+            }
             retry_count += 1;
         }
     }
@@ -85,9 +90,9 @@ pub const ObsEgressNode = struct {
         self.stream = stream;
         self.mutex.unlock();
 
-        std.debug.print("ObsEgress: Connected to OBS. Starting handshake...\n", .{});
+        log.info("ObsEgress: Connected to OBS. Starting handshake...", .{});
         try self.clientHandshake(host, self.port);
-        std.debug.print("ObsEgress: WebSocket handshake completed.\n", .{});
+        log.info("ObsEgress: WebSocket handshake completed.", .{});
         
         // 接続とハンドシェイクが成功したらリトライ回数をリセット
         retry_count.* = 0;
@@ -131,18 +136,18 @@ pub const ObsEgressNode = struct {
                 .integer => |op_int| {
                     if (op_int == 0) { // Hello
                         self.handleHello(parsed.value.object) catch |err| {
-                            std.debug.print("ObsEgress: Auth failed: {any}\n", .{ err });
+                            log.err("ObsEgress: Auth failed: {any}", .{ err });
                             return err;
                         };
                     } else if (op_int == 2) { // Identified
-                        std.debug.print("ObsEgress: Successfully identified with OBS\n", .{});
+                        log.info("ObsEgress: Successfully identified with OBS", .{});
                     } else if (op_int == 5) { // Event
                         if (parsed.value.object.get("d")) |d| {
                             if (d.object.get("eventType")) |event_type| {
                                 var topic_buf: [128]u8 = undefined;
                                 if (std.fmt.bufPrint(&topic_buf, "core.obs.event.{s}", .{event_type.string})) |topic| {
                                     self.bus.publish(topic, frame.payload, .Transient, self.node_id) catch |err| {
-                                        std.debug.print("ObsEgress: Failed to publish OBS event: {any}\n", .{ err });
+                                        log.err("ObsEgress: Failed to publish OBS event: {any}", .{ err });
                                     };
                                 } else |_| {}
                             }

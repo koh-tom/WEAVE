@@ -51,7 +51,12 @@ pub const TwitchAdapter = struct {
             const backoff_secs: u64 = @min(30, @as(u64, 1) << shift);
             log.info("TwitchAdapter: Reconnecting in {d} seconds...", .{backoff_secs});
             
-            std.Thread.sleep(backoff_secs * std.time.ns_per_s);
+            var slept_ns: u64 = 0;
+            const target_ns = backoff_secs * std.time.ns_per_s;
+            while (slept_ns < target_ns and self.running) {
+                std.Thread.sleep(100 * std.time.ns_per_ms);
+                slept_ns += 100 * std.time.ns_per_ms;
+            }
             retry_count += 1;
         }
     }
