@@ -17,7 +17,42 @@ pub const Config = struct {
             .plugins = .{},
         };
 
-        // 1. 環境変数のチェック
+        // 1. 設定ファイルの読み込み (weave.json) - 任意
+        if (std.fs.cwd().openFile("weave.json", .{})) |file| {
+            defer file.close();
+            const size = try file.getEndPos();
+            const buf = try allocator.alloc(u8, size);
+            defer allocator.free(buf);
+            _ = try file.readAll(buf);
+
+            // 一時的な構造体にパース
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, buf, .{}) catch |err| {
+                std.debug.print("Warning: Failed to parse weave.json: {any}\n", .{err});
+                return err;
+            };
+            defer parsed.deinit();
+
+            if (parsed.value == .object) {
+                const obj = parsed.value.object;
+                if (obj.get("ws_gateway_port")) |v| self.ws_gateway_port = @intCast(v.integer);
+                if (obj.get("node_ws_port")) |v| self.node_ws_port = @intCast(v.integer);
+                if (obj.get("dashboard_port")) |v| self.dashboard_port = @intCast(v.integer);
+                if (obj.get("twitch_channel")) |v| self.twitch_channel = try allocator.dupe(u8, v.string);
+                if (obj.get("obs_host")) |v| self.obs_host = try allocator.dupe(u8, v.string);
+                if (obj.get("obs_port")) |v| self.obs_port = @intCast(v.integer);
+                if (obj.get("obs_password")) |v| self.obs_password = try allocator.dupe(u8, v.string);
+                if (obj.get("log_level")) |v| self.log_level = LogLevel.fromString(v.string);
+                if (obj.get("plugins")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |p| {
+                            try self.plugins.append(allocator, try allocator.dupe(u8, p.string));
+                        }
+                    }
+                }
+            }
+        } else |_| {}
+
+        // 2. 環境変数のチェック (上書き)
         if (std.process.getEnvVarOwned(allocator, "WEAVE_LOG_LEVEL")) |val| {
             defer allocator.free(val);
             self.log_level = LogLevel.fromString(val);
@@ -72,7 +107,7 @@ pub const Config = struct {
             }
         }
 
-        // デフォルトのプラグイン（引数がない場合）
+        // デフォルトのプラグイン（引数も設定ファイルもない場合）
         if (self.plugins.items.len == 0) {
             try self.plugins.append(allocator, try allocator.dupe(u8, "wasm-apps/chat_node.wasm"));
         }
