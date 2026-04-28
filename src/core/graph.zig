@@ -14,6 +14,8 @@ pub const NodeInfo = struct {
     status: enum { active, fault, disconnected },
     pub_topics: std.ArrayListUnmanaged([]const u8),
     sub_topics: std.ArrayListUnmanaged([]const u8),
+    last_activity_ts: i64 = 0,
+    last_topic: ?[]const u8 = null,
 };
 
 pub const SystemGraph = struct {
@@ -37,6 +39,7 @@ pub const SystemGraph = struct {
             self.allocator.free(node.name);
             for (node.pub_topics.items) |t| self.allocator.free(t);
             for (node.sub_topics.items) |t| self.allocator.free(t);
+            if (node.last_topic) |t| self.allocator.free(t);
             node.pub_topics.deinit(self.allocator);
             node.sub_topics.deinit(self.allocator);
         }
@@ -50,6 +53,7 @@ pub const SystemGraph = struct {
             node.name = try self.allocator.dupe(u8, name);
             node.node_type = node_type;
             node.status = .active;
+            node.last_activity_ts = std.time.milliTimestamp();
         } else {
             try self.nodes.put(self.allocator, id, .{
                 .id = id,
@@ -58,6 +62,8 @@ pub const SystemGraph = struct {
                 .status = .active,
                 .pub_topics = .{},
                 .sub_topics = .{},
+                .last_activity_ts = std.time.milliTimestamp(),
+                .last_topic = null,
             });
         }
         self.mutex.unlock();
@@ -74,6 +80,11 @@ pub const SystemGraph = struct {
     pub fn updateSubscription(self: *SystemGraph, node_id: u32, topic: []const u8) !void {
         self.mutex.lock();
         const node = self.nodes.getPtr(node_id) orelse { self.mutex.unlock(); return error.NodeNotFound; };
+        
+        node.last_activity_ts = std.time.milliTimestamp();
+        if (node.last_topic) |t| self.allocator.free(t);
+        node.last_topic = try self.allocator.dupe(u8, topic);
+
         for (node.sub_topics.items) |t| {
             if (std.mem.eql(u8, t, topic)) { self.mutex.unlock(); return; }
         }
@@ -92,6 +103,11 @@ pub const SystemGraph = struct {
     pub fn recordPublish(self: *SystemGraph, node_id: u32, topic: []const u8) !void {
         self.mutex.lock();
         const node = self.nodes.getPtr(node_id) orelse { self.mutex.unlock(); return; };
+        
+        node.last_activity_ts = std.time.milliTimestamp();
+        if (node.last_topic) |t| self.allocator.free(t);
+        node.last_topic = try self.allocator.dupe(u8, topic);
+
         for (node.pub_topics.items) |t| {
             if (std.mem.eql(u8, t, topic)) { self.mutex.unlock(); return; }
         }
@@ -111,6 +127,7 @@ pub const SystemGraph = struct {
         self.mutex.lock();
         if (self.nodes.getPtr(node_id)) |node| {
             node.status = status;
+            node.last_activity_ts = std.time.milliTimestamp();
             self.mutex.unlock();
 
             if (self.bus) |bus| {
@@ -140,8 +157,21 @@ pub const SystemGraph = struct {
             if (!first) try writer.writeAll(",");
             first = false;
             
-            try writer.print("{{\"id\":{},\"name\":\"{s}\",\"type\":\"{any}\",\"status\":\"{any}\",\"pub\":[", 
-                .{node.id, node.name, node.node_type, node.status});
+            try writer.writeAll("{");
+            try writer.print("\"id\":{},", .{node.id});
+            try writer.print("\"name\":\"{s}\",", .{node.name});
+            try writer.print("\"type\":\"{s}\",", .{@tagName(node.node_type)});
+            try writer.print("\"status\":\"{s}\",", .{@tagName(node.status)});
+            try writer.print("\"last_active\":{},", .{node.last_activity_ts});
+            try writer.writeAll("\"last_topic\":");
+            
+            if (node.last_topic) |t| {
+                try writer.print("\"{s}\"", .{t});
+            } else {
+                try writer.writeAll("null");
+            }
+
+            try writer.writeAll(",\"pub\":[");
             
             for (node.pub_topics.items, 0..) |t, i| {
                 if (i > 0) try writer.writeAll(",");
