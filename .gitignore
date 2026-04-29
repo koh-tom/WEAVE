@@ -10,6 +10,7 @@ WEAVE
 main
 stress_test
 bus_test
+weave-test
 
 # Logs / Temp
 *.log
