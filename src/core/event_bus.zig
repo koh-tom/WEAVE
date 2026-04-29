@@ -75,7 +75,7 @@ pub const EventQueue = struct {
     pub fn deinit(self: *EventQueue) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         while (self.count > 0) {
             self.messages[self.head].deinit(self.allocator);
             self.head = (self.head + 1) % self.capacity;
@@ -88,7 +88,7 @@ pub const EventQueue = struct {
         self.mutex.lock();
         self.is_shutdown = true;
         self.mutex.unlock();
-        
+
         self.cond_not_empty.broadcast();
         self.cond_not_full.broadcast();
     }
@@ -108,7 +108,7 @@ pub const EventQueue = struct {
         self.messages[self.tail] = msg;
         self.tail = (self.tail + 1) % self.capacity;
         self.count += 1;
-        
+
         self.cond_not_empty.signal();
     }
 
@@ -142,14 +142,14 @@ pub const EventBus = struct {
     verbose: bool,
     mutex: std.Thread.Mutex,
     cond_idle: std.Thread.Condition, // 追加: アイドル状態通知用
-    
+
     last_messages: std.StringHashMap(EventMessage), // 追加: Transient用の最新メッセージ保持
-    
+
     // デッドロック回避用
     dispatcher_thread_id: std.atomic.Value(usize),
     // 配送中のメッセージ数
     busy_count: std.atomic.Value(usize),
-    
+
     /// 全イベントの配送時に呼ばれるグローバル・オブザーバー（トランスポート等で使用）
     global_observer: ?struct {
         ctx: *anyopaque,
@@ -226,9 +226,9 @@ pub const EventBus = struct {
             self.queue.mutex.unlock();
 
             const b_count = self.busy_count.load(.acquire);
-            
+
             if ((q_count == 0 and b_count == 0) or shutdown) break;
-            
+
             // アイドル状態になるまで待機 (ポーリングなし)
             self.cond_idle.wait(&self.mutex);
         }
@@ -246,7 +246,7 @@ pub const EventBus = struct {
     // # : multi level (must be at the end)
     pub fn isMatch(pattern: []const u8, topic: []const u8) bool {
         if (std.mem.eql(u8, pattern, "#")) return true;
-        
+
         var p_it = std.mem.splitScalar(u8, pattern, '.');
         var t_it = std.mem.splitScalar(u8, topic, '.');
 
@@ -284,16 +284,13 @@ pub const EventBus = struct {
         // 現状は全件トレースを基本とする。
 
         // ペイロードの処理（現在の観測レベルに従う）
-        const payload_json = if (self.introspection_level == .contents) 
-            msg.payload 
-        else 
+        const payload_json = if (self.introspection_level == .contents)
+            msg.payload
+        else
             "{\"hidden\":true}";
 
         var buf: [2048]u8 = undefined;
-        const trace_json = std.fmt.bufPrint(&buf,
-            "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}",
-            .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json }
-        ) catch |err| {
+        const trace_json = std.fmt.bufPrint(&buf, "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}", .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json }) catch |err| {
             if (self.verbose) std.debug.print("Tracing: Payload too large for trace buffer: {any}\n", .{err});
             return;
         };
@@ -321,9 +318,9 @@ pub const EventBus = struct {
         self.mutex.lock();
 
         // ワイルドカードが含まれているかチェック
-        const is_wildcard = std.mem.indexOfScalar(u8, topic, '*') != null or 
-                           std.mem.indexOfScalar(u8, topic, '+') != null or 
-                           std.mem.indexOfScalar(u8, topic, '#') != null;
+        const is_wildcard = std.mem.indexOfScalar(u8, topic, '*') != null or
+            std.mem.indexOfScalar(u8, topic, '+') != null or
+            std.mem.indexOfScalar(u8, topic, '#') != null;
 
         if (is_wildcard) {
             try self.wildcard_subs.append(self.allocator, .{
@@ -346,7 +343,7 @@ pub const EventBus = struct {
                 .callback = callback,
             });
         }
-        
+
         // 購読リストへの追加が終わったのでアンロック (Deadlock回避)
         // 以降の graph.updateSubscription 内での publish 呼び出しを安全にする
         self.mutex.unlock();
@@ -379,15 +376,37 @@ pub const EventBus = struct {
     ) anyerror!void {
         // システム制御トピックの処理
         if (std.mem.eql(u8, topic, "core.system.introspection")) {
-            if (std.mem.eql(u8, payload, "\"OFF\"") or std.mem.eql(u8, payload, "OFF")) {
-                self.introspection_level = .off;
-                std.debug.print("Introspection: Level changed to OFF\n", .{});
-            } else if (std.mem.eql(u8, payload, "\"METADATA\"") or std.mem.eql(u8, payload, "METADATA")) {
-                self.introspection_level = .metadata;
-                std.debug.print("Introspection: Level changed to METADATA\n", .{});
-            } else if (std.mem.eql(u8, payload, "\"CONTENTS\"") or std.mem.eql(u8, payload, "CONTENTS")) {
-                self.introspection_level = .contents;
-                std.debug.print("Introspection: Level changed to CONTENTS\n", .{});
+            var level_str: ?[]const u8 = null;
+            
+            // JSON としてパースを試みる
+            const parsed_json = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch null;
+            if (parsed_json) |pj| {
+                defer pj.deinit();
+                switch (pj.value) {
+                    .string => |s| {
+                        level_str = s;
+                    },
+                    .object => |obj| {
+                        if (obj.get("level")) |val| {
+                            if (val == .string) {
+                                level_str = val.string;
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
+            
+            var str = level_str orelse payload;
+            str = std.mem.trim(u8, str, "\"");
+            
+            var buf: [32]u8 = undefined;
+            if (str.len < buf.len) {
+                const lower_str = std.ascii.lowerString(&buf, str);
+                if (std.meta.stringToEnum(IntrospectionLevel, lower_str)) |level| {
+                    self.introspection_level = level;
+                    std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
+                }
             }
         }
 
@@ -434,7 +453,7 @@ pub const EventBus = struct {
 
         self.queue.push(msg, block) catch |err| {
             if (err == error.QueueFull) {
-                if (self.verbose) std.debug.print("QoS: drop event '{s}' due to full queue (Source: {})\n", .{topic, source_node_id});
+                if (self.verbose) std.debug.print("QoS: drop event '{s}' due to full queue (Source: {})\n", .{ topic, source_node_id });
                 return;
             }
             return err;
@@ -453,7 +472,7 @@ pub const EventBus = struct {
             self.allocator.dupe(Subscriber, list.items) catch null
         else
             null;
-        
+
         // 2. ワイルドカード一致の購読者
         var wildcard_matches: std.ArrayListUnmanaged(Subscriber) = .{};
         defer wildcard_matches.deinit(self.allocator);
@@ -473,7 +492,7 @@ pub const EventBus = struct {
                 }
             }
         }
-        
+
         for (wildcard_matches.items) |sub| {
             if (sub.node_id != msg.source_node_id) {
                 sub.callback(sub.context, msg);
@@ -524,7 +543,7 @@ test "EventBus QoS: Reliable blocks when full" {
 
     // 待機
     std.Thread.sleep(100 * std.time.ns_per_ms);
-    
+
     // まだ 2 つのはず
     bus.queue.mutex.lock();
     try std.testing.expectEqual(@as(usize, 2), bus.queue.count);
@@ -582,19 +601,19 @@ test "EventBus QoS: Transient stores last message and dispatches to new subscrib
 
 test "EventBus: Wildcard Matching" {
     const isMatch = EventBus.isMatch;
-    
+
     // Exact match
     try std.testing.expect(isMatch("a.b.c", "a.b.c"));
     try std.testing.expect(!isMatch("a.b.c", "a.b.d"));
-    
+
     // + : Single level
     try std.testing.expect(isMatch("a.+.c", "a.b.c"));
     try std.testing.expect(isMatch("a.+", "a.b"));
     try std.testing.expect(!isMatch("a.+", "a.b.c"));
-    
+
     // * : Single level (WEAVE compatibility)
     try std.testing.expect(isMatch("a.*.c", "a.b.c"));
-    
+
     // # : Multi level
     try std.testing.expect(isMatch("a.#", "a.b"));
     try std.testing.expect(isMatch("a.#", "a.b.c"));
@@ -617,9 +636,9 @@ test "EventBus: Wildcard Dispatch" {
 
     try bus.subscribe("ext.twitch.#", 2, S.cb, &count);
     try bus.subscribe("ext.+.chat.*", 3, S.cb, &count);
-    
+
     const thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
-    
+
     // Match 1 (Pattern 1 only)
     try bus.publish("ext.twitch.connected", "{}", .BestEffort, 1);
     // Match 2 (Both patterns)
@@ -630,6 +649,29 @@ test "EventBus: Wildcard Dispatch" {
     bus.waitIdle();
     bus.stop();
     thread.join();
-    
+
     try std.testing.expectEqual(@as(u32, 3), count);
+}
+
+test "EventBus: Introspection Normalization" {
+    const allocator = std.testing.allocator;
+    var bus = try EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    // 1. 生の文字列 "OFF"
+    try bus.publish("core.system.introspection", "OFF", .BestEffort, 1);
+    try std.testing.expectEqual(IntrospectionLevel.off, bus.introspection_level);
+
+    // 2. ダブルクォーテーション付き "\"METADATA\""
+    try bus.publish("core.system.introspection", "\"METADATA\"", .BestEffort, 1);
+    try std.testing.expectEqual(IntrospectionLevel.metadata, bus.introspection_level);
+
+    // 3. JSON 形式 "{\"level\":\"CONTENTS\"}"
+    try bus.publish("core.system.introspection", "{\"level\":\"CONTENTS\"}", .BestEffort, 1);
+    try std.testing.expectEqual(IntrospectionLevel.contents, bus.introspection_level);
+
+    // 4. 小文字 "off"
+    try bus.publish("core.system.introspection", "off", .BestEffort, 1);
+    try std.testing.expectEqual(IntrospectionLevel.off, bus.introspection_level);
 }
