@@ -52,9 +52,17 @@ fn runGraphPublisher(core: *Core, running_ptr: *std.atomic.Value(bool)) void {
 
 var running = std.atomic.Value(bool).init(true);
 
-fn sigHandler(sig: i32) callconv(.c) void {
+fn sigHandler(sig: i32) callconv(.C) void {
     _ = sig;
-    running.store(false, .release);
+    // 標準エラー出力に直接書く（シグナルハンドラ内での安全性を考慮）
+    _ = std.io.getStdErr().write("\nStatus: Shutdown signal received. Exiting immediately...\n") catch {};
+    
+    // zap (dashboard) の停止を試みる（ベストエフォート）
+    if (DashboardNode.getInstance()) |dash| {
+        dash.stop();
+    }
+
+    std.process.exit(0);
 }
 
 pub fn main() !void {
@@ -154,21 +162,22 @@ pub fn main() !void {
 
     log.info("\nStatus: Shutdown signal received. Cleaning up...", .{});
 
-    // 6. シャットダウンシーケンス (逆順に慎重に停止)
-    dashboard.deinit(); // zap.stop() してスレッドを join() する
-
+    // 6. シャットダウンシーケンス (一斉に停止合図を送る)
+    dashboard.stop();
+    obs.stop();
     twitch.stop();
-    twitch_thread.join();
-
     ws_gateway.stop();
-    ws_thread.join();
-    
     node_ws.stop();
-    node_ws_thread.join();
-
-    graph_thread.join();
-
     core.bus.stop();
+
+    // 7. 各スレッドの終了を待機・リソース解放
+    dashboard.deinit(); 
+    obs.deinit();
+
+    twitch_thread.join();
+    ws_thread.join();
+    node_ws_thread.join();
+    graph_thread.join();
     dispatcher_thread.join();
 
     log.info("Status: Shutdown complete.", .{});

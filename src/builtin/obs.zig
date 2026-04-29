@@ -1,5 +1,6 @@
 const std = @import("std");
 const event_bus = @import("../core/event_bus.zig");
+const log = @import("../common/log.zig");
 
 /// OBS WebSocket v5 制御用ノード
 /// core.obs.request.* トピックを監視し、OBSを操作します。
@@ -11,6 +12,7 @@ pub const ObsEgressNode = struct {
     password: ?[]const u8,
     running: bool,
     mutex: std.Thread.Mutex,
+    thread: ?std.Thread,
     host: ?[]const u8,
     port: u16,
 
@@ -24,15 +26,21 @@ pub const ObsEgressNode = struct {
             .password = if (password) |p| try allocator.dupe(u8, p) else null,
             .running = false,
             .mutex = .{},
+            .thread = null,
             .host = null,
             .port = 0,
         };
         return self;
     }
 
-    pub fn deinit(self: *ObsEgressNode) void {
+    pub fn stop(self: *ObsEgressNode) void {
         self.running = false;
         if (self.stream) |s| s.close();
+    }
+
+    pub fn deinit(self: *ObsEgressNode) void {
+        self.stop();
+        if (self.thread) |t| t.join();
         if (self.password) |p| self.allocator.free(p);
         if (self.host) |h| self.allocator.free(h);
         self.allocator.destroy(self);
@@ -52,7 +60,7 @@ pub const ObsEgressNode = struct {
             try g.registerNode(self.node_id, "ObsEgress", .native);
         }
 
-        _ = try std.Thread.spawn(.{}, ObsEgressNode.runRetryLoop, .{self});
+        self.thread = try std.Thread.spawn(.{}, ObsEgressNode.runRetryLoop, .{self});
     }
 
     fn runRetryLoop(self: *ObsEgressNode) void {

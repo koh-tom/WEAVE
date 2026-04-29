@@ -23,6 +23,10 @@ pub const DashboardNode = struct {
 
     const SELF = @This();
 
+    pub fn getInstance() ?*DashboardNode {
+        return instance;
+    }
+
     pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, node_id: u32, port: u16) !*SELF {
         const self = try allocator.create(SELF);
         self.* = .{
@@ -53,8 +57,13 @@ pub const DashboardNode = struct {
         return self;
     }
 
-    pub fn deinit(self: *SELF) void {
+    pub fn stop(self: *SELF) void {
+        _ = self;
         zap.stop();
+    }
+
+    pub fn deinit(self: *SELF) void {
+        self.stop();
         if (self.thread) |t| t.join();
         self.clients.deinit();
         self.allocator.destroy(self);

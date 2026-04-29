@@ -1,6 +1,7 @@
 const std = @import("std");
 const wamr = @import("wamr_libs.zig").wamr;
 const event_bus = @import("event_bus.zig");
+const log = @import("../common/log.zig");
 
 pub const WasmSubscriber = struct {
     instance: wamr.wasm_module_inst_t,
