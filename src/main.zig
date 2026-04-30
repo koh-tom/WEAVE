@@ -52,10 +52,10 @@ fn runGraphPublisher(core: *Core, running_ptr: *std.atomic.Value(bool)) void {
 
 var running = std.atomic.Value(bool).init(true);
 
-fn sigHandler(sig: i32) callconv(.C) void {
+fn sigHandler(sig: i32) callconv(.c) void {
     _ = sig;
     // 標準エラー出力に直接書く（シグナルハンドラ内での安全性を考慮）
-    _ = std.io.getStdErr().write("\nStatus: Shutdown signal received. Exiting immediately...\n") catch {};
+    _ = std.fs.File.stderr().write("\nStatus: Shutdown signal received. Exiting immediately...\n") catch {};
     
     // zap (dashboard) の停止を試みる（ベストエフォート）
     if (DashboardNode.getInstance()) |dash| {
