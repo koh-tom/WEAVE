@@ -289,11 +289,11 @@ pub const EventBus = struct {
         else
             "{\"hidden\":true}";
 
-        var buf: [2048]u8 = undefined;
-        const trace_json = std.fmt.bufPrint(&buf, "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}", .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json }) catch |err| {
-            if (self.verbose) std.debug.print("Tracing: Payload too large for trace buffer: {any}\n", .{err});
+        const trace_json = std.fmt.allocPrint(self.allocator, "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}", .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json }) catch |err| {
+            if (self.verbose) std.debug.print("Tracing: Failed to allocate memory for trace: {any}\n", .{err});
             return;
         };
+        defer self.allocator.free(trace_json);
 
         // トレースメッセージ自体を再発行
         // 配送ループに入らないように publish を呼び出すが、
@@ -674,4 +674,45 @@ test "EventBus: Introspection Normalization" {
     // 4. 小文字 "off"
     try bus.publish("core.system.introspection", "off", .BestEffort, 1);
     try std.testing.expectEqual(IntrospectionLevel.off, bus.introspection_level);
+}
+
+test "EventBus: Dynamic Trace Buffer for Large Payload" {
+    const allocator = std.testing.allocator;
+    var bus = try EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    // 観測レベルを CONTENTS に設定
+    bus.introspection_level = .contents;
+
+    // 4096バイト (4KB) の巨大なダミーペイロードを生成
+    const dummy_payload = try allocator.alloc(u8, 4096);
+    defer allocator.free(dummy_payload);
+    @memset(dummy_payload, 'A');
+
+    var count: u32 = 0;
+    const S = struct {
+        fn cb(ctx: ?*anyopaque, msg: *const EventMessage) void {
+            const c_ptr = @as(*u32, @ptrCast(@alignCast(ctx)));
+            c_ptr.* += 1;
+            
+            // トレースメッセージ内に 4096バイトの payload ('A' が連続する) が含まれていることを確認
+            std.testing.expect(std.mem.indexOf(u8, msg.payload, "AAAA") != null) catch {};
+        }
+    };
+
+    // core.system.event_traced トピックを購読して、トレースメッセージが正しく届くことを検証
+    try bus.subscribe("core.system.event_traced", 1, S.cb, &count);
+
+    const thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
+
+    // 4KB ペイロードをパブリッシュする。本来なら固定バッファ 2048 バイトだとオーバーフローしてトレースが破棄されていた
+    try bus.publish("some.user.topic", dummy_payload, .BestEffort, 1);
+
+    bus.waitIdle();
+    bus.stop();
+    thread.join();
+
+    // トレースメッセージが確実に1回届いたことを確認
+    try std.testing.expectEqual(@as(u32, 1), count);
 }
