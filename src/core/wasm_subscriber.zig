@@ -14,6 +14,12 @@ pub const WasmSubscriber = struct {
     consecutive_failures: u32 = 0,
     last_failure_time: i64 = 0,
 
+    // 関数ハンドルキャッシュ
+    func_os_alloc: ?wamr.wasm_function_inst_t = null,
+    func_on_message: ?wamr.wasm_function_inst_t = null,
+    func_get_heap_usage: ?wamr.wasm_function_inst_t = null,
+    func_os_reset_heap: ?wamr.wasm_function_inst_t = null,
+
     const MAX_RESTART_ATTEMPTS: u32 = 5;
     const BASE_BACKOFF_MS: i64 = 1000; // 1秒
 
@@ -21,7 +27,7 @@ pub const WasmSubscriber = struct {
     const EXEC_ENV_STACK_SIZE: u32 = 128 * 1024;
 
     pub fn init(instance: wamr.wasm_module_inst_t, node_id: u32, bus: *event_bus.EventBus, manager: *@import("plugin_manager.zig").PluginManager) !WasmSubscriber {
-        return WasmSubscriber{
+        var sub = WasmSubscriber{
             .instance = instance,
             .node_id = node_id,
             .bus = bus,
@@ -29,7 +35,21 @@ pub const WasmSubscriber = struct {
             .mutex = .{},
             .consecutive_failures = 0,
             .last_failure_time = 0,
+            .func_os_alloc = null,
+            .func_on_message = null,
+            .func_get_heap_usage = null,
+            .func_os_reset_heap = null,
         };
+        sub.updateInstance(instance);
+        return sub;
+    }
+
+    pub fn updateInstance(self: *WasmSubscriber, new_inst: wamr.wasm_module_inst_t) void {
+        self.instance = new_inst;
+        self.func_os_alloc = wamr.wasm_runtime_lookup_function(new_inst, "os_alloc");
+        self.func_on_message = wamr.wasm_runtime_lookup_function(new_inst, "on_message");
+        self.func_get_heap_usage = wamr.wasm_runtime_lookup_function(new_inst, "os_api_get_heap_usage");
+        self.func_os_reset_heap = wamr.wasm_runtime_lookup_function(new_inst, "os_reset_heap");
     }
 
     pub fn deinit(self: *WasmSubscriber) void {
@@ -53,8 +73,7 @@ pub const WasmSubscriber = struct {
         if (env == null) return;
         defer wamr.wasm_runtime_destroy_exec_env(env);
         
-        const alloc_func = wamr.wasm_runtime_lookup_function(self.instance, "os_alloc");
-        if (alloc_func == null) return;
+        const alloc_func = self.func_os_alloc orelse return;
 
         // Topicコピー
         var argv_t = [_]u32{@intCast(msg.topic.len)};
@@ -72,7 +91,7 @@ pub const WasmSubscriber = struct {
         const start_time = std.time.nanoTimestamp();
 
         // on_message実行
-        if (wamr.wasm_runtime_lookup_function(self.instance, "on_message")) |func| {
+        if (self.func_on_message) |func| {
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
             if (!wamr.wasm_runtime_call_wasm(env, func, 4, &msg_argv)) {
                 if (wamr.wasm_runtime_get_exception(self.instance)) |exc| {
@@ -121,7 +140,7 @@ pub const WasmSubscriber = struct {
             
             // メモリサイズ取得 (正確な heap usage を Wasm 側から取得)
             var mem_size: u32 = 0;
-            if (wamr.wasm_runtime_lookup_function(self.instance, "os_api_get_heap_usage")) |usage_func| {
+            if (self.func_get_heap_usage) |usage_func| {
                 var usage_argv = [_]u32{0};
                 if (wamr.wasm_runtime_call_wasm(env, usage_func, 0, &usage_argv)) {
                     mem_size = usage_argv[0];
@@ -143,7 +162,7 @@ pub const WasmSubscriber = struct {
         self.consecutive_failures = 0;
 
         // メモリリセット
-        if (wamr.wasm_runtime_lookup_function(self.instance, "os_reset_heap")) |reset_func| {
+        if (self.func_os_reset_heap) |reset_func| {
             var reset_argv = [_]u32{0};
             _ = wamr.wasm_runtime_call_wasm(env, reset_func, 0, &reset_argv);
         }

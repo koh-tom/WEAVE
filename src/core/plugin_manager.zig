@@ -107,7 +107,7 @@ pub const PluginManager = struct {
         meta.instance = new_inst;
         var needs_subscription = false;
         if (meta.subscriber) |*sub| {
-            sub.instance = new_inst;
+            sub.updateInstance(new_inst);
         } else {
             meta.subscriber = try WasmSubscriber.init(new_inst, node_id, bus, self);
             needs_subscription = true;
