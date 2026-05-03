@@ -48,11 +48,16 @@ pub const SystemGraph = struct {
 
     pub fn registerNode(self: *SystemGraph, id: u32, name: []const u8, node_type: NodeType) !void {
         self.mutex.lock();
+        var is_changed = false;
+        
         if (self.nodes.getPtr(id)) |node| {
-            self.allocator.free(node.name);
-            node.name = try self.allocator.dupe(u8, name);
-            node.node_type = node_type;
-            node.status = .active;
+            if (!std.mem.eql(u8, node.name, name) or node.node_type != node_type or node.status != .active) {
+                self.allocator.free(node.name);
+                node.name = try self.allocator.dupe(u8, name);
+                node.node_type = node_type;
+                node.status = .active;
+                is_changed = true;
+            }
             node.last_activity_ts = std.time.milliTimestamp();
         } else {
             try self.nodes.put(self.allocator, id, .{
@@ -65,14 +70,17 @@ pub const SystemGraph = struct {
                 .last_activity_ts = std.time.milliTimestamp(),
                 .last_topic = null,
             });
+            is_changed = true;
         }
         self.mutex.unlock();
 
-        if (self.bus) |bus| {
-            var buf: [256]u8 = undefined;
-            const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"node_reg\",\"id\":{},\"name\":\"{s}\",\"node_type\":\"{any}\"}}", .{id, name, node_type}) catch "";
-            if (payload.len > 0) {
-                _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
+        if (is_changed) {
+            if (self.bus) |bus| {
+                var buf: [256]u8 = undefined;
+                const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"node_reg\",\"id\":{},\"name\":\"{s}\",\"node_type\":\"{s}\"}}", .{id, name, @tagName(node_type)}) catch "";
+                if (payload.len > 0) {
+                    _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
+                }
             }
         }
     }
@@ -189,3 +197,43 @@ pub const SystemGraph = struct {
         return list.toOwnedSlice(allocator);
     }
 };
+
+test "SystemGraph: Idempotent registerNode" {
+    const allocator = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    var graph = SystemGraph.init(allocator);
+    defer graph.deinit();
+    graph.bus = &bus;
+
+    var count: u32 = 0;
+    const S = struct {
+        fn cb(ctx: ?*anyopaque, _: *const event_bus.EventMessage) void {
+            const c_ptr = @as(*u32, @ptrCast(@alignCast(ctx)));
+            c_ptr.* += 1;
+        }
+    };
+
+    // delta トピックを購読
+    try bus.subscribe("core.system.graph.delta", 1, S.cb, &count);
+
+    const thread = try std.Thread.spawn(.{}, event_bus.EventBus.runDispatcher, .{&bus});
+
+    // 1. 初回登録 -> delta が飛ぶはず
+    try graph.registerNode(42, "test_node", .wasm);
+    
+    // 2. 同じ内容で再登録 -> 冪等性により delta は無視されるはず
+    try graph.registerNode(42, "test_node", .wasm);
+
+    // 3. 違う内容で再登録 -> 更新されたので delta が飛ぶはず
+    try graph.registerNode(42, "updated_node", .wasm);
+
+    bus.waitIdle();
+    bus.stop();
+    thread.join();
+
+    // 期待値: 初回(1) + 変更(3) = 合計 2 回の delta が発行されているはず
+    try std.testing.expectEqual(@as(u32, 2), count);
+}
