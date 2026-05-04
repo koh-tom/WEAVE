@@ -11,6 +11,7 @@ pub const Config = struct {
     obs_password: []const u8 = "obs-password",
     log_level: LogLevel = .info,
     plugins: std.ArrayListUnmanaged([]const u8),
+    graph_full_interval_secs: u32 = 60,
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
@@ -42,6 +43,7 @@ pub const Config = struct {
                 if (obj.get("obs_port")) |v| self.obs_port = @intCast(v.integer);
                 if (obj.get("obs_password")) |v| self.obs_password = try allocator.dupe(u8, v.string);
                 if (obj.get("log_level")) |v| self.log_level = LogLevel.fromString(v.string);
+                if (obj.get("graph_full_interval_secs")) |v| self.graph_full_interval_secs = @intCast(v.integer);
                 if (obj.get("plugins")) |v| {
                     if (v == .array) {
                         for (v.array.items) |p| {
@@ -96,6 +98,10 @@ pub const Config = struct {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
                 self.log_level = LogLevel.fromString(args[i]);
+            } else if (std.mem.eql(u8, arg, "--graph-interval")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                self.graph_full_interval_secs = try std.fmt.parseInt(u32, args[i], 10);
             } else if (std.mem.eql(u8, arg, "--help")) {
                 printHelp();
                 std.process.exit(0);
@@ -134,6 +140,7 @@ fn printHelp() void {
         \\  --obs-host <host>    OBS WebSocket host (default: 127.0.0.1)
         \\  --obs-port <port>    OBS WebSocket port (default: 4455)
         \\  --obs-pass <pass>    OBS WebSocket password (default: obs-password)
+        \\  --graph-interval <s> Full topology publish interval in seconds (default: 60)
         \\  --help               Show this help
         \\
     , .{});
