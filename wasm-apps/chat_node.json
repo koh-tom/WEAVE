@@ -8,7 +8,7 @@
             "core.node.status"
         ],
         "subscribe": [
-            "ext.twitch.*",
+            "ext.twitch.#",
             "test.stress"
         ]
     }

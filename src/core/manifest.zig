@@ -50,16 +50,8 @@ pub const Manifest = struct {
     }
 
     /// トピックのマッチング判定
-    /// - 完全一致: "a.b.c" == "a.b.c"
-    /// - グローバルワイルドカード: "*" matches anything
-    /// - プレフィックスワイルドカード: "a.b.*" matches "a.b.c", "a.b.d", etc.
     fn matchTopic(pattern: []const u8, topic: []const u8) bool {
-        if (std.mem.eql(u8, pattern, "*")) return true;
-        if (std.mem.endsWith(u8, pattern, ".*")) {
-            const prefix = pattern[0 .. pattern.len - 1]; // "a.b."
-            return std.mem.startsWith(u8, topic, prefix);
-        }
-        return std.mem.eql(u8, pattern, topic);
+        return @import("event_bus.zig").EventBus.isMatch(pattern, topic);
     }
 };
 
