@@ -201,4 +201,24 @@ pub fn build(b: *std.Build) void {
 
     // デフォルトの install ステップが Wasm ビルドにも依存するようにする
     b.getInstallStep().dependOn(wasm_step);
+
+    // --- Unit Tests ---
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    addWamrDeps(b, unit_tests, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
+    unit_tests.root_module.addImport("zap", zap.module("zap"));
+    unit_tests.root_module.addImport("common", common_module);
+    unit_tests.use_llvm = true;
+    unit_tests.use_lld = true;
+
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    run_unit_tests.step.dependOn(wasm_step);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
 }
