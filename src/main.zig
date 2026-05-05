@@ -119,6 +119,8 @@ pub fn main() !void {
     host_api.global_bus = &core.bus;
     host_api.global_plugin_manager = &core.pm;
     core.pm.runtime = &core.runtime;
+    core.pm.wasm_stack_size = config.wasm_stack_size;
+    core.pm.wasm_heap_size = config.wasm_heap_size;
 
     // 2. トランスポートの設定
     var log_transport = LogTransport.init("DebugLogger");
