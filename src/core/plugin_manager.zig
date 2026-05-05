@@ -27,6 +27,8 @@ pub const PluginManager = struct {
     plugins: std.AutoHashMap(wamr.wasm_module_inst_t, *PluginMetadata),
     next_node_id: u32,
     runtime: ?*@import("wasm_runtime.zig").WasmRuntime = null, // 追加
+    wasm_stack_size: u32 = 128 * 1024,
+    wasm_heap_size: u32 = 64 * 1024,
 
     pub fn init(allocator: std.mem.Allocator) PluginManager {
         return PluginManager{
@@ -34,6 +36,8 @@ pub const PluginManager = struct {
             .plugins = std.AutoHashMap(wamr.wasm_module_inst_t, *PluginMetadata).init(allocator),
             .next_node_id = 100,
             .runtime = null,
+            .wasm_stack_size = 128 * 1024,
+            .wasm_heap_size = 64 * 1024,
         };
     }
 
@@ -99,7 +103,7 @@ pub const PluginManager = struct {
 
         const module = try runtime.loadModule(wasm_buffer);
         // Note: モジュール管理の詳細は簡略化
-        const new_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
+        const new_inst = try runtime.instantiate(module, self.wasm_stack_size, self.wasm_heap_size);
 
         // 3. メタデータの更新 (wasm_bufferの差し替え: WAMRはバッファの生存を要求する)
         self.allocator.free(meta.wasm_buffer);

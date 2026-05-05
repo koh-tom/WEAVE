@@ -56,7 +56,7 @@ pub const Core = struct {
         const module = try self.runtime.loadModule(wasm_buffer);
         // 注意: モジュールはランタイムが管理するが、個別のアンロード戦略は将来課題
 
-        const module_inst = try self.runtime.instantiate(module, 128 * 1024, 64 * 1024);
+        const module_inst = try self.runtime.instantiate(module, self.pm.wasm_stack_size, self.pm.wasm_heap_size);
 
         // マニフェストパスの推測 (plugin.wasm -> plugin.json)
         var manifest_path_buf: [256]u8 = undefined;
