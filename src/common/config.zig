@@ -24,12 +24,16 @@ pub const Config = struct {
     graph_full_interval_secs: u32 = 60,
     node_ws_token: ?[]const u8 = null,
     weave_env: WeaveEnv = .development,
+    wasm_stack_size: u32 = 128 * 1024,
+    wasm_heap_size: u32 = 64 * 1024,
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
             .plugins = .{},
             .node_ws_token = null,
             .weave_env = .development,
+            .wasm_stack_size = 128 * 1024,
+            .wasm_heap_size = 64 * 1024,
         };
 
         // 1. 設定ファイルの読み込み (weave.json) - 任意
@@ -60,6 +64,8 @@ pub const Config = struct {
                 if (obj.get("graph_full_interval_secs")) |v| self.graph_full_interval_secs = @intCast(v.integer);
                 if (obj.get("node_ws_token")) |v| self.node_ws_token = try allocator.dupe(u8, v.string);
                 if (obj.get("weave_env")) |v| self.weave_env = WeaveEnv.fromString(v.string);
+                if (obj.get("wasm_stack_size")) |v| self.wasm_stack_size = @intCast(v.integer);
+                if (obj.get("wasm_heap_size")) |v| self.wasm_heap_size = @intCast(v.integer);
                 if (obj.get("plugins")) |v| {
                     if (v == .array) {
                         for (v.array.items) |p| {
@@ -84,6 +90,16 @@ pub const Config = struct {
         if (std.process.getEnvVarOwned(allocator, "WEAVE_ENV")) |val| {
             defer allocator.free(val);
             self.weave_env = WeaveEnv.fromString(val);
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_WASM_STACK_SIZE")) |val| {
+            defer allocator.free(val);
+            self.wasm_stack_size = try std.fmt.parseInt(u32, val, 10);
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_WASM_HEAP_SIZE")) |val| {
+            defer allocator.free(val);
+            self.wasm_heap_size = try std.fmt.parseInt(u32, val, 10);
         } else |_| {}
 
         const args = try std.process.argsAlloc(allocator);
@@ -213,4 +229,21 @@ test "Config: Production mode requirements" {
 
     try std.testing.expectEqual(WeaveEnv.production, conf.weave_env);
     try std.testing.expectEqualStrings("prod-secret-token", conf.node_ws_token.?);
+}
+
+test "Config: Wasm stack and heap sizes overrides" {
+    const allocator = std.testing.allocator;
+
+    // 一時的に環境変数をセット
+    try std.process.setEnvVar("WEAVE_WASM_STACK_SIZE", "65536");
+    defer std.process.deleteEnvVar("WEAVE_WASM_STACK_SIZE") catch {};
+
+    try std.process.setEnvVar("WEAVE_WASM_HEAP_SIZE", "32768");
+    defer std.process.deleteEnvVar("WEAVE_WASM_HEAP_SIZE") catch {};
+
+    var conf = try Config.parse(allocator);
+    defer conf.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 65536), conf.wasm_stack_size);
+    try std.testing.expectEqual(@as(u32, 32768), conf.wasm_heap_size);
 }
