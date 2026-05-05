@@ -30,8 +30,14 @@ fn runNodeWs(n: *NodeWsTransport) void {
     };
 }
 
-fn runGraphPublisher(core: *Core, running_ptr: *std.atomic.Value(bool)) void {
-    while (running_ptr.load(.acquire)) {
+var run_mutex = std.Thread.Mutex{};
+var run_cond = std.Thread.Condition{};
+var running = std.atomic.Value(bool).init(true);
+
+fn runGraphPublisher(core: *Core, config: *const Config) void {
+    const interval_ns = @as(u64, config.graph_full_interval_secs) * std.time.ns_per_s;
+
+    while (running.load(.acquire)) {
         const json = core.graph.toJson(core.allocator) catch |err| {
             log.err("GraphPublisher Error (JSON): {any}", .{err});
             continue;
@@ -42,20 +48,28 @@ fn runGraphPublisher(core: *Core, running_ptr: *std.atomic.Value(bool)) void {
             log.err("GraphPublisher Error (Publish): {any}", .{err});
         };
         
-        // 1秒ごとにフラグチェック、60秒ごとにパブリッシュ
-        var i: u32 = 0;
-        while (i < 60 and running_ptr.load(.acquire)) : (i += 1) {
-            std.Thread.sleep(1 * std.time.ns_per_s);
-        }
+        run_mutex.lock();
+        defer run_mutex.unlock();
+        
+        run_cond.timedWait(&run_mutex, interval_ns) catch |err| {
+            if (err == error.Timeout) {
+                continue;
+            }
+            log.err("GraphPublisher timedWait Error: {any}", .{err});
+        };
     }
 }
-
-var running = std.atomic.Value(bool).init(true);
 
 fn sigHandler(sig: i32) callconv(.c) void {
     _ = sig;
     // 標準エラー出力に直接書く（シグナルハンドラ内での安全性を考慮）
     _ = std.fs.File.stderr().write("\nStatus: Shutdown signal received. Exiting immediately...\n") catch {};
+    
+    running.store(false, .release);
+    
+    run_mutex.lock();
+    run_cond.broadcast();
+    run_mutex.unlock();
     
     // zap (dashboard) の停止を試みる（ベストエフォート）
     if (DashboardNode.getInstance()) |dash| {
@@ -124,7 +138,7 @@ pub fn main() !void {
     
     const ws_thread = try std.Thread.spawn(.{}, runWsGateway, .{ws_gateway});
     const node_ws_thread = try std.Thread.spawn(.{}, runNodeWs, .{node_ws});
-    const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{&core, &running});
+    const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{ &core, &config });
 
     // 3. ネイティブノード
     try core.graph.registerNode(1, "TwitchAdapter", .native);
