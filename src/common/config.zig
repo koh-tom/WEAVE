@@ -1,6 +1,16 @@
 const std = @import("std");
 const LogLevel = @import("types.zig").LogLevel;
 
+pub const WeaveEnv = enum {
+    development,
+    production,
+
+    pub fn fromString(str: []const u8) WeaveEnv {
+        if (std.mem.eql(u8, str, "production")) return .production;
+        return .development;
+    }
+};
+
 pub const Config = struct {
     ws_gateway_port: u16 = 8080,
     node_ws_port: u16 = 8081,
@@ -12,10 +22,14 @@ pub const Config = struct {
     log_level: LogLevel = .info,
     plugins: std.ArrayListUnmanaged([]const u8),
     graph_full_interval_secs: u32 = 60,
+    node_ws_token: ?[]const u8 = null,
+    weave_env: WeaveEnv = .development,
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
             .plugins = .{},
+            .node_ws_token = null,
+            .weave_env = .development,
         };
 
         // 1. 設定ファイルの読み込み (weave.json) - 任意
@@ -44,6 +58,8 @@ pub const Config = struct {
                 if (obj.get("obs_password")) |v| self.obs_password = try allocator.dupe(u8, v.string);
                 if (obj.get("log_level")) |v| self.log_level = LogLevel.fromString(v.string);
                 if (obj.get("graph_full_interval_secs")) |v| self.graph_full_interval_secs = @intCast(v.integer);
+                if (obj.get("node_ws_token")) |v| self.node_ws_token = try allocator.dupe(u8, v.string);
+                if (obj.get("weave_env")) |v| self.weave_env = WeaveEnv.fromString(v.string);
                 if (obj.get("plugins")) |v| {
                     if (v == .array) {
                         for (v.array.items) |p| {
@@ -58,6 +74,16 @@ pub const Config = struct {
         if (std.process.getEnvVarOwned(allocator, "WEAVE_LOG_LEVEL")) |val| {
             defer allocator.free(val);
             self.log_level = LogLevel.fromString(val);
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_NODE_WS_TOKEN")) |val| {
+            if (self.node_ws_token) |t| allocator.free(t);
+            self.node_ws_token = val;
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_ENV")) |val| {
+            defer allocator.free(val);
+            self.weave_env = WeaveEnv.fromString(val);
         } else |_| {}
 
         const args = try std.process.argsAlloc(allocator);
@@ -118,10 +144,20 @@ pub const Config = struct {
             try self.plugins.append(allocator, try allocator.dupe(u8, "wasm-apps/chat_node.wasm"));
         }
 
+        // Production モードのバリデーションチェック
+        if (self.weave_env == .production) {
+            const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
+            if (!has_token) {
+                std.debug.print("Error: Production mode requires WEAVE_NODE_WS_TOKEN to be set.\n", .{});
+                return error.TokenRequiredInProduction;
+            }
+        }
+
         return self;
     }
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        if (self.node_ws_token) |t| allocator.free(t);
         for (self.plugins.items) |p| {
             allocator.free(p);
         }
@@ -144,4 +180,37 @@ fn printHelp() void {
         \\  --help               Show this help
         \\
     , .{});
+}
+
+test "Config: WeaveEnv and Token validation" {
+    const allocator = std.testing.allocator;
+
+    // 1. 環境変数がない場合のデフォルトパースの検証
+    var conf = try Config.parse(allocator);
+    defer conf.deinit(allocator);
+
+    try std.testing.expectEqual(WeaveEnv.development, conf.weave_env);
+    try std.testing.expect(conf.node_ws_token == null);
+}
+
+test "Config: Production mode requirements" {
+    const allocator = std.testing.allocator;
+
+    // 一時的に環境変数をセット
+    try std.process.setEnvVar("WEAVE_ENV", "production");
+    defer std.process.deleteEnvVar("WEAVE_ENV") catch {};
+
+    // 1. トークン未設定状態で parse -> error.TokenRequiredInProduction が返るはず
+    try std.testing.expectError(error.TokenRequiredInProduction, Config.parse(allocator));
+
+    // 2. トークンをセットした状態にする
+    try std.process.setEnvVar("WEAVE_NODE_WS_TOKEN", "prod-secret-token");
+    defer std.process.deleteEnvVar("WEAVE_NODE_WS_TOKEN") catch {};
+
+    // トークンがセットされているので、正常にパースできるはず
+    var conf = try Config.parse(allocator);
+    defer conf.deinit(allocator);
+
+    try std.testing.expectEqual(WeaveEnv.production, conf.weave_env);
+    try std.testing.expectEqualStrings("prod-secret-token", conf.node_ws_token.?);
 }

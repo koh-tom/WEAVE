@@ -128,7 +128,8 @@ pub fn main() !void {
     defer ws_gateway.deinit();
     try core.tm.register(ws_gateway.transport());
 
-    var node_ws = try NodeWsTransport.init(allocator, &core.bus, config.node_ws_port, "weave-secret-2026");
+    const token = config.node_ws_token orelse "weave-secret-2026";
+    var node_ws = try NodeWsTransport.init(allocator, &core.bus, config.node_ws_port, token);
     defer node_ws.deinit();
     try core.tm.register(node_ws.transport());
 
