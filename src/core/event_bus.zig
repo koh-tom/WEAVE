@@ -618,6 +618,37 @@ test "EventBus: Wildcard Matching" {
     try std.testing.expect(isMatch("a.#", "a.b"));
     try std.testing.expect(isMatch("a.#", "a.b.c"));
     try std.testing.expect(isMatch("#", "a.b.c"));
+
+    // --- Added 10 robust cases for multi-level, boundary, and negative validation ---
+    // 1. Multi-level combinations (Positive)
+    try std.testing.expect(isMatch("a.b.+.d.#", "a.b.c.d.e.f"));
+    
+    // 2. Multi-level combinations (Positive - # matches zero levels)
+    try std.testing.expect(isMatch("a.b.+.d.#", "a.b.c.d"));
+    
+    // 3. Multi-level combinations (Negative - missing single-level placeholder)
+    try std.testing.expect(!isMatch("a.b.+.d.#", "a.b.d.e"));
+    
+    // 4. Complete wildcard with single '#' (Positive)
+    try std.testing.expect(isMatch("#", "any.depth.topic.name"));
+    
+    // 5. Empty topic comparison (Negative)
+    try std.testing.expect(!isMatch("a.b.c", ""));
+    
+    // 6. Empty pattern comparison (Negative)
+    try std.testing.expect(!isMatch("", "a.b.c"));
+    
+    // 7. Multi-level check with * (Negative - * matches exactly one level)
+    try std.testing.expect(!isMatch("a.*.c", "a.b.x.c"));
+    
+    // 8. Same prefix but different length (Negative)
+    try std.testing.expect(!isMatch("a.b", "a.b.c"));
+    
+    // 9. Middle-level multi-level wildcard (Positive)
+    try std.testing.expect(isMatch("a.#.d", "a.b.c.d"));
+    
+    // 10. Middle-level multi-level wildcard with unmatched end (Negative)
+    try std.testing.expect(!isMatch("a.#.d", "a.b.c.e"));
 }
 
 test "EventBus: Wildcard Dispatch" {
