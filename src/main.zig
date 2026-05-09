@@ -49,34 +49,25 @@ fn runGraphPublisher(core: *Core, config: *const Config) void {
         };
         
         run_mutex.lock();
-        defer run_mutex.unlock();
-        
+        if (!running.load(.acquire)) {
+            run_mutex.unlock();
+            break;
+        }
         run_cond.timedWait(&run_mutex, interval_ns) catch |err| {
-            if (err == error.Timeout) {
-                continue;
+            if (err != error.Timeout) {
+                log.err("GraphPublisher timedWait Error: {any}", .{err});
             }
-            log.err("GraphPublisher timedWait Error: {any}", .{err});
         };
+        run_mutex.unlock();
     }
 }
 
 fn sigHandler(sig: i32) callconv(.c) void {
     _ = sig;
-    // 標準エラー出力に直接書く（シグナルハンドラ内での安全性を考慮）
-    _ = std.fs.File.stderr().write("\nStatus: Shutdown signal received. Exiting immediately...\n") catch {};
+    // 標準エラー出力に直接書く（シグナルハンドラ内での安全性を考慮。write は非同期シグナル安全）
+    _ = std.fs.File.stderr().write("\nStatus: Shutdown signal received. Graceful exiting...\n") catch {};
     
     running.store(false, .release);
-    
-    run_mutex.lock();
-    run_cond.broadcast();
-    run_mutex.unlock();
-    
-    // zap (dashboard) の停止を試みる（ベストエフォート）
-    if (DashboardNode.getInstance()) |dash| {
-        dash.stop();
-    }
-
-    std.process.exit(0);
 }
 
 pub fn main() !void {
@@ -178,6 +169,11 @@ pub fn main() !void {
     }
 
     log.info("\nStatus: Shutdown signal received. Cleaning up...", .{});
+
+    // GraphPublisher を即時にウェイクアップ
+    run_mutex.lock();
+    run_cond.broadcast();
+    run_mutex.unlock();
 
     // 6. シャットダウンシーケンス (一斉に停止合図を送る)
     dashboard.stop();
