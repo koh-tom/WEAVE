@@ -3,13 +3,10 @@
     "version": "0.1.0",
     "permissions": {
         "publish": [
-            "ext.twitch.chat",
-            "sys.log",
             "core.node.status"
         ],
         "subscribe": [
-            "ext.twitch.#",
-            "test.stress"
+            "ext.twitch.#"
         ]
     }
 }
