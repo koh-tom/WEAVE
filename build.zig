@@ -186,18 +186,33 @@ pub fn build(b: *std.Build) void {
     });
     chat_node.root_module.addImport("plugin_sdk", sdk_module);
     chat_node.root_module.addImport("common", common_module);
-
-    // Wasm特有の設定: エクスポート関数を保持し、mainを要求しない
     chat_node.rdynamic = true;
     chat_node.entry = .disabled;
 
-    // ビルド成果物を wasm-apps/ にコピーするステップ
-    const install_wasm = b.addInstallArtifact(chat_node, .{
+    const install_chat = b.addInstallArtifact(chat_node, .{
+        .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
+    });
+
+    const bad_node = b.addExecutable(.{
+        .name = "bad_node",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("wasm-apps/bad_node.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+        }),
+    });
+    bad_node.root_module.addImport("plugin_sdk", sdk_module);
+    bad_node.root_module.addImport("common", common_module);
+    bad_node.rdynamic = true;
+    bad_node.entry = .disabled;
+
+    const install_bad = b.addInstallArtifact(bad_node, .{
         .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
     });
     
     const wasm_step = b.step("wasm", "Build Wasm plugins");
-    wasm_step.dependOn(&install_wasm.step);
+    wasm_step.dependOn(&install_chat.step);
+    wasm_step.dependOn(&install_bad.step);
 
     // デフォルトの install ステップが Wasm ビルドにも依存するようにする
     b.getInstallStep().dependOn(wasm_step);
@@ -221,4 +236,11 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // --- Clean Step ---
+    const clean_step = b.step("clean", "Remove build artifacts and Wasm plugins");
+    const clean_cmd = b.addSystemCommand(&[_][]const u8{
+        "rm", "-rf", "zig-cache", "zig-out", ".zig-cache", "wasm-apps/chat_node.wasm", "wasm-apps/bad_node.wasm", "build_err.log", "test_err.log",
+    });
+    clean_step.dependOn(&clean_cmd.step);
 }
