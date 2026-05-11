@@ -404,8 +404,18 @@ pub const EventBus = struct {
             if (str.len < buf.len) {
                 const lower_str = std.ascii.lowerString(&buf, str);
                 if (std.meta.stringToEnum(IntrospectionLevel, lower_str)) |level| {
-                    self.introspection_level = level;
-                    std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
+                    const old_level = self.introspection_level;
+                    if (old_level != level) {
+                        self.introspection_level = level;
+                        std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
+                        
+                        var evt_buf: [128]u8 = undefined;
+                        const evt_payload = std.fmt.bufPrint(&evt_buf, "{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ @tagName(old_level), @tagName(level) }) catch "{}";
+                        
+                        self.publish("core.system.introspection.changed", evt_payload, .Transient, 0) catch |err| {
+                            std.debug.print("Failed to publish introspection changed event: {any}\n", .{err});
+                        };
+                    }
                 }
             }
         }
@@ -746,4 +756,44 @@ test "EventBus: Dynamic Trace Buffer for Large Payload" {
 
     // トレースメッセージが確実に1回届いたことを確認
     try std.testing.expectEqual(@as(u32, 1), count);
+}
+
+test "EventBus: Introspection level change notification" {
+    const allocator = std.testing.allocator;
+    var bus = try EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    // 初期状態は metadata
+    bus.introspection_level = .metadata;
+
+    var count: u32 = 0;
+    var received_payload: [256]u8 = undefined;
+    var payload_len: usize = 0;
+
+    const S = struct {
+        fn cb(ctx: ?*anyopaque, msg: *const EventMessage) void {
+            const context = @as(*struct { c: *u32, p: []u8, l: *usize }, @ptrCast(@alignCast(ctx)));
+            context.c.* += 1;
+            @memcpy(context.p[0..msg.payload.len], msg.payload);
+            context.l.* = msg.payload.len;
+        }
+    };
+
+    var context_struct = .{ .c = &count, .p = &received_payload, .l = &payload_len };
+    try bus.subscribe("core.system.introspection.changed", 1, S.cb, &context_struct);
+
+    const thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
+
+    // レベルを contents に変更する
+    try bus.publish("core.system.introspection", "contents", .BestEffort, 1);
+
+    bus.waitIdle();
+    bus.stop();
+    thread.join();
+
+    // 通知イベントが届いたことを確認
+    try std.testing.expectEqual(@as(u32, 1), count);
+    const expected_json = "{\"from\":\"metadata\",\"to\":\"contents\"}";
+    try std.testing.expectEqualStrings(expected_json, received_payload[0..payload_len]);
 }
