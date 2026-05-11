@@ -94,10 +94,21 @@ pub const WasmSubscriber = struct {
         if (self.func_on_message) |func| {
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
             if (!wamr.wasm_runtime_call_wasm(env, func, 4, &msg_argv)) {
+                var exception_msg: []const u8 = "unknown execution trap";
                 if (wamr.wasm_runtime_get_exception(self.instance)) |exc| {
-                    log.err("WasmSubscriber: Execution TRAPPED! Exception: {s}", .{exc});
+                    exception_msg = std.mem.span(exc);
+                    log.err("WasmSubscriber: Execution TRAPPED! Exception: {s}", .{exception_msg});
                 } else {
                     log.err("WasmSubscriber: Execution failed without exception.", .{});
+                }
+                
+                // 障害分離 (Fault Isolation) 時のフェイルセーフ通知
+                var fault_buf: [256]u8 = undefined;
+                const fault_payload = std.fmt.bufPrint(&fault_buf, "{{\"node_id\":{},\"exception\":\"{s}\"}}", .{ self.node_id, exception_msg }) catch "";
+                if (fault_payload.len > 0) {
+                    _ = self.bus.publish("core.node.fault", fault_payload, .Transient, self.node_id) catch |err| {
+                        log.err("WasmSubscriber: Failed to publish fault event: {any}", .{err});
+                    };
                 }
                 
                 if (self.bus.graph) |g| {
