@@ -31,6 +31,17 @@ pub const Manifest = struct {
     pub fn validate(self: Manifest) !void {
         if (self.name.len == 0) return error.ManifestNameEmpty;
         if (self.version.len == 0) return error.ManifestVersionEmpty;
+
+        // 1. 空トピック定義の禁止
+        for (self.permissions.publish) |p| {
+            if (p.len == 0) return error.PermissionTopicEmpty;
+            // 2. publish でのグローバルワイルドカード「#」の禁止 (セキュリティポリシー)
+            if (std.mem.eql(u8, p, "#")) return error.GlobalPublishForbidden;
+        }
+
+        for (self.permissions.subscribe) |s| {
+            if (s.len == 0) return error.PermissionTopicEmpty;
+        }
     }
 
     /// 特定のトピックへのPublish権限があるかチェック
@@ -96,4 +107,42 @@ test "manifest: invalid manifest" {
     defer parsed.deinit();
 
     try std.testing.expectError(error.ManifestNameEmpty, parsed.value.validate());
+}
+
+test "manifest: strict semantic validations" {
+    const allocator = std.testing.allocator;
+
+    // 1. publish に "#" を指定したマニフェスト (GlobalPublishForbidden エラーになるべき)
+    const json_global_pub =
+        \\{
+        \\  "name": "hacker-plugin",
+        \\  "version": "1.0.0",
+        \\  "permissions": {
+        \\    "publish": ["#"],
+        \\    "subscribe": ["some.topic"]
+        \\  }
+        \\}
+    ;
+    const parsed_global = try std.json.parseFromSlice(Manifest, allocator, json_global_pub, .{
+        .allocate = .alloc_always,
+    });
+    defer parsed_global.deinit();
+    try std.testing.expectError(error.GlobalPublishForbidden, parsed_global.value.validate());
+
+    // 2. 空のトピック文字列を含むマニフェスト (PermissionTopicEmpty エラーになるべき)
+    const json_empty_topic =
+        \\{
+        \\  "name": "buggy-plugin",
+        \\  "version": "1.0.0",
+        \\  "permissions": {
+        \\    "publish": [""],
+        \\    "subscribe": []
+        \\  }
+        \\}
+    ;
+    const parsed_empty = try std.json.parseFromSlice(Manifest, allocator, json_empty_topic, .{
+        .allocate = .alloc_always,
+    });
+    defer parsed_empty.deinit();
+    try std.testing.expectError(error.PermissionTopicEmpty, parsed_empty.value.validate());
 }
