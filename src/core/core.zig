@@ -69,7 +69,7 @@ pub const Core = struct {
         const node_id = self.pm.next_node_id;
         try self.graph.registerNode(node_id, wasm_path, .wasm); // 仮名
 
-        const meta = try self.pm.registerPlugin(module_inst, wasm_path, manifest_path, wasm_buffer, &self.bus);
+        const meta = try self.pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &self.bus);
         
         // 名前の更新（マニフェストから正確な名前を取得）
         try self.graph.registerNode(node_id, meta.manifest_parsed.value.name, .wasm);
