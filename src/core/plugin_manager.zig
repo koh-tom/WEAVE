@@ -10,12 +10,15 @@ pub const PluginMetadata = struct {
     manifest_path: []const u8, // 追加: 再起動用
     wasm_buffer: []const u8, // WAMR要求によりメモリに保持
     manifest_parsed: std.json.Parsed(manifest.Manifest),
+    module: wamr.wasm_module_t,
     instance: wamr.wasm_module_inst_t,
     subscriber: ?WasmSubscriber = null,
 
     pub fn deinit(self: *PluginMetadata, allocator: std.mem.Allocator) void {
         if (self.subscriber) |*sub| sub.deinit();
         self.manifest_parsed.deinit();
+        wamr.wasm_runtime_deinstantiate(self.instance);
+        wamr.wasm_runtime_unload(self.module);
         allocator.free(self.wasm_path);
         allocator.free(self.manifest_path);
         allocator.free(self.wasm_buffer);
@@ -51,7 +54,7 @@ pub const PluginManager = struct {
     }
 
     /// プラグインを管理テーブルに登録する
-    pub fn registerPlugin(self: *PluginManager, instance: wamr.wasm_module_inst_t, wasm_path: []const u8, manifest_path: []const u8, wasm_buffer: []const u8, bus: *event_bus.EventBus) !*PluginMetadata {
+    pub fn registerPlugin(self: *PluginManager, module: wamr.wasm_module_t, instance: wamr.wasm_module_inst_t, wasm_path: []const u8, manifest_path: []const u8, wasm_buffer: []const u8, bus: *event_bus.EventBus) !*PluginMetadata {
         const parsed = try manifest.Manifest.load(self.allocator, manifest_path);
         errdefer parsed.deinit();
 
@@ -63,6 +66,7 @@ pub const PluginManager = struct {
             .manifest_path = try self.allocator.dupe(u8, manifest_path),
             .wasm_buffer = wasm_buffer,
             .manifest_parsed = parsed,
+            .module = module,
             .instance = instance,
             .subscriber = try WasmSubscriber.init(instance, node_id, bus, self),
         };
@@ -93,21 +97,22 @@ pub const PluginManager = struct {
 
         std.debug.print("PluginManager: Restarting Node {} ({s})...\n", .{ node_id, meta.wasm_path });
 
-        // 1. 旧インスタンスの破棄
+        // 1. 旧インスタンスおよびモジュールの破棄
         // WasmSubscriberはEventBusに登録済みのポインタを維持するためdeinitしない
         wamr.wasm_runtime_deinstantiate(meta.instance);
+        wamr.wasm_runtime_unload(meta.module);
 
         // 2. 新インスタンスの作成
         const wasm_buffer = try std.fs.cwd().readFileAlloc(self.allocator, meta.wasm_path, 1024 * 1024);
         errdefer self.allocator.free(wasm_buffer);
 
         const module = try runtime.loadModule(wasm_buffer);
-        // Note: モジュール管理の詳細は簡略化
         const new_inst = try runtime.instantiate(module, self.wasm_stack_size, self.wasm_heap_size);
 
-        // 3. メタデータの更新 (wasm_bufferの差し替え: WAMRはバッファの生存を要求する)
+        // 3. メタデータの更新 (wasm_bufferおよびモジュールの差し替え)
         self.allocator.free(meta.wasm_buffer);
         meta.wasm_buffer = wasm_buffer;
+        meta.module = module;
         meta.instance = new_inst;
         var needs_subscription = false;
         if (meta.subscriber) |*sub| {
@@ -147,3 +152,168 @@ pub const PluginManager = struct {
         }
     }
 };
+
+test "PluginManager: ACL Violation Integrated Test" {
+    const allocator = std.testing.allocator;
+
+    var bus = try event_bus.EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    var runtime = try @import("wasm_runtime.zig").WasmRuntime.init();
+    defer runtime.deinit();
+
+    var pm = PluginManager.init(allocator);
+    defer pm.deinit();
+    pm.runtime = &runtime;
+
+    const host_api = @import("../api/host_api.zig");
+    host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
+
+    var symbols = host_api.getNativeSymbols();
+    try runtime.registerNatives("env", &symbols);
+
+    const wasm_path = "wasm-apps/bad_node.wasm";
+    const manifest_path = "wasm-apps/bad_node.json";
+
+    const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
+    defer allocator.free(wasm_buffer);
+
+    const module = try runtime.loadModule(wasm_buffer);
+    const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
+
+    const meta = try pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &bus);
+    _ = meta;
+
+    const func = wamr.wasm_runtime_lookup_function(module_inst, "on_init") orelse return error.FunctionNotFound;
+    const env = wamr.wasm_runtime_create_exec_env(module_inst, 16384);
+    defer wamr.wasm_runtime_destroy_exec_env(env);
+
+    var argv = [_]u32{0};
+    const call_res = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
+
+    try std.testing.expect(call_res);
+    try std.testing.expectEqual(@as(i32, 0), @as(i32, @bitCast(argv[0])));
+}
+
+test "PluginManager: chat_node ACL Integration Test" {
+    const allocator = std.testing.allocator;
+
+    var bus = try event_bus.EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    var runtime = try @import("wasm_runtime.zig").WasmRuntime.init();
+    defer runtime.deinit();
+
+    var pm = PluginManager.init(allocator);
+    defer pm.deinit();
+    pm.runtime = &runtime;
+
+    const host_api = @import("../api/host_api.zig");
+    host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
+
+    var symbols = host_api.getNativeSymbols();
+    try runtime.registerNatives("env", &symbols);
+
+    const wasm_path = "wasm-apps/chat_node.wasm";
+    const manifest_path = "wasm-apps/chat_node.json";
+
+    const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
+    defer allocator.free(wasm_buffer);
+
+    const module = try runtime.loadModule(wasm_buffer);
+    const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
+
+    const meta = try pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &bus);
+    _ = meta;
+
+    const func = wamr.wasm_runtime_lookup_function(module_inst, "on_init") orelse return error.FunctionNotFound;
+    const env = wamr.wasm_runtime_create_exec_env(module_inst, 16384);
+    defer wamr.wasm_runtime_destroy_exec_env(env);
+
+    var argv = [_]u32{0};
+    const call_res = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
+
+    try std.testing.expect(call_res);
+    try std.testing.expectEqual(@as(i32, 0), @as(i32, @bitCast(argv[0])));
+}
+
+test "PluginManager: Fault Isolation and Safe Recovery Test" {
+    const allocator = std.testing.allocator;
+
+    var bus = try event_bus.EventBus.init(allocator, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    var runtime = try @import("wasm_runtime.zig").WasmRuntime.init();
+    defer runtime.deinit();
+
+    var pm = PluginManager.init(allocator);
+    defer pm.deinit();
+    pm.runtime = &runtime;
+
+    const host_api = @import("../api/host_api.zig");
+    host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
+
+    var symbols = host_api.getNativeSymbols();
+    try runtime.registerNatives("env", &symbols);
+
+    const wasm_path = "wasm-apps/bad_node.wasm";
+    const manifest_path = "wasm-apps/bad_node.json";
+
+    const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
+    defer allocator.free(wasm_buffer);
+
+    const module = try runtime.loadModule(wasm_buffer);
+    const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
+
+    const meta = try pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &bus);
+    const node_id = meta.node_id;
+
+    var fault_count: u32 = 0;
+    var received_exception: [128]u8 = undefined;
+    var received_node_id: u32 = 0;
+
+    const S = struct {
+        fn cb(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+            const context = @as(*struct { fc: *u32, exc: []u8, nid: *u32 }, @ptrCast(@alignCast(ctx)));
+            context.fc.* += 1;
+            
+            var parsed = std.json.parseFromSlice(struct { node_id: u32, exception: []const u8 }, std.testing.allocator, msg.payload, .{}) catch return;
+            defer parsed.deinit();
+
+            context.nid.* = parsed.value.node_id;
+            @memcpy(context.exc[0..parsed.value.exception.len], parsed.value.exception);
+            context.exc[parsed.value.exception.len] = 0;
+        }
+    };
+
+    var context_struct = .{ .fc = &fault_count, .exc = &received_exception, .nid = &received_node_id };
+    try bus.subscribe("core.node.fault", 99, S.cb, &context_struct);
+
+    const thread = try std.Thread.spawn(.{}, event_bus.EventBus.runDispatcher, .{&bus});
+
+    const func_init = wamr.wasm_runtime_lookup_function(module_inst, "on_init") orelse return error.FunctionNotFound;
+    const env_init = wamr.wasm_runtime_create_exec_env(module_inst, 16384);
+    _ = wamr.wasm_runtime_call_wasm(env_init, func_init, 0, &[_]u32{0});
+    wamr.wasm_runtime_destroy_exec_env(env_init);
+
+    // 長さ 4 のペイロード "TRAP" を publish してトラップを発生させる
+    try bus.publish("allowed.topic", "TRAP", .BestEffort, 0);
+
+    bus.waitIdle();
+    bus.stop();
+    thread.join();
+
+    // 1. 障害通知イベントが確実に届いたことの検証
+    try std.testing.expectEqual(@as(u32, 1), fault_count);
+    try std.testing.expectEqual(node_id, received_node_id);
+    
+    // 例外内容が "unreachable" であることの検証
+    const exc_str = std.mem.span(@as([*c]const u8, @ptrCast(&received_exception)));
+    try std.testing.expect(std.mem.indexOf(u8, exc_str, "unreachable") != null);
+}
