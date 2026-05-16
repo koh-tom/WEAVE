@@ -195,3 +195,11 @@ pub fn main() !void {
 
     log.info("Status: Shutdown complete.", .{});
 }
+
+test {
+    _ = @import("core/event_bus.zig");
+    _ = @import("core/graph.zig");
+    _ = @import("core/manifest.zig");
+    _ = @import("core/plugin_manager.zig");
+    _ = @import("common/config.zig");
+}

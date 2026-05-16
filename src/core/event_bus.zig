@@ -183,6 +183,7 @@ pub const EventBus = struct {
 
         var it = self.subscribers.iterator();
         while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
             var list = entry.value_ptr.*;
             list.deinit(self.allocator);
         }
@@ -260,8 +261,19 @@ pub const EventBus = struct {
                 return t_part == null;
             }
 
-            // MQTT形式の '#' : それ以降全てにマッチ
-            if (std.mem.eql(u8, p_part.?, "#")) return true;
+            // MQTT形式の '#' : それ以降全てにマッチ（パターンの途中にあっても複数レベルを許容する）
+            if (std.mem.eql(u8, p_part.?, "#")) {
+                if (p_it.rest().len == 0) {
+                    return true;
+                }
+                const p_rest = p_it.rest();
+                while (true) {
+                    const t_rest = t_it.rest();
+                    if (isMatch(p_rest, t_rest)) return true;
+                    if (t_it.next() == null) break;
+                }
+                return false;
+            }
 
             // トピックが先に終わってしまったら不一致（'#' の場合を除く）
             if (t_part == null) return false;
@@ -381,7 +393,6 @@ pub const EventBus = struct {
             // JSON としてパースを試みる
             const parsed_json = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch null;
             if (parsed_json) |pj| {
-                defer pj.deinit();
                 switch (pj.value) {
                     .string => |s| {
                         level_str = s;
@@ -395,20 +406,55 @@ pub const EventBus = struct {
                     },
                     else => {},
                 }
+                
+                if (level_str) |s| {
+                    const str = std.mem.trim(u8, s, "\"");
+                    var buf: [32]u8 = undefined;
+                    if (str.len < buf.len) {
+                        const lower_str = std.ascii.lowerString(&buf, str);
+                        if (std.meta.stringToEnum(IntrospectionLevel, lower_str)) |level| {
+                            self.mutex.lock();
+                            const old_level = self.introspection_level;
+                            var changed = false;
+                            if (old_level != level) {
+                                self.introspection_level = level;
+                                changed = true;
+                            }
+                            self.mutex.unlock();
+
+                            if (changed) {
+                                std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
+                                var evt_buf: [128]u8 = undefined;
+                                const evt_payload = std.fmt.bufPrint(&evt_buf, "{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ @tagName(old_level), @tagName(level) }) catch "{}";
+                                
+                                self.publish("core.system.introspection.changed", evt_payload, .Transient, 0) catch |err| {
+                                    std.debug.print("Failed to publish introspection changed event: {any}\n", .{err});
+                                };
+                            }
+                        }
+                    }
+                }
+                pj.deinit();
+                return;
             }
             
-            var str = level_str orelse payload;
-            str = std.mem.trim(u8, str, "\"");
-            
+            // パースに失敗した場合は、フォールバックとして payload 自体を使う
+            const str = std.mem.trim(u8, payload, "\"");
             var buf: [32]u8 = undefined;
             if (str.len < buf.len) {
                 const lower_str = std.ascii.lowerString(&buf, str);
                 if (std.meta.stringToEnum(IntrospectionLevel, lower_str)) |level| {
+                    self.mutex.lock();
                     const old_level = self.introspection_level;
+                    var changed = false;
                     if (old_level != level) {
                         self.introspection_level = level;
+                        changed = true;
+                    }
+                    self.mutex.unlock();
+
+                    if (changed) {
                         std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
-                        
                         var evt_buf: [128]u8 = undefined;
                         const evt_payload = std.fmt.bufPrint(&evt_buf, "{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ @tagName(old_level), @tagName(level) }) catch "{}";
                         
@@ -418,6 +464,7 @@ pub const EventBus = struct {
                     }
                 }
             }
+            return;
         }
 
         self.mutex.lock();
@@ -464,8 +511,10 @@ pub const EventBus = struct {
         self.queue.push(msg, block) catch |err| {
             if (err == error.QueueFull) {
                 if (self.verbose) std.debug.print("QoS: drop event '{s}' due to full queue (Source: {})\n", .{ topic, source_node_id });
+                self.allocator.free(msg.payload);
                 return;
             }
+            self.allocator.free(msg.payload);
             return err;
         };
 
@@ -771,16 +820,22 @@ test "EventBus: Introspection level change notification" {
     var received_payload: [256]u8 = undefined;
     var payload_len: usize = 0;
 
+    const TestContext = struct {
+        c: *u32,
+        p: []u8,
+        l: *usize,
+    };
+
     const S = struct {
         fn cb(ctx: ?*anyopaque, msg: *const EventMessage) void {
-            const context = @as(*struct { c: *u32, p: []u8, l: *usize }, @ptrCast(@alignCast(ctx)));
+            const context = @as(*TestContext, @ptrCast(@alignCast(ctx)));
             context.c.* += 1;
             @memcpy(context.p[0..msg.payload.len], msg.payload);
             context.l.* = msg.payload.len;
         }
     };
 
-    var context_struct = .{ .c = &count, .p = &received_payload, .l = &payload_len };
+    var context_struct = TestContext{ .c = &count, .p = &received_payload, .l = &payload_len };
     try bus.subscribe("core.system.introspection.changed", 1, S.cb, &context_struct);
 
     const thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});

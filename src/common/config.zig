@@ -102,6 +102,25 @@ pub const Config = struct {
             self.wasm_heap_size = try std.fmt.parseInt(u32, val, 10);
         } else |_| {}
 
+        const builtin = @import("builtin");
+        if (builtin.is_test) {
+            // テスト実行時は、テストランナーのコマンドライン引数のパースをスキップし、デフォルト値と環境変数のみで構成する
+            if (self.plugins.items.len == 0) {
+                try self.plugins.append(allocator, try allocator.dupe(u8, "wasm-apps/chat_node.wasm"));
+            }
+
+            // Production モードのバリデーションチェック
+            if (self.weave_env == .production) {
+                const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
+                if (!has_token) {
+                    std.debug.print("Error: Production mode requires WEAVE_NODE_WS_TOKEN to be set.\n", .{});
+                    self.deinit(allocator);
+                    return error.TokenRequiredInProduction;
+                }
+            }
+            return self;
+        }
+
         const args = try std.process.argsAlloc(allocator);
         defer std.process.argsFree(allocator, args);
 
@@ -165,6 +184,7 @@ pub const Config = struct {
             const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
             if (!has_token) {
                 std.debug.print("Error: Production mode requires WEAVE_NODE_WS_TOKEN to be set.\n", .{});
+                self.deinit(allocator);
                 return error.TokenRequiredInProduction;
             }
         }
@@ -198,6 +218,28 @@ fn printHelp() void {
     , .{});
 }
 
+extern fn setenv(name: [*c]const u8, value: [*c]const u8, overwrite: i32) i32;
+extern fn unsetenv(name: [*c]const u8) i32;
+
+fn setEnv(name: []const u8, value: []const u8) !void {
+    var name_buf: [128]u8 = undefined;
+    var val_buf: [128]u8 = undefined;
+    if (name.len >= 127 or value.len >= 127) return error.NameOrValueTooLong;
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    @memcpy(val_buf[0..value.len], value);
+    val_buf[value.len] = 0;
+    _ = setenv(&name_buf, &val_buf, 1);
+}
+
+fn deleteEnv(name: []const u8) void {
+    var name_buf: [128]u8 = undefined;
+    if (name.len >= 127) return;
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    _ = unsetenv(&name_buf);
+}
+
 test "Config: WeaveEnv and Token validation" {
     const allocator = std.testing.allocator;
 
@@ -213,15 +255,15 @@ test "Config: Production mode requirements" {
     const allocator = std.testing.allocator;
 
     // 一時的に環境変数をセット
-    try std.process.setEnvVar("WEAVE_ENV", "production");
-    defer std.process.deleteEnvVar("WEAVE_ENV") catch {};
+    try setEnv("WEAVE_ENV", "production");
+    defer deleteEnv("WEAVE_ENV");
 
     // 1. トークン未設定状態で parse -> error.TokenRequiredInProduction が返るはず
     try std.testing.expectError(error.TokenRequiredInProduction, Config.parse(allocator));
 
     // 2. トークンをセットした状態にする
-    try std.process.setEnvVar("WEAVE_NODE_WS_TOKEN", "prod-secret-token");
-    defer std.process.deleteEnvVar("WEAVE_NODE_WS_TOKEN") catch {};
+    try setEnv("WEAVE_NODE_WS_TOKEN", "prod-secret-token");
+    defer deleteEnv("WEAVE_NODE_WS_TOKEN");
 
     // トークンがセットされているので、正常にパースできるはず
     var conf = try Config.parse(allocator);
@@ -235,11 +277,11 @@ test "Config: Wasm stack and heap sizes overrides" {
     const allocator = std.testing.allocator;
 
     // 一時的に環境変数をセット
-    try std.process.setEnvVar("WEAVE_WASM_STACK_SIZE", "65536");
-    defer std.process.deleteEnvVar("WEAVE_WASM_STACK_SIZE") catch {};
+    try setEnv("WEAVE_WASM_STACK_SIZE", "65536");
+    defer deleteEnv("WEAVE_WASM_STACK_SIZE");
 
-    try std.process.setEnvVar("WEAVE_WASM_HEAP_SIZE", "32768");
-    defer std.process.deleteEnvVar("WEAVE_WASM_HEAP_SIZE") catch {};
+    try setEnv("WEAVE_WASM_HEAP_SIZE", "32768");
+    defer deleteEnv("WEAVE_WASM_HEAP_SIZE");
 
     var conf = try Config.parse(allocator);
     defer conf.deinit(allocator);

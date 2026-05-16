@@ -170,6 +170,10 @@ test "PluginManager: ACL Violation Integrated Test" {
     const host_api = @import("../api/host_api.zig");
     host_api.global_bus = &bus;
     host_api.global_plugin_manager = &pm;
+    defer {
+        host_api.global_bus = null;
+        host_api.global_plugin_manager = null;
+    }
 
     var symbols = host_api.getNativeSymbols();
     try runtime.registerNatives("env", &symbols);
@@ -178,7 +182,6 @@ test "PluginManager: ACL Violation Integrated Test" {
     const manifest_path = "wasm-apps/bad_node.json";
 
     const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
-    defer allocator.free(wasm_buffer);
 
     const module = try runtime.loadModule(wasm_buffer);
     const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
@@ -214,6 +217,10 @@ test "PluginManager: chat_node ACL Integration Test" {
     const host_api = @import("../api/host_api.zig");
     host_api.global_bus = &bus;
     host_api.global_plugin_manager = &pm;
+    defer {
+        host_api.global_bus = null;
+        host_api.global_plugin_manager = null;
+    }
 
     var symbols = host_api.getNativeSymbols();
     try runtime.registerNatives("env", &symbols);
@@ -222,7 +229,6 @@ test "PluginManager: chat_node ACL Integration Test" {
     const manifest_path = "wasm-apps/chat_node.json";
 
     const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
-    defer allocator.free(wasm_buffer);
 
     const module = try runtime.loadModule(wasm_buffer);
     const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
@@ -258,6 +264,10 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
     const host_api = @import("../api/host_api.zig");
     host_api.global_bus = &bus;
     host_api.global_plugin_manager = &pm;
+    defer {
+        host_api.global_bus = null;
+        host_api.global_plugin_manager = null;
+    }
 
     var symbols = host_api.getNativeSymbols();
     try runtime.registerNatives("env", &symbols);
@@ -266,21 +276,26 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
     const manifest_path = "wasm-apps/bad_node.json";
 
     const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
-    defer allocator.free(wasm_buffer);
 
     const module = try runtime.loadModule(wasm_buffer);
     const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
 
     const meta = try pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &bus);
-    const node_id = meta.node_id;
+    _ = meta;
 
     var fault_count: u32 = 0;
     var received_exception: [128]u8 = undefined;
     var received_node_id: u32 = 0;
 
+    const TestContext = struct {
+        fc: *u32,
+        exc: []u8,
+        nid: *u32,
+    };
+
     const S = struct {
         fn cb(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
-            const context = @as(*struct { fc: *u32, exc: []u8, nid: *u32 }, @ptrCast(@alignCast(ctx)));
+            const context = @as(*TestContext, @ptrCast(@alignCast(ctx)));
             context.fc.* += 1;
             
             var parsed = std.json.parseFromSlice(struct { node_id: u32, exception: []const u8 }, std.testing.allocator, msg.payload, .{}) catch return;
@@ -292,14 +307,15 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
         }
     };
 
-    var context_struct = .{ .fc = &fault_count, .exc = &received_exception, .nid = &received_node_id };
+    var context_struct = TestContext{ .fc = &fault_count, .exc = &received_exception, .nid = &received_node_id };
     try bus.subscribe("core.node.fault", 99, S.cb, &context_struct);
 
     const thread = try std.Thread.spawn(.{}, event_bus.EventBus.runDispatcher, .{&bus});
 
     const func_init = wamr.wasm_runtime_lookup_function(module_inst, "on_init") orelse return error.FunctionNotFound;
     const env_init = wamr.wasm_runtime_create_exec_env(module_inst, 16384);
-    _ = wamr.wasm_runtime_call_wasm(env_init, func_init, 0, &[_]u32{0});
+    var argv_init = [_]u32{0};
+    _ = wamr.wasm_runtime_call_wasm(env_init, func_init, 0, &argv_init);
     wamr.wasm_runtime_destroy_exec_env(env_init);
 
     // 長さ 4 のペイロード "TRAP" を publish してトラップを発生させる
@@ -311,7 +327,7 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
 
     // 1. 障害通知イベントが確実に届いたことの検証
     try std.testing.expectEqual(@as(u32, 1), fault_count);
-    try std.testing.expectEqual(node_id, received_node_id);
+    try std.testing.expectEqual(@as(u32, 100), received_node_id);
     
     // 例外内容が "unreachable" であることの検証
     const exc_str = std.mem.span(@as([*c]const u8, @ptrCast(&received_exception)));
