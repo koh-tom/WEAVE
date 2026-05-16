@@ -147,11 +147,12 @@ pub fn build(b: *std.Build) void {
     const stress_exe = b.addExecutable(.{
         .name = "stress_test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/stress_test.zig"),
+            .root_source_file = b.path("src/stress_test_wrapper.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    stress_exe.root_module.addImport("common", common_module);
     stress_exe.use_llvm = true;
     stress_exe.use_lld = true;
     addWamrDeps(b, stress_exe, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
@@ -164,11 +165,12 @@ pub fn build(b: *std.Build) void {
     const bus_test_exe = b.addExecutable(.{
         .name = "bus_test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/bus_test.zig"),
+            .root_source_file = b.path("src/bus_test_wrapper.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    bus_test_exe.root_module.addImport("common", common_module);
     bus_test_exe.use_llvm = true;
     bus_test_exe.use_lld = true;
     const run_bus_test = b.addRunArtifact(bus_test_exe);
@@ -240,7 +242,7 @@ pub fn build(b: *std.Build) void {
     // --- Clean Step ---
     const clean_step = b.step("clean", "Remove build artifacts and Wasm plugins");
     const clean_cmd = b.addSystemCommand(&[_][]const u8{
-        "rm", "-rf", "zig-cache", "zig-out", ".zig-cache", "wasm-apps/chat_node.wasm", "wasm-apps/bad_node.wasm", "build_err.log", "test_err.log",
+        "rm", "-rf", "zig-cache", "zig-out", ".zig-cache", "wasm-apps/chat_node.wasm", "wasm-apps/bad_node.wasm", "build_err.log", "test_err.log", "src/bus_test_wrapper.zig", "src/stress_test_wrapper.zig",
     });
     clean_step.dependOn(&clean_cmd.step);
 }
