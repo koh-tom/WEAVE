@@ -17,7 +17,7 @@ pub fn main() !void {
     var runtime = try WasmRuntime.init();
     defer runtime.deinit();
 
-    var bus = EventBus.init(allocator, 1000);
+    var bus = try EventBus.init(allocator, 1000);
     defer bus.deinit();
     bus.verbose = false;
     var pm = PluginManager.init(allocator);
@@ -37,7 +37,6 @@ pub fn main() !void {
 
     const wasm_path = "wasm-apps/chat_node.wasm";
     const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
-    defer allocator.free(wasm_buffer);
 
     const module = try runtime.loadModule(wasm_buffer);
     defer wamr.wasm_runtime_unload(module);
@@ -52,11 +51,8 @@ pub fn main() !void {
     else
         "wasm-apps/manifest.json"; // fallback
 
-    // マニフェストの登録
-    _ = try pm.registerPlugin(module_inst, wasm_path, manifest_path, &bus);
-
-    // マニフェストに基づいた購読の自動登録
-    try pm.applyManifestSubscriptions(module_inst, &bus);
+    // マニフェストの登録 (登録時にマニフェストに基づいた購読登録が自動で行われます)
+    _ = try pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &bus);
 
     const iterations = 100000;
     std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});
