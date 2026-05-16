@@ -1,0 +1,12 @@
+{
+    "name": "BadNode",
+    "version": "1.0.0",
+    "permissions": {
+        "publish": [
+            "allowed.topic"
+        ],
+        "subscribe": [
+            "allowed.topic"
+        ]
+    }
+}
