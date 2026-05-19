@@ -36,6 +36,13 @@ pub const Config = struct {
             .wasm_heap_size = 64 * 1024,
         };
 
+        errdefer self.deinit(allocator);
+
+        // デフォルト文字列を dupe して動的アロケーションに統一 (リテラルとの混在・リーク防止)
+        self.twitch_channel = try allocator.dupe(u8, self.twitch_channel);
+        self.obs_host = try allocator.dupe(u8, self.obs_host);
+        self.obs_password = try allocator.dupe(u8, self.obs_password);
+
         // 1. 設定ファイルの読み込み (weave.json) - 任意
         if (std.fs.cwd().openFile("weave.json", .{})) |file| {
             defer file.close();
@@ -56,10 +63,19 @@ pub const Config = struct {
                 if (obj.get("ws_gateway_port")) |v| self.ws_gateway_port = @intCast(v.integer);
                 if (obj.get("node_ws_port")) |v| self.node_ws_port = @intCast(v.integer);
                 if (obj.get("dashboard_port")) |v| self.dashboard_port = @intCast(v.integer);
-                if (obj.get("twitch_channel")) |v| self.twitch_channel = try allocator.dupe(u8, v.string);
-                if (obj.get("obs_host")) |v| self.obs_host = try allocator.dupe(u8, v.string);
+                if (obj.get("twitch_channel")) |v| {
+                    allocator.free(self.twitch_channel);
+                    self.twitch_channel = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("obs_host")) |v| {
+                    allocator.free(self.obs_host);
+                    self.obs_host = try allocator.dupe(u8, v.string);
+                }
                 if (obj.get("obs_port")) |v| self.obs_port = @intCast(v.integer);
-                if (obj.get("obs_password")) |v| self.obs_password = try allocator.dupe(u8, v.string);
+                if (obj.get("obs_password")) |v| {
+                    allocator.free(self.obs_password);
+                    self.obs_password = try allocator.dupe(u8, v.string);
+                }
                 if (obj.get("log_level")) |v| self.log_level = LogLevel.fromString(v.string);
                 if (obj.get("graph_full_interval_secs")) |v| self.graph_full_interval_secs = @intCast(v.integer);
                 if (obj.get("node_ws_token")) |v| self.node_ws_token = try allocator.dupe(u8, v.string);
@@ -114,7 +130,6 @@ pub const Config = struct {
                 const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
                 if (!has_token) {
                     std.debug.print("Error: Production mode requires WEAVE_NODE_WS_TOKEN to be set.\n", .{});
-                    self.deinit(allocator);
                     return error.TokenRequiredInProduction;
                 }
             }
@@ -142,10 +157,12 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, arg, "--twitch")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.twitch_channel);
                 self.twitch_channel = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--obs-host")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.obs_host);
                 self.obs_host = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--obs-port")) {
                 i += 1;
@@ -154,6 +171,7 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, arg, "--obs-pass")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.obs_password);
                 self.obs_password = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--log-level")) {
                 i += 1;
@@ -184,7 +202,6 @@ pub const Config = struct {
             const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
             if (!has_token) {
                 std.debug.print("Error: Production mode requires WEAVE_NODE_WS_TOKEN to be set.\n", .{});
-                self.deinit(allocator);
                 return error.TokenRequiredInProduction;
             }
         }
@@ -193,6 +210,9 @@ pub const Config = struct {
     }
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        allocator.free(self.twitch_channel);
+        allocator.free(self.obs_host);
+        allocator.free(self.obs_password);
         if (self.node_ws_token) |t| allocator.free(t);
         for (self.plugins.items) |p| {
             allocator.free(p);
