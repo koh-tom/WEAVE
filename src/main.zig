@@ -121,7 +121,19 @@ pub fn main() !void {
     defer ws_gateway.deinit();
     try core.tm.register(ws_gateway.transport());
 
-    const token = config.node_ws_token orelse "weave-secret-2026";
+    var generated_token: ?[]const u8 = null;
+    defer {
+        if (generated_token) |t| allocator.free(t);
+    }
+    const token = if (config.node_ws_token) |t| t else blk: {
+        var random_bytes: [16]u8 = undefined;
+        std.crypto.random.bytes(&random_bytes);
+        const hex = try std.fmt.allocPrint(allocator, "{x}", .{&random_bytes});
+        generated_token = hex;
+        std.debug.print("\n\x1b[33;1m[SECURITY]\x1b[0m Development node_ws token not configured. Generated dynamic token: \x1b[32;1m{s}\x1b[0m\n\n", .{hex});
+        break :blk hex;
+    };
+
     var node_ws = try NodeWsTransport.init(allocator, &core.bus, config.node_ws_port, token);
     defer node_ws.deinit();
     try core.tm.register(node_ws.transport());
