@@ -156,7 +156,7 @@ pub const EventBus = struct {
         callback: *const fn (ctx: *anyopaque, msg: *const EventMessage) void,
     } = null,
     graph: ?*@import("graph.zig").SystemGraph = null,
-    introspection_level: IntrospectionLevel = .metadata,
+    introspection_level: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(IntrospectionLevel.metadata)),
 
     pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) !EventBus {
         return EventBus{
@@ -173,7 +173,7 @@ pub const EventBus = struct {
             .dispatcher_thread_id = std.atomic.Value(usize).init(0),
             .busy_count = std.atomic.Value(usize).init(0),
             .graph = null,
-            .introspection_level = .metadata,
+            .introspection_level = std.atomic.Value(u8).init(@intFromEnum(IntrospectionLevel.metadata)),
         };
     }
 
@@ -289,14 +289,15 @@ pub const EventBus = struct {
     }
 
     fn traceMessage(self: *EventBus, msg: *const EventMessage) void {
-        if (self.introspection_level == .off) return;
+        const level = @as(IntrospectionLevel, @enumFromInt(self.introspection_level.load(.monotonic)));
+        if (level == .off) return;
         // 自己再帰（トレースのトレース）を防止
         if (std.mem.eql(u8, msg.topic, "core.system.event_traced")) return;
         // グラフ更新は頻繁すぎるため、デバッグが煩雑になる場合は除外することも検討できるが、
         // 現状は全件トレースを基本とする。
 
         // ペイロードの処理（現在の観測レベルに従う）
-        const payload_json = if (self.introspection_level == .contents)
+        const payload_json = if (level == .contents)
             msg.payload
         else
             "{\"hidden\":true}";
@@ -414,10 +415,10 @@ pub const EventBus = struct {
                         const lower_str = std.ascii.lowerString(&buf, str);
                         if (std.meta.stringToEnum(IntrospectionLevel, lower_str)) |level| {
                             self.mutex.lock();
-                            const old_level = self.introspection_level;
+                            const old_level = @as(IntrospectionLevel, @enumFromInt(self.introspection_level.load(.monotonic)));
                             var changed = false;
                             if (old_level != level) {
-                                self.introspection_level = level;
+                                self.introspection_level.store(@intFromEnum(level), .monotonic);
                                 changed = true;
                             }
                             self.mutex.unlock();
@@ -445,10 +446,10 @@ pub const EventBus = struct {
                 const lower_str = std.ascii.lowerString(&buf, str);
                 if (std.meta.stringToEnum(IntrospectionLevel, lower_str)) |level| {
                     self.mutex.lock();
-                    const old_level = self.introspection_level;
+                    const old_level = @as(IntrospectionLevel, @enumFromInt(self.introspection_level.load(.monotonic)));
                     var changed = false;
                     if (old_level != level) {
-                        self.introspection_level = level;
+                        self.introspection_level.store(@intFromEnum(level), .monotonic);
                         changed = true;
                     }
                     self.mutex.unlock();
@@ -751,19 +752,19 @@ test "EventBus: Introspection Normalization" {
 
     // 1. 生の文字列 "OFF"
     try bus.publish("core.system.introspection", "OFF", .BestEffort, 1);
-    try std.testing.expectEqual(IntrospectionLevel.off, bus.introspection_level);
+    try std.testing.expectEqual(IntrospectionLevel.off, @as(IntrospectionLevel, @enumFromInt(bus.introspection_level.load(.monotonic))));
 
     // 2. ダブルクォーテーション付き "\"METADATA\""
     try bus.publish("core.system.introspection", "\"METADATA\"", .BestEffort, 1);
-    try std.testing.expectEqual(IntrospectionLevel.metadata, bus.introspection_level);
+    try std.testing.expectEqual(IntrospectionLevel.metadata, @as(IntrospectionLevel, @enumFromInt(bus.introspection_level.load(.monotonic))));
 
     // 3. JSON 形式 "{\"level\":\"CONTENTS\"}"
     try bus.publish("core.system.introspection", "{\"level\":\"CONTENTS\"}", .BestEffort, 1);
-    try std.testing.expectEqual(IntrospectionLevel.contents, bus.introspection_level);
+    try std.testing.expectEqual(IntrospectionLevel.contents, @as(IntrospectionLevel, @enumFromInt(bus.introspection_level.load(.monotonic))));
 
     // 4. 小文字 "off"
     try bus.publish("core.system.introspection", "off", .BestEffort, 1);
-    try std.testing.expectEqual(IntrospectionLevel.off, bus.introspection_level);
+    try std.testing.expectEqual(IntrospectionLevel.off, @as(IntrospectionLevel, @enumFromInt(bus.introspection_level.load(.monotonic))));
 }
 
 test "EventBus: Dynamic Trace Buffer for Large Payload" {
@@ -773,7 +774,7 @@ test "EventBus: Dynamic Trace Buffer for Large Payload" {
     bus.verbose = false;
 
     // 観測レベルを CONTENTS に設定
-    bus.introspection_level = .contents;
+    bus.introspection_level.store(@intFromEnum(IntrospectionLevel.contents), .monotonic);
 
     // 4096バイト (4KB) の巨大なダミーペイロードを生成
     const dummy_payload = try allocator.alloc(u8, 4096);
@@ -814,7 +815,7 @@ test "EventBus: Introspection level change notification" {
     bus.verbose = false;
 
     // 初期状態は metadata
-    bus.introspection_level = .metadata;
+    bus.introspection_level.store(@intFromEnum(IntrospectionLevel.metadata), .monotonic);
 
     var count: u32 = 0;
     var received_payload: [256]u8 = undefined;
