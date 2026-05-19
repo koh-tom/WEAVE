@@ -24,6 +24,7 @@ fn toI32(code: ResultCode) i32 {
 export fn os_api_publish(
     exec_env: wamr.wasm_exec_env_t,
     topic_ptr: u32,
+    topic_len: u32,
     payload_ptr: u32,
     payload_len: u32,
     qos: u32,
@@ -42,8 +43,8 @@ export fn os_api_publish(
     const p_native = wamr.wasm_runtime_addr_app_to_native(module_inst, payload_ptr);
     if (t_native == null or p_native == null) return toI32(.ERROR_INVALID_PARAMETER);
 
-    // topic_ptr は null-terminated 文字列としてスパンを取得
-    const topic = std.mem.span(@as([*c]const u8, @ptrCast(t_native)));
+    // topic_ptr から topic_len の範囲で安全にスライスを取得 (null-terminated 前提を排除)
+    const topic = @as([*]const u8, @ptrCast(t_native))[0..topic_len];
     const payload = @as([*]const u8, @ptrCast(p_native))[0..payload_len];
 
     // 権限チェック (ACL)
@@ -70,6 +71,7 @@ export fn os_api_publish(
 export fn os_api_subscribe(
     exec_env: wamr.wasm_exec_env_t,
     topic_ptr: u32,
+    topic_len: u32,
 ) i32 {
     const bus = global_bus orelse return toI32(.ERROR_UNKNOWN);
     const pm = global_plugin_manager orelse return toI32(.ERROR_UNKNOWN);
@@ -79,8 +81,8 @@ export fn os_api_subscribe(
     const t_native = wamr.wasm_runtime_addr_app_to_native(module_inst, topic_ptr);
     if (t_native == null) return toI32(.ERROR_INVALID_PARAMETER);
 
-    // null-terminated 文字列としてスパンを取得
-    const topic = std.mem.span(@as([*c]const u8, @ptrCast(t_native)));
+    // topic_ptr から topic_len の範囲で安全にスライスを取得 (null-terminated 前提を排除)
+    const topic = @as([*]const u8, @ptrCast(t_native))[0..topic_len];
 
     // 権限チェック (ACL)
     if (!meta.manifest_parsed.value.canSubscribe(topic)) {
@@ -129,13 +131,13 @@ export fn os_api_log(
 
 /// WAMRに登録するネイティブ関数のリスト
 /// シグネチャはWasm側から見た型（exec_envは含めない）
-///   publish:   (topic_ptr: i32, payload_ptr: i32, payload_len: i32) -> i32  = "(iiii)i"
-///   subscribe: (topic_ptr: i32) -> i32                                      = "(i)i"
-///   log:       (level: i32, msg_ptr: i32, msg_len: i32) -> void             = "(iii)"
+///   publish:   (topic_ptr: i32, topic_len: i32, payload_ptr: i32, payload_len: i32, qos: i32) -> i32 = "(iiiii)i"
+///   subscribe: (topic_ptr: i32, topic_len: i32) -> i32                                             = "(ii)i"
+///   log:       (level: i32, msg_ptr: i32, msg_len: i32) -> void                                      = "(iii)"
 pub fn getNativeSymbols() [3]wamr.NativeSymbol {
     return [_]wamr.NativeSymbol{
-        .{ .symbol = "os_api_publish", .func_ptr = @constCast(@ptrCast(&os_api_publish)), .signature = "(iiii)i", .attachment = null },
-        .{ .symbol = "os_api_subscribe", .func_ptr = @constCast(@ptrCast(&os_api_subscribe)), .signature = "(i)i", .attachment = null },
+        .{ .symbol = "os_api_publish", .func_ptr = @constCast(@ptrCast(&os_api_publish)), .signature = "(iiiii)i", .attachment = null },
+        .{ .symbol = "os_api_subscribe", .func_ptr = @constCast(@ptrCast(&os_api_subscribe)), .signature = "(ii)i", .attachment = null },
         .{ .symbol = "os_api_log", .func_ptr = @constCast(@ptrCast(&os_api_log)), .signature = "(iii)", .attachment = null },
     };
 }

@@ -7,8 +7,8 @@ pub const Result = common.ResultCode;
 
 pub const QoS = common.QoS;
 
-extern fn os_api_publish(topic_ptr: [*]const u8, payload_ptr: [*]const u8, payload_len: u32, qos: u32) i32;
-extern fn os_api_subscribe(topic_ptr: [*]const u8) i32;
+extern fn os_api_publish(topic_ptr: [*]const u8, topic_len: u32, payload_ptr: [*]const u8, payload_len: u32, qos: u32) i32;
+extern fn os_api_subscribe(topic_ptr: [*]const u8, topic_len: u32) i32;
 extern fn os_api_log(level: i32, msg_ptr: [*]const u8, msg_len: u32) void;
 
 // --- バンプアロケータ ---
@@ -118,13 +118,13 @@ pub fn log(level: i32, msg: []const u8) void {
 
 /// 指定したトピックにイベントを発行する
 pub fn publish(topic: []const u8, payload: []const u8, qos: QoS) Result {
-    const res = os_api_publish(topic.ptr, payload.ptr, @intCast(payload.len), @intFromEnum(qos));
+    const res = os_api_publish(topic.ptr, @intCast(topic.len), payload.ptr, @intCast(payload.len), @intFromEnum(qos));
     return @enumFromInt(res);
 }
 
 /// 指定したトピックを動的に購読する
 pub fn subscribe(topic: []const u8) Result {
-    const res = os_api_subscribe(topic.ptr);
+    const res = os_api_subscribe(topic.ptr, @intCast(topic.len));
     return @enumFromInt(res);
 }
 
