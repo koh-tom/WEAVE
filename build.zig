@@ -1,6 +1,17 @@
 const std = @import("std");
 
+fn ensureWrapperFile(path: []const u8, content: []const u8) !void {
+    std.fs.cwd().access(path, .{}) catch {
+        const file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        try file.writeAll(content);
+    };
+}
+
 pub fn build(b: *std.Build) void {
+    ensureWrapperFile("src/bus_test_wrapper.zig", "const test_mod = @import(\"tests/bus_test.zig\");\npub fn main() !void {\n    return test_mod.main();\n}\n") catch {};
+    ensureWrapperFile("src/stress_test_wrapper.zig", "const test_mod = @import(\"tests/stress_test.zig\");\npub fn main() !void {\n    return test_mod.main();\n}\n") catch {};
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 

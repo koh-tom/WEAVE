@@ -135,7 +135,7 @@ pub const WsGateway = struct {
     fn send(ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: event_bus.QoS) anyerror!void {
         const self: *WsGateway = @ptrCast(@alignCast(ctx));
         
-        const level = self.bus.introspection_level;
+        const level: event_bus.IntrospectionLevel = @enumFromInt(self.bus.introspection_level.load(.monotonic));
         if (level == .off) return;
 
         // JSONメッセージの構築
