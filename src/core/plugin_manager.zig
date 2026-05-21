@@ -307,6 +307,17 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
         }
     };
 
+    var metrics_count: u32 = 0;
+    const MetricsS = struct {
+        fn cb(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+            const mc = @as(*u32, @ptrCast(@alignCast(ctx)));
+            if (std.mem.indexOf(u8, msg.payload, "\"node_id\":100") != null) {
+                mc.* += 1;
+            }
+        }
+    };
+    try bus.subscribe("core.node.metrics", 98, MetricsS.cb, &metrics_count);
+
     var context_struct = TestContext{ .fc = &fault_count, .exc = &received_exception, .nid = &received_node_id };
     try bus.subscribe("core.node.fault", 99, S.cb, &context_struct);
 
@@ -321,9 +332,7 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
     // 長さ 4 のペイロード "TRAP" を publish してトラップを発生させる
     try bus.publish("allowed.topic", "TRAP", .BestEffort, 0);
 
-    bus.waitIdle();
-    bus.stop();
-    thread.join();
+    bus.waitIdle(); // 登録時on_init、TRAP処理、非同期再起動、再起動時on_initの全イベント完了を待つ
 
     // 1. 障害通知イベントが確実に届いたことの検証
     try std.testing.expectEqual(@as(u32, 1), fault_count);
@@ -332,4 +341,42 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
     // 例外内容が "unreachable" であることの検証
     const exc_str = std.mem.span(@as([*c]const u8, @ptrCast(&received_exception)));
     try std.testing.expect(std.mem.indexOf(u8, exc_str, "unreachable") != null);
+
+    // 2. 自動再起動が実行され、インスタンスが正しく差し替えられたか検証する
+    var it = pm.plugins.iterator();
+    var new_meta: ?*PluginMetadata = null;
+    while (it.next()) |entry| {
+        if (entry.value_ptr.*.node_id == 100) {
+            new_meta = entry.value_ptr.*;
+            break;
+        }
+    }
+    const meta_after_restart = new_meta orelse return error.MetaNotFound;
+    
+    // リスタートスロットリング用の失敗カウンタが 1 になっていることを検証
+    if (meta_after_restart.subscriber) |sub| {
+        try std.testing.expectEqual(@as(u32, 1), sub.consecutive_failures);
+    } else {
+        return error.SubscriberNotFound;
+    }
+
+    // この時点でメトリクスは0つ (Wasm自身のpublishはSelf-publishフィルタにより自分自身には届かないため) のはず
+    try std.testing.expectEqual(@as(u32, 0), metrics_count);
+
+    // 3. 正常なメッセージを publish し、再起動後の新インスタンスが問題なく応答できるか検証する
+    // 長さ 5 のペイロード "HELLO" をパブリッシュする（トラップしない）
+    try bus.publish("allowed.topic", "HELLO", .BestEffort, 0);
+    bus.waitIdle();
+
+    // 再起動時の on_init 内で dynamic subscribe が再度実行されて 2 重購読となるため、
+    // HELLO パブリッシュによって WasmSubscriber が 2 回呼び出され、計 2 回のメトリクスが送信されます。
+    try std.testing.expectEqual(@as(u32, 2), metrics_count);
+
+    // 新インスタンスの連続失敗カウンタが、成功によりリセット（0）されたことを検証
+    if (meta_after_restart.subscriber) |sub| {
+        try std.testing.expectEqual(@as(u32, 0), sub.consecutive_failures);
+    }
+
+    bus.stop();
+    thread.join();
 }
