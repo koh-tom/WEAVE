@@ -1,0 +1,25 @@
+## Summary / 概要
+<!-- [EN] A clear and concise description of the changes in this Pull Request. -->
+<!-- [JA] このPull Requestで行った変更の簡潔な概要を記載してください。 -->
+
+## Related Issue / 関連するIssue
+<!-- [EN] Link the issue resolved by this PR. E.g. Closes #123 -->
+<!-- [JA] このPRで解決されるIssueをリンクしてください（例: Closes #123）。 -->
+- Closes #
+
+## Changes / 変更内容
+<!-- [EN] List the specific changes made. -->
+<!-- [JA] 変更内容の具体的なリストを記載してください。 -->
+
+## Testing / テスト内容
+<!-- [EN] Describe how you tested these changes (e.g. `zig build test_all`, local runs). -->
+<!-- [JA] この変更をどのようにテストしたか（`zig build test_all`、ローカルでの動作確認など）を記述してください。 -->
+
+## Review Points / レビューのポイント
+<!-- [EN] Point out critical or complex areas that need extra attention. -->
+<!-- [JA] 特に注意深くレビューしてほしい重要な箇所や複雑な箇所を挙げてください。 -->
+
+## Checklist / チェックリスト
+- [ ] Tests pass successfully / テストが正常に通過すること
+- [ ] Code is formatted / コードがフォーマットされていること
+- [ ] Documentation is updated (if applicable) / ドキュメントが更新されていること（必要な場合）
