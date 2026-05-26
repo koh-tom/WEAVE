@@ -250,6 +250,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // --- Test All Step ---
+    const test_all_step = b.step("test_all", "Run all tests (unit, EventBus, and stress tests)");
+    test_all_step.dependOn(&run_unit_tests.step);
+    test_all_step.dependOn(&run_bus_test.step);
+    test_all_step.dependOn(&run_stress_cmd.step);
+
     // --- Clean Step ---
     const clean_step = b.step("clean", "Remove build artifacts and Wasm plugins");
     const clean_cmd = b.addSystemCommand(&[_][]const u8{
