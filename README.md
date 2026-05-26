@@ -101,7 +101,16 @@ Wasm プラグインは、以下のような `manifest.json` をルートに配�
 
 ### テスト
 
-WEAVEのテストは目的ごとに3種類に分かれています。
+WEAVEのテストは一括実行コマンドに加え、目的ごとに3種類に分かれています。
+
+#### 0. `zig build test_all` — 全テストの一括実行（推奨）
+
+```bash
+zig build test_all
+```
+
+- **対象**: ユニットテスト、EventBus単体テスト、メモリ負荷テストのすべて
+- **用途**: コミット前やCIにおいて、システム全体の挙動を一括して検証します。
 
 #### 1. `zig build test` — ユニットテスト
 
@@ -151,6 +160,7 @@ zig build stress
 ```
 修正したもの             → 使うコマンド
 ─────────────────────────────────────────────────
+全体の一括検証           → zig build test_all  (推奨)
 EventBus のロジック      → zig build bus_test  (高速)
 その後の全体確認         → zig build test      (完全)
 Config / Manifest        → zig build test
