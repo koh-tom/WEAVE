@@ -1,21 +1,23 @@
 ## Summary / 概要
-<!-- [EN] A clear and concise description of the changes in this Pull Request. -->
-<!-- [JA] このPull Requestで行った変更の簡潔な概要を記載してください。 -->
+<!-- SYNC_SUMMARY_START -->
+<!-- [EN] Summary will be synchronized automatically from the linked issue once the PR is created. -->
+<!-- [JA] PRが作成されると、リンクされたIssueから概要が自動的に同期されます。 -->
+<!-- SYNC_SUMMARY_END -->
 
 ## Related Issue / 関連するIssue
 <!-- [EN] Link the issue resolved by this PR. E.g. Closes #123 -->
 <!-- [JA] このPRで解決されるIssueをリンクしてください（例: Closes #123）。 -->
 - Closes #
 
+## Changes / 変更内容
+<!-- [EN] List the specific changes made. -->
+<!-- [JA] 変更内容の具体的なリストを記載してください。 -->
+
 ## Sync Tasks / 同期されたタスク
 <!-- SYNC_TASKS_START -->
 <!-- [EN] Tasks will be synchronized automatically from the linked issue once the PR is created. -->
 <!-- [JA] PRが作成されると、リンクされたIssueからタスクが自動的に同期されます。 -->
 <!-- SYNC_TASKS_END -->
-
-## Changes / 変更内容
-<!-- [EN] List the specific changes made. -->
-<!-- [JA] 変更内容の具体的なリストを記載してください。 -->
 
 ## Testing / テスト内容
 <!-- [EN] Describe how you tested these changes (e.g. `zig build test_all`, local runs). -->
