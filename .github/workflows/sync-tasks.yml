@@ -1,0 +1,82 @@
+name: Sync Issue Tasks to PR
+
+on:
+  pull_request:
+    types: [opened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: write
+  issues: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync Tasks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const prBody = pr.body || '';
+
+            // Find all closed issue numbers (e.g., Closes #12, Fixes #34)
+            const issueRegex = /(?:closes|resolves|fixes)\s+#(\d+)/gi;
+            const matches = [...prBody.matchAll(issueRegex)];
+            if (matches.length === 0) {
+              console.log('No linked issues found in PR description.');
+              return;
+            }
+
+            const issueNumbers = [...new Set(matches.map(m => parseInt(m[1])))];
+            let allTasks = [];
+
+            for (const issueNum of issueNumbers) {
+              try {
+                const { data: issue } = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNum,
+                });
+
+                if (!issue.body) continue;
+
+                // Extract checklist items (- [ ] or - [x])
+                const taskRegex = /^\s*-\s*\[([ xX])\]\s+(.+)$/gm;
+                const tasks = [...issue.body.matchAll(taskRegex)].map(t => {
+                  const checked = t[1].toLowerCase() === 'x' ? 'x' : ' ';
+                  return `- [${checked}] ${t[2]} (#${issueNum})`;
+                });
+
+                if (tasks.length > 0) {
+                  allTasks.push(...tasks);
+                }
+              } catch (err) {
+                console.error(`Failed to fetch issue #${issueNum}:`, err.message);
+              }
+            }
+
+            // If tasks were found, update the PR body
+            const startTag = '<!-- SYNC_TASKS_START -->';
+            const endTag = '<!-- SYNC_TASKS_END -->';
+
+            if (allTasks.length > 0 && prBody.includes(startTag) && prBody.includes(endTag)) {
+              const tasksMarkdown = '\n' + allTasks.join('\n') + '\n';
+              const updatedBody = prBody.replace(
+                new RegExp(`${startTag}[\\s\\S]*?${endTag}`),
+                `${startTag}${tasksMarkdown}${endTag}`
+              );
+
+              if (updatedBody !== prBody) {
+                await github.rest.pulls.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  body: updatedBody,
+                });
+                console.log(`Successfully synchronized ${allTasks.length} tasks to PR.`);
+              }
+            }

@@ -7,6 +7,12 @@
 <!-- [JA] このPRで解決されるIssueをリンクしてください（例: Closes #123）。 -->
 - Closes #
 
+## Sync Tasks / 同期されたタスク
+<!-- SYNC_TASKS_START -->
+<!-- [EN] Tasks will be synchronized automatically from the linked issue once the PR is created. -->
+<!-- [JA] PRが作成されると、リンクされたIssueからタスクが自動的に同期されます。 -->
+<!-- SYNC_TASKS_END -->
+
 ## Changes / 変更内容
 <!-- [EN] List the specific changes made. -->
 <!-- [JA] 変更内容の具体的なリストを記載してください。 -->
