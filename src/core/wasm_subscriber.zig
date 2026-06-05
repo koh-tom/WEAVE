@@ -124,6 +124,10 @@ pub const WasmSubscriber = struct {
                 
                 if (self.consecutive_failures >= MAX_RESTART_ATTEMPTS) {
                     log.err("WasmSubscriber: Node {} has failed {} times. Giving up on automatic restart.", .{self.node_id, self.consecutive_failures});
+                    if (self.func_os_reset_heap) |reset_func| {
+                        var reset_argv = [_]u32{0};
+                        _ = wamr.wasm_runtime_call_wasm(env, reset_func, 0, &reset_argv);
+                    }
                     return;
                 }
                 
@@ -133,6 +137,10 @@ pub const WasmSubscriber = struct {
                 if (self.last_failure_time > 0 and elapsed_retry < backoff_ms) {
                     log.warn("WasmSubscriber: Node {} restart throttled (attempt {}/{}, backoff {}ms, elapsed {}ms)", 
                         .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS, backoff_ms, elapsed_retry});
+                    if (self.func_os_reset_heap) |reset_func| {
+                        var reset_argv = [_]u32{0};
+                        _ = wamr.wasm_runtime_call_wasm(env, reset_func, 0, &reset_argv);
+                    }
                     return;
                 }
                 self.last_failure_time = now;
