@@ -302,16 +302,17 @@ pub const EventBus = struct {
         else
             "{\"hidden\":true}";
 
-        const trace_json = std.fmt.allocPrint(self.allocator, "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}", .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json }) catch |err| {
-            if (self.verbose) std.debug.print("Tracing: Failed to allocate memory for trace: {any}\n", .{err});
-            return;
-        };
-        defer self.allocator.free(trace_json);
-
-        // トレースメッセージ自体を再発行
-        // 配送ループに入らないように publish を呼び出すが、
-        // publish内でのトピックチェックにより安全。
-        _ = self.publish("core.system.event_traced", trace_json, .BestEffort, 0) catch {};
+        var buf: [16384]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}", .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json })) |trace_json| {
+            _ = self.publish("core.system.event_traced", trace_json, .BestEffort, 0) catch {};
+        } else |_| {
+            if (std.fmt.allocPrint(self.allocator, "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}", .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json })) |trace_json| {
+                defer self.allocator.free(trace_json);
+                _ = self.publish("core.system.event_traced", trace_json, .BestEffort, 0) catch {};
+            } else |err| {
+                if (self.verbose) std.debug.print("Tracing: Failed to allocate memory for trace: {any}\n", .{err});
+            }
+        }
     }
     pub fn registerDispatcherThread(self: *EventBus) void {
         const tid = @as(usize, @intCast(std.Thread.getCurrentId()));
