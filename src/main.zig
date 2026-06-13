@@ -38,7 +38,7 @@ fn runGraphPublisher(core: *Core, config: *const Config) void {
     const interval_ns = @as(u64, config.graph_full_interval_secs) * std.time.ns_per_s;
 
     while (running.load(.acquire)) {
-        const json = core.graph.toJson(core.allocator) catch |err| {
+        const json = core.graph.toJsonAlloc(core.allocator) catch |err| {
             log.err("GraphPublisher Error (JSON): {any}", .{err});
             continue;
         };
