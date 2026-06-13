@@ -119,6 +119,9 @@ export fn os_api_log(
     const native_ptr = wamr.wasm_runtime_addr_app_to_native(module_inst, msg_ptr);
     if (native_ptr) |ptr| {
         const msg = @as([*]const u8, @ptrCast(ptr))[0..msg_len];
+        if (level == 3 and (std.mem.indexOf(u8, msg, "out_of_memory") != null or std.mem.indexOf(u8, msg, "out of memory") != null)) {
+            wamr.wasm_runtime_set_exception(module_inst, "out_of_memory");
+        }
         switch (level) {
             0 => log.debug("[{s}] {s}", .{ name, msg }),
             1 => log.info("[{s}] {s}", .{ name, msg }),

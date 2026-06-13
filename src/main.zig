@@ -214,4 +214,5 @@ test {
     _ = @import("core/manifest.zig");
     _ = @import("core/plugin_manager.zig");
     _ = @import("common/config.zig");
+    _ = @import("tests/oom_test.zig");
 }
