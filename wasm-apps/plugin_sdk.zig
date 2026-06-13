@@ -141,3 +141,10 @@ pub fn publishJson(topic: []const u8, value: anytype, qos: QoS) !Result {
     try std.json.stringify(value, .{}, list.writer());
     return publish(topic, list.items, qos);
 }
+
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    _ = error_return_trace;
+    _ = ret_addr;
+    log(3, msg);
+    @trap();
+}
