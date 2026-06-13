@@ -114,7 +114,7 @@ pub const DashboardNode = struct {
 
         if (std.mem.eql(u8, parsed.value.topic, "core.system.graph.request")) {
             if (self.bus.graph) |graph| {
-                const json = try graph.toJson(self.allocator);
+                const json = try graph.toJsonAlloc(self.allocator);
                 defer self.allocator.free(json);
                 try self.bus.publish("core.system.graph.full", json, .Transient, self.node_id);
             }
