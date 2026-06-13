@@ -148,15 +148,22 @@ pub const SystemGraph = struct {
         }
     }
 
-    /// グラフ全体をJSON形式でシリアライズする
-    pub fn toJson(self: *SystemGraph, allocator: std.mem.Allocator) ![]const u8 {
+    fn isTopicMatch(pubTopic: []const u8, subTopic: []const u8) bool {
+        if (std.mem.eql(u8, subTopic, "#") or std.mem.eql(u8, subTopic, ">")) {
+            return true;
+        }
+        if (std.mem.endsWith(u8, subTopic, "*")) {
+            const prefix = subTopic[0..(subTopic.len - 1)];
+            return std.mem.startsWith(u8, pubTopic, prefix);
+        }
+        return std.mem.eql(u8, pubTopic, subTopic);
+    }
+
+    /// グラフ全体をJSON形式でシリアライズする (Writer版)
+    pub fn toJson(self: *SystemGraph, writer: anytype) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var list = std.ArrayListUnmanaged(u8){};
-        errdefer list.deinit(allocator);
-        
-        var writer = list.writer(allocator);
         try writer.writeAll("{\"nodes\":[");
         
         var first = true;
@@ -180,7 +187,6 @@ pub const SystemGraph = struct {
             }
 
             try writer.writeAll(",\"pub\":[");
-            
             for (node.pub_topics.items, 0..) |t, i| {
                 if (i > 0) try writer.writeAll(",");
                 try writer.print("\"{s}\"", .{t});
@@ -192,8 +198,39 @@ pub const SystemGraph = struct {
             }
             try writer.writeAll("]}");
         }
+        try writer.writeAll("],\"edges\":[");
+
+        // Edgeのマッチングと出力
+        var edge_first = true;
+        var it_pub = self.nodes.valueIterator();
+        while (it_pub.next()) |pub_node| {
+            for (pub_node.pub_topics.items) |pub_topic| {
+                var it_sub = self.nodes.valueIterator();
+                while (it_sub.next()) |sub_node| {
+                    if (pub_node.id == sub_node.id) continue;
+                    
+                    for (sub_node.sub_topics.items) |sub_topic| {
+                        if (isTopicMatch(pub_topic, sub_topic)) {
+                            if (!edge_first) try writer.writeAll(",");
+                            edge_first = false;
+                            try writer.print(
+                                "{{\"source\":{},\"target\":{},\"topic\":\"{s}\"}}",
+                                .{ pub_node.id, sub_node.id, pub_topic }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         try writer.writeAll("]}");
-        
+    }
+
+    /// グラフ全体をJSON形式でシリアライズして、アロケートされた文字列を返す
+    pub fn toJsonAlloc(self: *SystemGraph, allocator: std.mem.Allocator) ![]const u8 {
+        var list: std.ArrayList(u8) = .{};
+        errdefer list.deinit(allocator);
+        try self.toJson(list.writer(allocator));
         return list.toOwnedSlice(allocator);
     }
 };
@@ -236,4 +273,70 @@ test "SystemGraph: Idempotent registerNode" {
 
     // 期待値: 初回(1) + 変更(3) = 合計 2 回の delta が発行されているはず
     try std.testing.expectEqual(@as(u32, 2), count);
+}
+
+test "SystemGraph: toJson writer and Edge inference performance" {
+    const allocator = std.testing.allocator;
+    var graph = SystemGraph.init(allocator);
+    defer graph.deinit();
+
+    // 1. Create 50 nodes
+    var i: u32 = 1;
+    while (i <= 50) : (i += 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "node_{}", .{i});
+        try graph.registerNode(i, name, .wasm);
+    }
+
+    // 2. Setup pub/sub to create exactly 200 edges
+    // Let's make node 1 publish 4 topics: "t1", "t2", "t3", "t4"
+    try graph.recordPublish(1, "t1");
+    try graph.recordPublish(1, "t2");
+    try graph.recordPublish(1, "t3");
+    try graph.recordPublish(1, "t4");
+
+    // Let nodes 2 to 50 subscribe to these topics to create edges
+    // With 49 nodes subscribing to 4 topics, we get 49 * 4 = 196 edges.
+    i = 2;
+    while (i <= 50) : (i += 1) {
+        try graph.updateSubscription(i, "t1");
+        try graph.updateSubscription(i, "t2");
+        try graph.updateSubscription(i, "t3");
+        try graph.updateSubscription(i, "t4");
+    }
+    
+    // Add node 2 publishing "t5", and nodes 3 to 6 subscribing to it (4 edges) to reach exactly 200 edges.
+    try graph.recordPublish(2, "t5");
+    try graph.updateSubscription(3, "t5");
+    try graph.updateSubscription(4, "t5");
+    try graph.updateSubscription(5, "t5");
+    try graph.updateSubscription(6, "t5");
+
+    // 3. Serialize and measure time
+    var list: std.ArrayList(u8) = .{};
+    defer list.deinit(allocator);
+
+    const start_time = std.time.nanoTimestamp();
+    try graph.toJson(list.writer(allocator));
+    const end_time = std.time.nanoTimestamp();
+    
+    const elapsed_ms = @as(f64, @floatFromInt(end_time - start_time)) / 1000000.0;
+    std.debug.print("\n[Performance] toJson with 50 nodes and 200 edges took: {d:.3} ms\n", .{elapsed_ms});
+    
+    // Assert performance requirement: under 50ms
+    try std.testing.expect(elapsed_ms < 50.0);
+
+    // 4. Verify that the output JSON contains "edges" and the expected number of edges
+    const json = list.items;
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"edges\":[") != null);
+
+    // Parse output JSON to count edges
+    var parsed = try std.json.parseFromSlice(struct {
+        nodes: []std.json.Value,
+        edges: []std.json.Value,
+    }, allocator, json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 50), parsed.value.nodes.len);
+    try std.testing.expectEqual(@as(usize, 200), parsed.value.edges.len);
 }
