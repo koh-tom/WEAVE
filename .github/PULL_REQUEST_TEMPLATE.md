@@ -28,6 +28,7 @@
 <!-- [JA] 特に注意深くレビューしてほしい重要な箇所や複雑な箇所を挙げてください。 -->
 
 ## Checklist / チェックリスト
-- [ ] Tests pass successfully / テストが正常に通過すること
+- [ ] Tests pass successfully (local) / ローカルでテストが正常に通過すること
+- [ ] CI test workflow is green / CIテストワークフローが正常（緑）であること
 - [ ] Code is formatted / コードがフォーマットされていること
 - [ ] Documentation is updated (if applicable) / ドキュメントが更新されていること（必要な場合）
