@@ -43,11 +43,11 @@ fn runGraphPublisher(core: *Core, config: *const Config) void {
             continue;
         };
         defer core.allocator.free(json);
-        
+
         core.bus.publish("core.system.graph.full", json, .Transient, 0) catch |err| {
             log.err("GraphPublisher Error (Publish): {any}", .{err});
         };
-        
+
         run_mutex.lock();
         if (!running.load(.acquire)) {
             run_mutex.unlock();
@@ -66,7 +66,7 @@ fn sigHandler(sig: i32) callconv(.c) void {
     _ = sig;
     // 標準エラー出力に直接書く（シグナルハンドラ内での安全性を考慮。write は非同期シグナル安全）
     _ = std.fs.File.stderr().write("\nStatus: Shutdown signal received. Graceful exiting...\n") catch {};
-    
+
     running.store(false, .release);
 }
 
@@ -96,7 +96,7 @@ pub fn main() !void {
     log.info("Config: Dashboard: http://localhost:{d}", .{config.dashboard_port});
     log.info("Config: WS Gateway: ws://localhost:{d}", .{config.ws_gateway_port});
     log.info("Config: Node WS: ws://localhost:{d}", .{config.node_ws_port});
-    log.info("Config: Twitch: {s}, OBS: {s}:{d}", .{config.twitch_channel, config.obs_host, config.obs_port});
+    log.info("Config: Twitch: {s}, OBS: {s}:{d}", .{ config.twitch_channel, config.obs_host, config.obs_port });
     log.info("Config: Log Level: {s}", .{@tagName(config.log_level)});
     log.info("----------------------------------------", .{});
 
@@ -141,7 +141,7 @@ pub fn main() !void {
     try core.setupGateway();
 
     const dispatcher_thread = try std.Thread.spawn(.{}, @import("core/event_bus.zig").EventBus.runDispatcher, .{&core.bus});
-    
+
     const ws_thread = try std.Thread.spawn(.{}, runWsGateway, .{ws_gateway});
     const node_ws_thread = try std.Thread.spawn(.{}, runNodeWs, .{node_ws});
     const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{ &core, &config });
@@ -170,12 +170,12 @@ pub fn main() !void {
 
     for (config.plugins.items) |path| {
         core.loadPlugin(path) catch |err| {
-            log.err("Failed to load plugin '{s}': {any}", .{path, err});
+            log.err("Failed to load plugin '{s}': {any}", .{ path, err });
         };
     }
 
     log.info("Status: Running... (Press Ctrl+C to stop)", .{});
-    
+
     while (running.load(.acquire)) {
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
@@ -196,7 +196,7 @@ pub fn main() !void {
     core.bus.stop();
 
     // 7. 各スレッドの終了を待機・リソース解放
-    dashboard.deinit(); 
+    dashboard.deinit();
     obs.deinit();
 
     twitch_thread.join();
@@ -215,4 +215,5 @@ test {
     _ = @import("core/plugin_manager.zig");
     _ = @import("common/config.zig");
     _ = @import("tests/oom_test.zig");
+    _ = @import("tests/mock_test.zig");
 }
