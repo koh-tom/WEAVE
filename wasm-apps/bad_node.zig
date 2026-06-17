@@ -43,7 +43,7 @@ export fn on_init() i32 {
 export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_len: u32) void {
     _ = topic_ptr;
     _ = topic_len;
-    
+
     const payload = @as([*]const u8, @ptrFromInt(payload_ptr))[0..payload_len];
     if (std.mem.eql(u8, payload, "ALLOC_UNTIL_OOM")) {
         while (true) {

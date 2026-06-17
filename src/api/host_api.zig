@@ -139,8 +139,8 @@ export fn os_api_log(
 ///   log:       (level: i32, msg_ptr: i32, msg_len: i32) -> void                                      = "(iii)"
 pub fn getNativeSymbols() [3]wamr.NativeSymbol {
     return [_]wamr.NativeSymbol{
-        .{ .symbol = "os_api_publish", .func_ptr = @constCast(@ptrCast(&os_api_publish)), .signature = "(iiiii)i", .attachment = null },
-        .{ .symbol = "os_api_subscribe", .func_ptr = @constCast(@ptrCast(&os_api_subscribe)), .signature = "(ii)i", .attachment = null },
-        .{ .symbol = "os_api_log", .func_ptr = @constCast(@ptrCast(&os_api_log)), .signature = "(iii)", .attachment = null },
+        .{ .symbol = "os_api_publish", .func_ptr = @ptrCast(@constCast(&os_api_publish)), .signature = "(iiiii)i", .attachment = null },
+        .{ .symbol = "os_api_subscribe", .func_ptr = @ptrCast(@constCast(&os_api_subscribe)), .signature = "(ii)i", .attachment = null },
+        .{ .symbol = "os_api_log", .func_ptr = @ptrCast(@constCast(&os_api_log)), .signature = "(iii)", .attachment = null },
     };
 }

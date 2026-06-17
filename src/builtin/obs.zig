@@ -51,10 +51,10 @@ pub const ObsEgressNode = struct {
         self.host = try self.allocator.dupe(u8, host);
         self.port = port;
         self.running = true;
-        
+
         // 購読開始（接続前でも行っておく）
         try self.bus.subscribe("core.obs.request.*", self.node_id, ObsEgressNode.onMessage, self);
-        
+
         // グラフ登録
         if (self.bus.graph) |g| {
             try g.registerNode(self.node_id, "ObsEgress", .native);
@@ -68,15 +68,15 @@ pub const ObsEgressNode = struct {
         while (self.running) {
             self.doConnectAndReceive(&retry_count) catch |err| {
                 if (err != error.EndOfStream) {
-                    log.err("ObsEgress: Connection failed: {any}", .{ err });
+                    log.err("ObsEgress: Connection failed: {any}", .{err});
                 }
             };
-            
+
             if (!self.running) break;
 
             const shift = @as(u6, @intCast(@min(10, retry_count)));
             const backoff: u64 = @min(30, @as(u64, 1) << shift);
-            log.info("ObsEgress: Retrying in {d} seconds...", .{ backoff });
+            log.info("ObsEgress: Retrying in {d} seconds...", .{backoff});
             var slept_ns: u64 = 0;
             const target_ns = backoff * std.time.ns_per_s;
             while (slept_ns < target_ns and self.running) {
@@ -90,9 +90,9 @@ pub const ObsEgressNode = struct {
     fn doConnectAndReceive(self: *ObsEgressNode, retry_count: *u32) !void {
         const host = self.host orelse return;
         const address = try std.net.Address.parseIp(host, self.port);
-        
+
         const stream = try std.net.tcpConnectToAddress(address);
-        
+
         self.mutex.lock();
         if (self.stream) |s| s.close();
         self.stream = stream;
@@ -101,24 +101,21 @@ pub const ObsEgressNode = struct {
         log.info("ObsEgress: Connected to OBS. Starting handshake...", .{});
         try self.clientHandshake(host, self.port);
         log.info("ObsEgress: WebSocket handshake completed.", .{});
-        
+
         // 接続とハンドシェイクが成功したらリトライ回数をリセット
         retry_count.* = 0;
-        
+
         try self.receiverLoop();
     }
 
     fn clientHandshake(self: *ObsEgressNode, host: []const u8, port: u16) !void {
         var buf: [1024]u8 = undefined;
-        const request = try std.fmt.bufPrint(&buf,
-            "GET / HTTP/1.1\r\n" ++
+        const request = try std.fmt.bufPrint(&buf, "GET / HTTP/1.1\r\n" ++
             "Host: {s}:{}\r\n" ++
             "Upgrade: websocket\r\n" ++
             "Connection: Upgrade\r\n" ++
             "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
-            "Sec-WebSocket-Version: 13\r\n\r\n",
-            .{ host, port }
-        );
+            "Sec-WebSocket-Version: 13\r\n\r\n", .{ host, port });
         try self.stream.?.writeAll(request);
 
         var resp_buf: [1024]u8 = undefined;
@@ -135,7 +132,7 @@ pub const ObsEgressNode = struct {
             defer self.allocator.free(frame.payload);
 
             if (frame.opcode == 0x8) break; // Close
-            
+
             const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch continue;
             defer parsed.deinit();
 
@@ -144,7 +141,7 @@ pub const ObsEgressNode = struct {
                 .integer => |op_int| {
                     if (op_int == 0) { // Hello
                         self.handleHello(parsed.value.object) catch |err| {
-                            log.err("ObsEgress: Auth failed: {any}", .{ err });
+                            log.err("ObsEgress: Auth failed: {any}", .{err});
                             return err;
                         };
                     } else if (op_int == 2) { // Identified
@@ -155,7 +152,7 @@ pub const ObsEgressNode = struct {
                                 var topic_buf: [128]u8 = undefined;
                                 if (std.fmt.bufPrint(&topic_buf, "core.obs.event.{s}", .{event_type.string})) |topic| {
                                     self.bus.publish(topic, frame.payload, .Transient, self.node_id) catch |err| {
-                                        log.err("ObsEgress: Failed to publish OBS event: {any}", .{ err });
+                                        log.err("ObsEgress: Failed to publish OBS event: {any}", .{err});
                                     };
                                 } else |_| {}
                             }
@@ -256,14 +253,12 @@ pub const ObsEgressNode = struct {
         try s.writeAll(data);
     }
 
-
-
     fn onMessage(context: ?*anyopaque, msg: *const event_bus.EventMessage) void {
         const self: *ObsEgressNode = @ptrCast(@alignCast(context));
-        
+
         // そのまま転送（payloadは既にOBS v5のリクエストJSONであることを期待）
         self.sendFrame(msg.payload) catch |err| {
-            std.debug.print("ObsEgress: Failed to send frame to OBS: {any}\n", .{ err });
+            std.debug.print("ObsEgress: Failed to send frame to OBS: {any}\n", .{err});
         };
     }
 

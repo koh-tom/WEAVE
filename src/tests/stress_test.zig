@@ -7,7 +7,7 @@ const WasmRuntime = @import("../core/wasm_runtime.zig").WasmRuntime;
 const PluginManager = @import("../core/plugin_manager.zig").PluginManager;
 
 pub fn main() !void {
-    std.debug.print(">>> WEAVE Stress Test: Memory Management (Phase 2.2 Async) <<<\n", .{});
+    std.debug.print(">>> WEAVE Stress Test: Memory Management <<<\n", .{});
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -29,8 +29,6 @@ pub fn main() !void {
 
     // ディスパッチャスレッドを起動
     const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
-    
-
 
     var symbols = host_api.getNativeSymbols();
     try runtime.registerNatives("env", &symbols);
@@ -56,12 +54,12 @@ pub fn main() !void {
 
     const iterations = 100000;
     std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});
-    
+
     const start_time = std.time.milliTimestamp();
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
         try bus.publish("test.stress", "STRESS_TEST_PAYLOAD", .Reliable, 0);
-        if (i % 10000 == 0) std.debug.print("Progress: {}/100000 (Queue: {})\n", .{i, bus.queue.count});
+        if (i % 10000 == 0) std.debug.print("Progress: {}/100000 (Queue: {})\n", .{ i, bus.queue.count });
     }
 
     bus.waitIdle();

@@ -391,7 +391,7 @@ pub const EventBus = struct {
         // システム制御トピックの処理
         if (std.mem.eql(u8, topic, "core.system.introspection")) {
             var level_str: ?[]const u8 = null;
-            
+
             // JSON としてパースを試みる
             const parsed_json = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch null;
             if (parsed_json) |pj| {
@@ -408,7 +408,7 @@ pub const EventBus = struct {
                     },
                     else => {},
                 }
-                
+
                 if (level_str) |s| {
                     const str = std.mem.trim(u8, s, "\"");
                     var buf: [32]u8 = undefined;
@@ -428,7 +428,7 @@ pub const EventBus = struct {
                                 std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
                                 var evt_buf: [128]u8 = undefined;
                                 const evt_payload = std.fmt.bufPrint(&evt_buf, "{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ @tagName(old_level), @tagName(level) }) catch "{}";
-                                
+
                                 self.publish("core.system.introspection.changed", evt_payload, .Transient, 0) catch |err| {
                                     std.debug.print("Failed to publish introspection changed event: {any}\n", .{err});
                                 };
@@ -439,7 +439,7 @@ pub const EventBus = struct {
                 pj.deinit();
                 return;
             }
-            
+
             // パースに失敗した場合は、フォールバックとして payload 自体を使う
             const str = std.mem.trim(u8, payload, "\"");
             var buf: [32]u8 = undefined;
@@ -459,7 +459,7 @@ pub const EventBus = struct {
                         std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
                         var evt_buf: [128]u8 = undefined;
                         const evt_payload = std.fmt.bufPrint(&evt_buf, "{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ @tagName(old_level), @tagName(level) }) catch "{}";
-                        
+
                         self.publish("core.system.introspection.changed", evt_payload, .Transient, 0) catch |err| {
                             std.debug.print("Failed to publish introspection changed event: {any}\n", .{err});
                         };
@@ -683,31 +683,31 @@ test "EventBus: Wildcard Matching" {
     // --- Added 10 robust cases for multi-level, boundary, and negative validation ---
     // 1. Multi-level combinations (Positive)
     try std.testing.expect(isMatch("a.b.+.d.#", "a.b.c.d.e.f"));
-    
+
     // 2. Multi-level combinations (Positive - # matches zero levels)
     try std.testing.expect(isMatch("a.b.+.d.#", "a.b.c.d"));
-    
+
     // 3. Multi-level combinations (Negative - missing single-level placeholder)
     try std.testing.expect(!isMatch("a.b.+.d.#", "a.b.d.e"));
-    
+
     // 4. Complete wildcard with single '#' (Positive)
     try std.testing.expect(isMatch("#", "any.depth.topic.name"));
-    
+
     // 5. Empty topic comparison (Negative)
     try std.testing.expect(!isMatch("a.b.c", ""));
-    
+
     // 6. Empty pattern comparison (Negative)
     try std.testing.expect(!isMatch("", "a.b.c"));
-    
+
     // 7. Multi-level check with * (Negative - * matches exactly one level)
     try std.testing.expect(!isMatch("a.*.c", "a.b.x.c"));
-    
+
     // 8. Same prefix but different length (Negative)
     try std.testing.expect(!isMatch("a.b", "a.b.c"));
-    
+
     // 9. Middle-level multi-level wildcard (Positive)
     try std.testing.expect(isMatch("a.#.d", "a.b.c.d"));
-    
+
     // 10. Middle-level multi-level wildcard with unmatched end (Negative)
     try std.testing.expect(!isMatch("a.#.d", "a.b.c.e"));
 }
@@ -787,7 +787,7 @@ test "EventBus: Dynamic Trace Buffer for Large Payload" {
         fn cb(ctx: ?*anyopaque, msg: *const EventMessage) void {
             const c_ptr = @as(*u32, @ptrCast(@alignCast(ctx)));
             c_ptr.* += 1;
-            
+
             // トレースメッセージ内に 4096バイトの payload ('A' が連続する) が含まれていることを確認
             std.testing.expect(std.mem.indexOf(u8, msg.payload, "AAAA") != null) catch {};
         }

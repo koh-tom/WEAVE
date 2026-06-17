@@ -53,7 +53,7 @@ test "WasmSubscriber: OOM auto restart" {
         fn cb(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
             const context = @as(*TestContext, @ptrCast(@alignCast(ctx)));
             context.fc.* += 1;
-            
+
             var parsed = std.json.parseFromSlice(struct { node_id: u32, exception: []const u8 }, std.testing.allocator, msg.payload, .{}) catch return;
             defer parsed.deinit();
 
@@ -90,7 +90,7 @@ test "WasmSubscriber: OOM auto restart" {
     // 3. Repeat OOM trigger to increment consecutive failures up to MAX_RESTART_ATTEMPTS (5)
     // Note: Restarting bad_node will execute on_init which subscribes to allowed.topic again,
     // resulting in a duplicate subscription. This means a single publish triggers multiple callbacks.
-    
+
     // Publish 2nd time: triggers 2nd and 3rd faults (fault_count becomes 3)
     try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM", .BestEffort, 0);
     bus.waitIdle();

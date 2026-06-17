@@ -50,7 +50,7 @@ pub const TwitchAdapter = struct {
             const shift = @as(u6, @intCast(@min(10, retry_count)));
             const backoff_secs: u64 = @min(30, @as(u64, 1) << shift);
             log.info("TwitchAdapter: Reconnecting in {d} seconds...", .{backoff_secs});
-            
+
             var slept_ns: u64 = 0;
             const target_ns = backoff_secs * std.time.ns_per_s;
             while (slept_ns < target_ns and self.running) {
@@ -102,9 +102,9 @@ pub const TwitchAdapter = struct {
             const user_end = std.mem.indexOf(u8, line, "!") orelse return;
             // 先頭の ':' を除外
             const user = if (line[0] == ':') line[1..user_end] else line[0..user_end];
-            
+
             const msg_start_idx = std.mem.indexOfPos(u8, line, idx + 9, " :") orelse return;
-            
+
             // 行末の \r を除去
             var message = line[msg_start_idx + 2 ..];
             if (message.len > 0 and message[message.len - 1] == '\r') {
@@ -112,11 +112,9 @@ pub const TwitchAdapter = struct {
             }
 
             // JSONを安全に構築
-            const json_payload = try std.fmt.allocPrint(self.allocator, "{f}", .{
-                std.json.fmt(.{ .user = user, .message = message }, .{})
-            });
+            const json_payload = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(.{ .user = user, .message = message }, .{})});
             defer self.allocator.free(json_payload);
-            
+
             try self.bus.publish("ext.twitch.chat.message", json_payload, .BestEffort, self.node_id);
         } else {
             // PRIVMSG 以外（ログイン応答など）をコンソールに出力して接続状況を確認

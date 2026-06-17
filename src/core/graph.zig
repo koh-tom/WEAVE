@@ -49,7 +49,7 @@ pub const SystemGraph = struct {
     pub fn registerNode(self: *SystemGraph, id: u32, name: []const u8, node_type: NodeType) !void {
         self.mutex.lock();
         var is_changed = false;
-        
+
         if (self.nodes.getPtr(id)) |node| {
             if (!std.mem.eql(u8, node.name, name) or node.node_type != node_type or node.status != .active) {
                 self.allocator.free(node.name);
@@ -77,7 +77,7 @@ pub const SystemGraph = struct {
         if (is_changed) {
             if (self.bus) |bus| {
                 var buf: [256]u8 = undefined;
-                const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"node_reg\",\"id\":{},\"name\":\"{s}\",\"node_type\":\"{s}\"}}", .{id, name, @tagName(node_type)}) catch "";
+                const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"node_reg\",\"id\":{},\"name\":\"{s}\",\"node_type\":\"{s}\"}}", .{ id, name, @tagName(node_type) }) catch "";
                 if (payload.len > 0) {
                     _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
                 }
@@ -87,21 +87,27 @@ pub const SystemGraph = struct {
 
     pub fn updateSubscription(self: *SystemGraph, node_id: u32, topic: []const u8) !void {
         self.mutex.lock();
-        const node = self.nodes.getPtr(node_id) orelse { self.mutex.unlock(); return error.NodeNotFound; };
-        
+        const node = self.nodes.getPtr(node_id) orelse {
+            self.mutex.unlock();
+            return error.NodeNotFound;
+        };
+
         node.last_activity_ts = std.time.milliTimestamp();
         if (node.last_topic) |t| self.allocator.free(t);
         node.last_topic = try self.allocator.dupe(u8, topic);
 
         for (node.sub_topics.items) |t| {
-            if (std.mem.eql(u8, t, topic)) { self.mutex.unlock(); return; }
+            if (std.mem.eql(u8, t, topic)) {
+                self.mutex.unlock();
+                return;
+            }
         }
         try node.sub_topics.append(self.allocator, try self.allocator.dupe(u8, topic));
         self.mutex.unlock();
 
         if (self.bus) |bus| {
             var buf: [256]u8 = undefined;
-            const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"link_sub\",\"id\":{},\"topic\":\"{s}\"}}", .{node_id, topic}) catch "";
+            const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"link_sub\",\"id\":{},\"topic\":\"{s}\"}}", .{ node_id, topic }) catch "";
             if (payload.len > 0) {
                 _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
             }
@@ -110,21 +116,27 @@ pub const SystemGraph = struct {
 
     pub fn recordPublish(self: *SystemGraph, node_id: u32, topic: []const u8) !void {
         self.mutex.lock();
-        const node = self.nodes.getPtr(node_id) orelse { self.mutex.unlock(); return; };
-        
+        const node = self.nodes.getPtr(node_id) orelse {
+            self.mutex.unlock();
+            return;
+        };
+
         node.last_activity_ts = std.time.milliTimestamp();
         if (node.last_topic) |t| self.allocator.free(t);
         node.last_topic = try self.allocator.dupe(u8, topic);
 
         for (node.pub_topics.items) |t| {
-            if (std.mem.eql(u8, t, topic)) { self.mutex.unlock(); return; }
+            if (std.mem.eql(u8, t, topic)) {
+                self.mutex.unlock();
+                return;
+            }
         }
         try node.pub_topics.append(self.allocator, try self.allocator.dupe(u8, topic));
         self.mutex.unlock();
 
         if (self.bus) |bus| {
             var buf: [256]u8 = undefined;
-            const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"link_pub\",\"id\":{},\"topic\":\"{s}\"}}", .{node_id, topic}) catch "";
+            const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"link_pub\",\"id\":{},\"topic\":\"{s}\"}}", .{ node_id, topic }) catch "";
             if (payload.len > 0) {
                 _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
             }
@@ -140,7 +152,7 @@ pub const SystemGraph = struct {
 
             if (self.bus) |bus| {
                 var buf: [128]u8 = undefined;
-                const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"node_status\",\"id\":{},\"status\":\"{any}\"}}", .{node_id, status}) catch "";
+                const payload = std.fmt.bufPrint(&buf, "{{\"type\":\"node_status\",\"id\":{},\"status\":\"{any}\"}}", .{ node_id, status }) catch "";
                 _ = bus.publish("core.system.graph.delta", payload, .Transient, 0) catch {};
             }
         } else {
@@ -165,13 +177,13 @@ pub const SystemGraph = struct {
         defer self.mutex.unlock();
 
         try writer.writeAll("{\"nodes\":[");
-        
+
         var first = true;
         var it = self.nodes.valueIterator();
         while (it.next()) |node| {
             if (!first) try writer.writeAll(",");
             first = false;
-            
+
             try writer.writeAll("{");
             try writer.print("\"id\":{},", .{node.id});
             try writer.print("\"name\":\"{s}\",", .{node.name});
@@ -179,7 +191,7 @@ pub const SystemGraph = struct {
             try writer.print("\"status\":\"{s}\",", .{@tagName(node.status)});
             try writer.print("\"last_active\":{},", .{node.last_activity_ts});
             try writer.writeAll("\"last_topic\":");
-            
+
             if (node.last_topic) |t| {
                 try writer.print("\"{s}\"", .{t});
             } else {
@@ -208,15 +220,12 @@ pub const SystemGraph = struct {
                 var it_sub = self.nodes.valueIterator();
                 while (it_sub.next()) |sub_node| {
                     if (pub_node.id == sub_node.id) continue;
-                    
+
                     for (sub_node.sub_topics.items) |sub_topic| {
                         if (isTopicMatch(pub_topic, sub_topic)) {
                             if (!edge_first) try writer.writeAll(",");
                             edge_first = false;
-                            try writer.print(
-                                "{{\"source\":{},\"target\":{},\"topic\":\"{s}\"}}",
-                                .{ pub_node.id, sub_node.id, pub_topic }
-                            );
+                            try writer.print("{{\"source\":{},\"target\":{},\"topic\":\"{s}\"}}", .{ pub_node.id, sub_node.id, pub_topic });
                         }
                     }
                 }
@@ -260,7 +269,7 @@ test "SystemGraph: Idempotent registerNode" {
 
     // 1. 初回登録 -> delta が飛ぶはず
     try graph.registerNode(42, "test_node", .wasm);
-    
+
     // 2. 同じ内容で再登録 -> 冪等性により delta は無視されるはず
     try graph.registerNode(42, "test_node", .wasm);
 
@@ -304,7 +313,7 @@ test "SystemGraph: toJson writer and Edge inference performance" {
         try graph.updateSubscription(i, "t3");
         try graph.updateSubscription(i, "t4");
     }
-    
+
     // Add node 2 publishing "t5", and nodes 3 to 6 subscribing to it (4 edges) to reach exactly 200 edges.
     try graph.recordPublish(2, "t5");
     try graph.updateSubscription(3, "t5");
@@ -319,10 +328,10 @@ test "SystemGraph: toJson writer and Edge inference performance" {
     const start_time = std.time.nanoTimestamp();
     try graph.toJson(list.writer(allocator));
     const end_time = std.time.nanoTimestamp();
-    
+
     const elapsed_ms = @as(f64, @floatFromInt(end_time - start_time)) / 1000000.0;
     std.debug.print("\n[Performance] toJson with 50 nodes and 200 edges took: {d:.3} ms\n", .{elapsed_ms});
-    
+
     // Assert performance requirement: under 50ms
     try std.testing.expect(elapsed_ms < 50.0);
 
