@@ -4,6 +4,6 @@
 pre-commit:
   commands:
     zig-fmt:
-      glob: "*.zig"
+      glob: "**/*.zig"
       run: zig fmt {staged_files}
       stage_fixed: true
