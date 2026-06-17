@@ -135,7 +135,7 @@ pub const PluginManager = struct {
         if (needs_subscription) {
             try self.applyManifestSubscriptions(new_inst, bus);
         }
-        
+
         if (bus.graph) |g| {
             g.updateNodeStatus(node_id, .active);
         }
@@ -297,7 +297,7 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
         fn cb(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
             const context = @as(*TestContext, @ptrCast(@alignCast(ctx)));
             context.fc.* += 1;
-            
+
             var parsed = std.json.parseFromSlice(struct { node_id: u32, exception: []const u8 }, std.testing.allocator, msg.payload, .{}) catch return;
             defer parsed.deinit();
 
@@ -337,7 +337,7 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
     // 1. 障害通知イベントが確実に届いたことの検証
     try std.testing.expectEqual(@as(u32, 1), fault_count);
     try std.testing.expectEqual(@as(u32, 100), received_node_id);
-    
+
     // 例外内容が "unreachable" であることの検証
     const exc_str = std.mem.span(@as([*c]const u8, @ptrCast(&received_exception)));
     try std.testing.expect(std.mem.indexOf(u8, exc_str, "unreachable") != null);
@@ -352,7 +352,7 @@ test "PluginManager: Fault Isolation and Safe Recovery Test" {
         }
     }
     const meta_after_restart = new_meta orelse return error.MetaNotFound;
-    
+
     // リスタートスロットリング用の失敗カウンタが 1 になっていることを検証
     if (meta_after_restart.subscriber) |sub| {
         try std.testing.expectEqual(@as(u32, 1), sub.consecutive_failures);

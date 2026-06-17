@@ -24,7 +24,7 @@ test "EventBus: Basic Delivery" {
     receive_count = 0;
     try bus.subscribe("test.topic", 100, count_callback, null);
     try bus.publish("test.topic", "hello", .Reliable, 0);
-    
+
     bus.waitIdle();
     try std.testing.expectEqual(@as(u32, 1), receive_count);
 
@@ -45,7 +45,7 @@ test "EventBus: Multiple Subscribers" {
     try bus.subscribe("broadcast", 103, count_callback, null);
 
     try bus.publish("broadcast", "everyone see this", .Reliable, 0);
-    
+
     bus.waitIdle();
     try std.testing.expectEqual(@as(u32, 3), receive_count);
 
@@ -62,10 +62,10 @@ test "EventBus: QoS BestEffort Drop" {
     // ディスパッチャを起動せずに（＝消費させずに）キューを埋める
     try bus.publish("drop.me", "1", .BestEffort, 0);
     try bus.publish("drop.me", "2", .BestEffort, 0);
-    
+
     // 3つ目はドロップされるはず
     try bus.publish("drop.me", "3", .BestEffort, 0);
-    
+
     try std.testing.expectEqual(@as(usize, 2), bus.queue.count);
 
     // ディスパッチャを起動して空にする

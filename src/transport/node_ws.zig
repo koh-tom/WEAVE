@@ -49,7 +49,7 @@ pub const NodeWsTransport = struct {
         fn isSubscribed(self: *Client, topic: []const u8) bool {
             self.mutex.lock();
             defer self.mutex.unlock();
-            
+
             var it = self.subscriptions.keyIterator();
             while (it.next()) |sub| {
                 if (event_bus.EventBus.isMatch(sub.*, topic)) return true;
@@ -138,7 +138,7 @@ pub const NodeWsTransport = struct {
             node_id_counter += 1;
 
             const client = Client.init(self.allocator, conn.stream, node_id);
-            
+
             // ハンドシェイク
             self.handleHandshake(client.stream) catch |err| {
                 log.warn("NodeWsTransport: Handshake failed: {any}", .{err});
@@ -195,21 +195,18 @@ pub const NodeWsTransport = struct {
         const magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         var combined: [128]u8 = undefined;
         const combined_str = try std.fmt.bufPrint(&combined, "{s}{s}", .{ key, magic });
-        
+
         var sha1_buf: [20]u8 = undefined;
         std.crypto.hash.Sha1.hash(combined_str, &sha1_buf, .{});
-        
+
         var accept_buf: [32]u8 = undefined;
         const accept_key = std.base64.standard.Encoder.encode(&accept_buf, &sha1_buf);
 
         var response_buf: [1024]u8 = undefined;
-        const response = try std.fmt.bufPrint(&response_buf,
-            "HTTP/1.1 101 Switching Protocols\r\n" ++
+        const response = try std.fmt.bufPrint(&response_buf, "HTTP/1.1 101 Switching Protocols\r\n" ++
             "Upgrade: websocket\r\n" ++
             "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Accept: {s}\r\n\r\n",
-            .{accept_key}
-        );
+            "Sec-WebSocket-Accept: {s}\r\n\r\n", .{accept_key});
         try stream.writeAll(response);
     }
 
@@ -260,7 +257,7 @@ pub const NodeWsTransport = struct {
             if (root.get("topic")) |topic| {
                 try client.addSubscription(topic.string);
                 std.debug.print("NodeWsTransport: Client {} subscribed to '{s}'\n", .{ client.node_id, topic.string });
-                
+
                 try client.ensureRegistered(self.bus);
                 if (self.bus.graph) |g| {
                     try g.updateSubscription(client.node_id, topic.string);
@@ -269,9 +266,9 @@ pub const NodeWsTransport = struct {
         } else if (std.mem.eql(u8, type_str, "publish")) {
             const topic = root.get("topic") orelse return;
             const payload = root.get("payload") orelse return;
-            
+
             try client.ensureRegistered(self.bus);
-            
+
             // ペイロードがオブジェクトや配列なら文字列化して転送
             var payload_str: []const u8 = undefined;
             if (payload == .string) {
@@ -388,10 +385,10 @@ pub const NodeWsTransport = struct {
 
     fn send(ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: event_bus.QoS) anyerror!void {
         const self: *NodeWsTransport = @ptrCast(@alignCast(ctx));
-        
+
         var json_buf = std.ArrayListUnmanaged(u8){};
         defer json_buf.deinit(self.allocator);
-        
+
         // 外部ノードへの通知用JSON
         try json_buf.writer(self.allocator).print("{f}", .{std.json.fmt(.{
             .type = "event",
@@ -413,8 +410,8 @@ pub const NodeWsTransport = struct {
     fn sendWsFrame(self: *NodeWsTransport, stream: std.net.Stream, data: []const u8) !void {
         _ = self;
         var header: [10]u8 = undefined;
-        header[0] = 0x81; 
-        
+        header[0] = 0x81;
+
         var header_len: usize = 2;
         if (data.len <= 125) {
             header[1] = @as(u8, @intCast(data.len));

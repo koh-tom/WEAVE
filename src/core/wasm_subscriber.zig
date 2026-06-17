@@ -65,33 +65,32 @@ pub const WasmSubscriber = struct {
                 log.err("WasmSubscriber: Failed to publish fault event: {any}", .{err});
             };
         }
-        
+
         if (self.bus.graph) |g| {
             g.updateNodeStatus(self.node_id, .fault);
             var buf: [128]u8 = undefined;
             const payload = std.fmt.bufPrint(&buf, "{{\"node_id\":{},\"status\":\"fault\"}}", .{self.node_id}) catch "";
             _ = self.bus.publish("core.node.status_changed", payload, .Transient, 0) catch {};
         }
-        
+
         // リスタートスロットリング
         self.consecutive_failures += 1;
         const now = std.time.milliTimestamp();
-        
+
         if (self.consecutive_failures >= MAX_RESTART_ATTEMPTS) {
-            log.err("WasmSubscriber: Node {} has failed {} times. Giving up on automatic restart.", .{self.node_id, self.consecutive_failures});
+            log.err("WasmSubscriber: Node {} has failed {} times. Giving up on automatic restart.", .{ self.node_id, self.consecutive_failures });
             if (self.func_os_reset_heap) |reset_func| {
                 var reset_argv = [_]u32{0};
                 _ = wamr.wasm_runtime_call_wasm(env, reset_func, 0, &reset_argv);
             }
             return;
         }
-        
+
         // 指数バックオフチェック
         const backoff_ms = BASE_BACKOFF_MS * (@as(i64, 1) << @intCast(@min(self.consecutive_failures - 1, 10)));
         const elapsed_retry = now - self.last_failure_time;
         if (self.last_failure_time > 0 and elapsed_retry < backoff_ms) {
-            log.warn("WasmSubscriber: Node {} restart throttled (attempt {}/{}, backoff {}ms, elapsed {}ms)", 
-                .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS, backoff_ms, elapsed_retry});
+            log.warn("WasmSubscriber: Node {} restart throttled (attempt {}/{}, backoff {}ms, elapsed {}ms)", .{ self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS, backoff_ms, elapsed_retry });
             if (self.func_os_reset_heap) |reset_func| {
                 var reset_argv = [_]u32{0};
                 _ = wamr.wasm_runtime_call_wasm(env, reset_func, 0, &reset_argv);
@@ -99,17 +98,17 @@ pub const WasmSubscriber = struct {
             return;
         }
         self.last_failure_time = now;
-        
+
         // 自動復旧 (Restart) のトリガー
-        log.info("WasmSubscriber: Triggering automatic restart for Node {} (attempt {}/{})", .{self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS});
+        log.info("WasmSubscriber: Triggering automatic restart for Node {} (attempt {}/{})", .{ self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS });
         self.manager.restartPlugin(self.node_id, self.bus) catch |err| {
-            log.err("WasmSubscriber: Auto-restart failed for Node {}: {any}", .{self.node_id, err});
+            log.err("WasmSubscriber: Auto-restart failed for Node {}: {any}", .{ self.node_id, err });
         };
     }
 
     pub fn callback(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
         const self: *WasmSubscriber = @ptrCast(@alignCast(ctx orelse return));
-        
+
         // 排他制御のロック
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -123,7 +122,7 @@ pub const WasmSubscriber = struct {
         const env = wamr.wasm_runtime_create_exec_env(self.instance, EXEC_ENV_STACK_SIZE);
         if (env == null) return;
         defer wamr.wasm_runtime_destroy_exec_env(env);
-        
+
         const alloc_func = self.func_os_alloc orelse return;
 
         // Topicコピー
@@ -189,7 +188,7 @@ pub const WasmSubscriber = struct {
                 } else {
                     log.err("WasmSubscriber: Execution failed without exception.", .{});
                 }
-                
+
                 self.handleFault(env, exception_msg);
                 return;
             }
@@ -197,7 +196,7 @@ pub const WasmSubscriber = struct {
             // 計測終了とパブリッシュ
             const end_time = std.time.nanoTimestamp();
             const exec_time_ns = end_time - start_time;
-            
+
             // メモリサイズ取得 (正確な heap usage を Wasm 側から取得)
             var mem_size: u32 = 0;
             if (self.func_get_heap_usage) |usage_func| {
@@ -208,11 +207,8 @@ pub const WasmSubscriber = struct {
             }
 
             var metric_buf: [256]u8 = undefined;
-            const metric_payload = std.fmt.bufPrint(&metric_buf, 
-                "{{\"node_id\":{},\"exec_time_ns\":{},\"memory_bytes\":{}}}", 
-                .{self.node_id, exec_time_ns, mem_size}
-            ) catch "";
-            
+            const metric_payload = std.fmt.bufPrint(&metric_buf, "{{\"node_id\":{},\"exec_time_ns\":{},\"memory_bytes\":{}}}", .{ self.node_id, exec_time_ns, mem_size }) catch "";
+
             if (metric_payload.len > 0) {
                 _ = self.bus.publish("core.node.metrics", metric_payload, .BestEffort, self.node_id) catch {};
             }

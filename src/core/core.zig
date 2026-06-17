@@ -70,11 +70,11 @@ pub const Core = struct {
         try self.graph.registerNode(node_id, wasm_path, .wasm); // 仮名
 
         const meta = try self.pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &self.bus);
-        
+
         // 名前の更新（マニフェストから正確な名前を取得）
         try self.graph.registerNode(node_id, meta.manifest_parsed.value.name, .wasm);
-        
-        try self.bus.publish("core.node.registered", "{\"type\":\"wasm\"}", .Transient, 0); 
+
+        try self.bus.publish("core.node.registered", "{\"type\":\"wasm\"}", .Transient, 0);
 
         // on_init 呼び出し
         const wamr = @import("wasm_runtime.zig").wamr;

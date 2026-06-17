@@ -10,10 +10,10 @@ pub const Transport = struct {
     pub const VTable = struct {
         /// 指定されたトピック、ペイロード、QoSでメッセージを外部に送信する
         send: *const fn (ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: event_bus.QoS) anyerror!void,
-        
+
         /// トランスポートの名前を返す（デバッグ用）
         name: *const fn (ctx: *anyopaque) []const u8,
-        
+
         /// トランスポートをクリーンアップする
         deinit: *const fn (ctx: *anyopaque) void,
     };

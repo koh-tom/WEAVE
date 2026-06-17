@@ -43,7 +43,7 @@ pub const WsGateway = struct {
             s.deinit();
             self.server = null;
         }
-        
+
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.clients.items) |client| {
@@ -101,22 +101,19 @@ pub const WsGateway = struct {
         const magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         var combined: [128]u8 = undefined;
         const combined_str = try std.fmt.bufPrint(&combined, "{s}{s}", .{ key, magic });
-        
+
         var sha1_buf: [20]u8 = undefined;
         std.crypto.hash.Sha1.hash(combined_str, &sha1_buf, .{});
-        
+
         var accept_buf: [32]u8 = undefined;
         const accept_key = std.base64.standard.Encoder.encode(&accept_buf, &sha1_buf);
 
         // レスポンスの送信
         var response_buf: [1024]u8 = undefined;
-        const response = try std.fmt.bufPrint(&response_buf,
-            "HTTP/1.1 101 Switching Protocols\r\n" ++
+        const response = try std.fmt.bufPrint(&response_buf, "HTTP/1.1 101 Switching Protocols\r\n" ++
             "Upgrade: websocket\r\n" ++
             "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Accept: {s}\r\n\r\n",
-            .{accept_key}
-        );
+            "Sec-WebSocket-Accept: {s}\r\n\r\n", .{accept_key});
         try stream.writeAll(response);
     }
 
@@ -134,7 +131,7 @@ pub const WsGateway = struct {
     /// EventBusからのメッセージを受信し、全てのWSクライアントにブロードキャストする
     fn send(ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: event_bus.QoS) anyerror!void {
         const self: *WsGateway = @ptrCast(@alignCast(ctx));
-        
+
         const level: event_bus.IntrospectionLevel = @enumFromInt(self.bus.introspection_level.load(.monotonic));
         if (level == .off) return;
 
@@ -142,14 +139,8 @@ pub const WsGateway = struct {
         var json_buf: [4096]u8 = undefined;
         const json = switch (level) {
             .off => return,
-            .metadata => std.fmt.bufPrint(&json_buf, 
-                "{{\"topic\":\"{s}\",\"payload\":{{\"size\":{}}},\"qos\":{}}}",
-                .{ topic, payload.len, @intFromEnum(qos) }
-            ),
-            .contents => std.fmt.bufPrint(&json_buf, 
-                "{{\"topic\":\"{s}\",\"payload\":{s},\"qos\":{}}}",
-                .{ topic, payload, @intFromEnum(qos) }
-            ),
+            .metadata => std.fmt.bufPrint(&json_buf, "{{\"topic\":\"{s}\",\"payload\":{{\"size\":{}}},\"qos\":{}}}", .{ topic, payload.len, @intFromEnum(qos) }),
+            .contents => std.fmt.bufPrint(&json_buf, "{{\"topic\":\"{s}\",\"payload\":{s},\"qos\":{}}}", .{ topic, payload, @intFromEnum(qos) }),
         } catch |err| {
             // ペイロードが大きすぎる場合はエラーを返さずスキップ（ゲートウェイの安全のため）
             std.debug.print("WsGateway: Payload too large for gateway buffer: {any}\n", .{err});
@@ -178,7 +169,7 @@ pub const WsGateway = struct {
         _ = self;
         var header: [10]u8 = undefined;
         header[0] = 0x81; // FIN + Text Opcode
-        
+
         var header_len: usize = 2;
         if (data.len <= 125) {
             header[1] = @as(u8, @intCast(data.len));

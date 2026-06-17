@@ -9,16 +9,16 @@ pub const DashboardNode = struct {
     bus: *event_bus.EventBus,
     node_id: u32,
     port: u16,
-    
+
     listener: zap.HttpListener,
     thread: ?std.Thread = null,
-    
+
     // クライアント管理
     clients: std.AutoHashMap(zap.WebSockets.WsHandle, void),
     mutex: std.Thread.Mutex,
-    
+
     ws_settings: WsHandler.WebSocketSettings = undefined,
-    
+
     var instance: ?*DashboardNode = null;
 
     const SELF = @This();
@@ -72,7 +72,7 @@ pub const DashboardNode = struct {
     pub fn start(self: *SELF) !void {
         log.info("Dashboard: Starting server on port {d}...", .{self.port});
         try self.listener.listen();
-        
+
         self.thread = try std.Thread.spawn(.{}, struct {
             fn run() void {
                 zap.start(.{ .threads = 2, .workers = 0 });
@@ -103,9 +103,10 @@ pub const DashboardNode = struct {
     }
 
     fn onWebsocketMessage(context: ?*SELF, handle: zap.WebSockets.WsHandle, message: []const u8, is_text: bool) anyerror!void {
-        _ = handle; _ = is_text;
+        _ = handle;
+        _ = is_text;
         const self = context orelse return;
-        
+
         const parsed = std.json.parseFromSlice(struct {
             topic: []const u8,
             payload: std.json.Value,
@@ -122,18 +123,16 @@ pub const DashboardNode = struct {
     }
 
     fn onWebsocketClose(context: ?*SELF, uuid: isize) anyerror!void {
-        _ = context; _ = uuid;
+        _ = context;
+        _ = uuid;
     }
 
     fn onTraceMessage(context: ?*anyopaque, msg: *const event_bus.EventMessage) void {
         const self: *SELF = @ptrCast(@alignCast(context orelse return));
-        
+
         var buf: [8192]u8 = undefined;
         const payload = if (msg.payload.len > 0) msg.payload else "{}";
-        const json = std.fmt.bufPrint(&buf, 
-            "{{\"topic\":\"{s}\",\"payload\":{s},\"origin\":{d},\"ts\":{d}}}",
-            .{ msg.topic, payload, msg.source_node_id, msg.timestamp }
-        ) catch return;
+        const json = std.fmt.bufPrint(&buf, "{{\"topic\":\"{s}\",\"payload\":{s},\"origin\":{d},\"ts\":{d}}}", .{ msg.topic, payload, msg.source_node_id, msg.timestamp }) catch return;
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -145,5 +144,4 @@ pub const DashboardNode = struct {
             };
         }
     }
-
 };
