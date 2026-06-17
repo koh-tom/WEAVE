@@ -222,7 +222,7 @@ pub fn build(b: *std.Build) void {
     const install_bad = b.addInstallArtifact(bad_node, .{
         .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
     });
-    
+
     const wasm_step = b.step("wasm", "Build Wasm plugins");
     wasm_step.dependOn(&install_chat.step);
     wasm_step.dependOn(&install_bad.step);
