@@ -1,0 +1,9 @@
+# Lefthook configuration for WEAVE
+# Runs zig fmt on staged zig files on commit
+
+pre-commit:
+  commands:
+    zig-fmt:
+      glob: "*.zig"
+      run: zig fmt {staged_files}
+      stage_fixed: true

@@ -1,0 +1,12 @@
+{
+  "name": "weave",
+  "private": true,
+  "version": "0.1.0",
+  "description": "WEAVE: Streaming Event OS Core Daemon",
+  "scripts": {
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "lefthook": "^1.10.0"
+  }
+}
