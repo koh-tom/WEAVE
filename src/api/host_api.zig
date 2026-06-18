@@ -132,15 +132,26 @@ export fn os_api_log(
     }
 }
 
+pub threadlocal var current_message_timestamp: i64 = 0;
+
+export fn os_api_current_timestamp(
+    exec_env: wamr.wasm_exec_env_t,
+) i64 {
+    _ = exec_env;
+    return current_message_timestamp;
+}
+
 /// WAMRに登録するネイティブ関数のリスト
 /// シグネチャはWasm側から見た型（exec_envは含めない）
 ///   publish:   (topic_ptr: i32, topic_len: i32, payload_ptr: i32, payload_len: i32, qos: i32) -> i32 = "(iiiii)i"
 ///   subscribe: (topic_ptr: i32, topic_len: i32) -> i32                                             = "(ii)i"
 ///   log:       (level: i32, msg_ptr: i32, msg_len: i32) -> void                                      = "(iii)"
-pub fn getNativeSymbols() [3]wamr.NativeSymbol {
+///   current_timestamp: () -> i64                                                                   = "()I"
+pub fn getNativeSymbols() [4]wamr.NativeSymbol {
     return [_]wamr.NativeSymbol{
         .{ .symbol = "os_api_publish", .func_ptr = @ptrCast(@constCast(&os_api_publish)), .signature = "(iiiii)i", .attachment = null },
         .{ .symbol = "os_api_subscribe", .func_ptr = @ptrCast(@constCast(&os_api_subscribe)), .signature = "(ii)i", .attachment = null },
         .{ .symbol = "os_api_log", .func_ptr = @ptrCast(@constCast(&os_api_log)), .signature = "(iii)", .attachment = null },
+        .{ .symbol = "os_api_current_timestamp", .func_ptr = @ptrCast(@constCast(&os_api_current_timestamp)), .signature = "()I", .attachment = null },
     };
 }

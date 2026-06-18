@@ -174,6 +174,7 @@ pub const WasmSubscriber = struct {
 
         // on_message実行
         if (self.func_on_message) |func| {
+            @import("../api/host_api.zig").current_message_timestamp = msg.timestamp;
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
             if (!wamr.wasm_runtime_call_wasm(env, func, 4, &msg_argv)) {
                 var exception_msg: []const u8 = "unknown execution trap";

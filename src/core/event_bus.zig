@@ -523,6 +523,68 @@ pub const EventBus = struct {
         if (self.verbose) std.debug.print("Enqueuing event '{s}' (ID: {}, QoS: {any})\n", .{ topic, msg_id, qos });
     }
 
+    pub fn publishWithMessageTimestamp(
+        self: *EventBus,
+        topic: []const u8,
+        payload: []const u8,
+        qos: QoS,
+        source_node_id: u32,
+        timestamp: i64,
+    ) anyerror!void {
+        self.mutex.lock();
+        const msg_id = self.next_msg_id;
+        self.next_msg_id += 1;
+        const interned_topic = try self.getInternedTopic(topic);
+        self.mutex.unlock();
+
+        if (self.graph) |g| {
+            g.recordPublish(source_node_id, interned_topic) catch |err| {
+                std.debug.print("EventBus: Failed to record graph publish: {any}\n", .{err});
+            };
+        }
+
+        const msg = EventMessage{
+            .id = msg_id,
+            .topic = interned_topic,
+            .timestamp = timestamp,
+            .source_node_id = source_node_id,
+            .qos = qos,
+            .payload = try self.allocator.dupe(u8, payload),
+        };
+
+        // Transient QoS の場合は最新メッセージとして保存
+        if (qos == .Transient) {
+            self.mutex.lock();
+            const gop = try self.last_messages.getOrPut(interned_topic);
+            if (!gop.found_existing) {
+                gop.key_ptr.* = interned_topic;
+            } else {
+                gop.value_ptr.deinit(self.allocator);
+            }
+            gop.value_ptr.* = try msg.clone(self.allocator);
+            self.mutex.unlock();
+        }
+
+        var block = (qos == .Reliable);
+        const tid = self.dispatcher_thread_id.load(.monotonic);
+        if (tid != 0 and tid == @as(usize, @intCast(std.Thread.getCurrentId()))) {
+            // ディスパッチャスレッド自身によるPublishはデッドロック回避のためブロックしない
+            block = false;
+        }
+
+        self.queue.push(msg, block) catch |err| {
+            if (err == error.QueueFull) {
+                if (self.verbose) std.debug.print("QoS: drop event '{s}' due to full queue (Source: {})\n", .{ topic, source_node_id });
+                self.allocator.free(msg.payload);
+                return;
+            }
+            self.allocator.free(msg.payload);
+            return err;
+        };
+
+        if (self.verbose) std.debug.print("Enqueuing event '{s}' (ID: {}, QoS: {any})\n", .{ topic, msg_id, qos });
+    }
+
     pub fn dispatch(self: *EventBus, msg: *const EventMessage) void {
         _ = self.busy_count.fetchAdd(1, .acquire);
         defer _ = self.busy_count.fetchSub(1, .release);
