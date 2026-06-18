@@ -223,9 +223,27 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
     });
 
+    const kusa_node = b.addExecutable(.{
+        .name = "kusa_node",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("wasm-apps/kusa_node.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+        }),
+    });
+    kusa_node.root_module.addImport("plugin_sdk", sdk_module);
+    kusa_node.root_module.addImport("common", common_module);
+    kusa_node.rdynamic = true;
+    kusa_node.entry = .disabled;
+
+    const install_kusa = b.addInstallArtifact(kusa_node, .{
+        .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
+    });
+
     const wasm_step = b.step("wasm", "Build Wasm plugins");
     wasm_step.dependOn(&install_chat.step);
     wasm_step.dependOn(&install_bad.step);
+    wasm_step.dependOn(&install_kusa.step);
 
     // デフォルトの install ステップが Wasm ビルドにも依存するようにする
     b.getInstallStep().dependOn(wasm_step);
@@ -247,19 +265,31 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     run_unit_tests.step.dependOn(wasm_step);
 
+    const sdk_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("wasm-apps/plugin_sdk.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    sdk_tests.root_module.addImport("common", common_module);
+    const run_sdk_tests = b.addRunArtifact(sdk_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_sdk_tests.step);
 
     // --- Test All Step ---
     const test_all_step = b.step("test_all", "Run all tests (unit, EventBus, and stress tests)");
     test_all_step.dependOn(&run_unit_tests.step);
+    test_all_step.dependOn(&run_sdk_tests.step);
     test_all_step.dependOn(&run_bus_test.step);
     test_all_step.dependOn(&run_stress_cmd.step);
 
     // --- Clean Step ---
     const clean_step = b.step("clean", "Remove build artifacts and Wasm plugins");
     const clean_cmd = b.addSystemCommand(&[_][]const u8{
-        "rm", "-rf", "zig-cache", "zig-out", ".zig-cache", "wasm-apps/chat_node.wasm", "wasm-apps/bad_node.wasm", "build_err.log", "test_err.log", "src/bus_test_wrapper.zig", "src/stress_test_wrapper.zig",
+        "rm", "-rf", "zig-cache", "zig-out", ".zig-cache", "wasm-apps/chat_node.wasm", "wasm-apps/bad_node.wasm", "wasm-apps/kusa_node.wasm", "build_err.log", "test_err.log", "src/bus_test_wrapper.zig", "src/stress_test_wrapper.zig",
     });
     clean_step.dependOn(&clean_cmd.step);
 }

@@ -1,0 +1,12 @@
+{
+    "name": "kusa_node",
+    "version": "0.1.0",
+    "permissions": {
+        "publish": [
+            "ext.obs.scene.item_control"
+        ],
+        "subscribe": [
+            "ext.twitch.chat.message"
+        ]
+    }
+}
