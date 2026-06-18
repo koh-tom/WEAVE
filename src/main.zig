@@ -8,6 +8,8 @@ const LogTransport = @import("transport/log_transport.zig").LogTransport;
 const WsGateway = @import("transport/ws_gateway.zig").WsGateway;
 const NodeWsTransport = @import("transport/node_ws.zig").NodeWsTransport;
 const ObsEgressNode = @import("builtin/obs.zig").ObsEgressNode;
+const MockObsEgressNode = @import("builtin/mock_obs.zig").MockObsEgressNode;
+const MockTwitchAdapter = @import("builtin/mock_twitch.zig").MockTwitchAdapter;
 const DashboardNode = @import("builtin/dashboard.zig").DashboardNode;
 
 const Config = @import("common/config.zig").Config;
@@ -15,6 +17,12 @@ const Config = @import("common/config.zig").Config;
 fn runTwitch(t: *TwitchAdapter) void {
     t.run() catch |err| {
         log.err("TwitchAdapter Error: {any}", .{err});
+    };
+}
+
+fn runMockTwitch(t: *MockTwitchAdapter) void {
+    t.run() catch |err| {
+        log.err("MockTwitchAdapter Error: {any}", .{err});
     };
 }
 
@@ -150,15 +158,37 @@ pub fn main() !void {
     try core.graph.registerNode(1, "TwitchAdapter", .native);
     try core.bus.publish("core.node.registered", "{\"node_id\":1,\"name\":\"TwitchAdapter\",\"type\":\"native\"}", .Transient, 0);
 
-    var twitch = TwitchAdapter.init(allocator, &core.bus, 1, config.twitch_channel);
-    const twitch_thread = try std.Thread.spawn(.{}, runTwitch, .{&twitch});
-    defer twitch.deinit();
+    var maybe_twitch: ?TwitchAdapter = null;
+    var maybe_mock_twitch: ?MockTwitchAdapter = null;
+    var twitch_thread: std.Thread = undefined;
 
-    var obs = try ObsEgressNode.init(allocator, &core.bus, 2, config.obs_password);
-    defer obs.deinit();
-    obs.connect(config.obs_host, config.obs_port) catch |err| {
-        log.warn("Main: OBS connect failed (optional): {any}", .{err});
-    };
+    if (config.mock_twitch_scenario) |scenario_path| {
+        maybe_mock_twitch = try MockTwitchAdapter.init(allocator, &core.bus, 1, scenario_path);
+        twitch_thread = try std.Thread.spawn(.{}, runMockTwitch, .{&maybe_mock_twitch.?});
+    } else {
+        maybe_twitch = TwitchAdapter.init(allocator, &core.bus, 1, config.twitch_channel);
+        twitch_thread = try std.Thread.spawn(.{}, runTwitch, .{&maybe_twitch.?});
+    }
+    defer {
+        if (maybe_mock_twitch) |*t| t.deinit();
+        if (maybe_twitch) |*t| t.deinit();
+    }
+
+    var maybe_obs: ?*ObsEgressNode = null;
+    var maybe_mock_obs: ?*MockObsEgressNode = null;
+    if (config.use_mock_obs) {
+        maybe_mock_obs = try MockObsEgressNode.init(allocator, &core.bus, 2, config.obs_password, config.mock_obs_filepath);
+        try maybe_mock_obs.?.connect(config.obs_host, config.obs_port);
+    } else {
+        maybe_obs = try ObsEgressNode.init(allocator, &core.bus, 2, config.obs_password);
+        maybe_obs.?.connect(config.obs_host, config.obs_port) catch |err| {
+            log.warn("Main: OBS connect failed (optional): {any}", .{err});
+        };
+    }
+    defer {
+        if (maybe_mock_obs) |o| o.deinit();
+        if (maybe_obs) |o| o.deinit();
+    }
 
     // 4. Dashboard (zap)
     var dashboard = try DashboardNode.init(allocator, &core.bus, 100, config.dashboard_port);
@@ -189,15 +219,16 @@ pub fn main() !void {
 
     // 6. シャットダウンシーケンス (一斉に停止合図を送る)
     dashboard.stop();
-    obs.stop();
-    twitch.stop();
+    if (maybe_mock_obs) |o| o.stop();
+    if (maybe_obs) |o| o.stop();
+    if (maybe_mock_twitch) |*t| t.stop();
+    if (maybe_twitch) |*t| t.stop();
     ws_gateway.stop();
     node_ws.stop();
     core.bus.stop();
 
     // 7. 各スレッドの終了を待機・リソース解放
     dashboard.deinit();
-    obs.deinit();
 
     twitch_thread.join();
     ws_thread.join();
@@ -216,4 +247,5 @@ test {
     _ = @import("common/config.zig");
     _ = @import("tests/oom_test.zig");
     _ = @import("tests/mock_test.zig");
+    _ = @import("tests/kusa_test.zig");
 }
