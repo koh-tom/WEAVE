@@ -10,23 +10,33 @@ pub const QoS = common.QoS;
 extern fn os_api_publish(topic_ptr: [*]const u8, topic_len: u32, payload_ptr: [*]const u8, payload_len: u32, qos: u32) i32;
 extern fn os_api_subscribe(topic_ptr: [*]const u8, topic_len: u32) i32;
 extern fn os_api_log(level: i32, msg_ptr: [*]const u8, msg_len: u32) void;
+extern fn os_api_current_timestamp() i64;
 
 // --- バンプアロケータ ---
 // Wasm linear memory の末尾を管理するシンプルなアロケータ。
 // __heap_base はリンカが自動で設定する「ヒープ開始位置」。
 // ここから先を自由に使える。
 
-extern var __heap_base: u8;
+const builtin = @import("builtin");
+const is_wasm = builtin.cpu.arch == .wasm32;
+
+const heap_base_ptr = if (is_wasm) &struct {
+    extern var __heap_base: u8;
+}.__heap_base else null;
 
 var bump_offset: u32 = 0;
 
 fn getHeapBase() u32 {
-    return @intFromPtr(&__heap_base);
+    if (comptime !is_wasm) return 0;
+    return @intCast(@intFromPtr(heap_base_ptr));
 }
 
 /// Host側から呼び出されるメモリ確保関数。
 /// 4バイトアラインメントを保証する。
 export fn os_alloc(size: u32) u32 {
+    if (!is_wasm) {
+        return 0;
+    }
     // 4バイトアラインメント
     const aligned_size = (size + 3) & ~@as(u32, 3);
     const base = getHeapBase();
@@ -68,7 +78,7 @@ export fn os_api_get_heap_usage() u32 {
 // --- Allocator Interface ---
 
 /// SDKが使用するアロケータ（バンプアロケータのラッパー）
-pub const allocator = std.mem.Allocator{
+pub const allocator = if (is_wasm) std.mem.Allocator{
     .ptr = undefined,
     .vtable = &.{
         .alloc = allocFn,
@@ -76,7 +86,7 @@ pub const allocator = std.mem.Allocator{
         .remap = remapFn,
         .free = freeFn,
     },
-};
+} else std.heap.page_allocator;
 
 fn allocFn(_: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
     _ = ptr_align;
@@ -116,6 +126,12 @@ pub fn log(level: i32, msg: []const u8) void {
     _ = os_api_log(level, msg.ptr, msg.len);
 }
 
+/// 現在のメッセージタイムスタンプを取得する
+pub fn getCurrentTimestamp() i64 {
+    if (comptime !is_wasm) return 0;
+    return os_api_current_timestamp();
+}
+
 /// 指定したトピックにイベントを発行する
 pub fn publish(topic: []const u8, payload: []const u8, qos: QoS) Result {
     const res = os_api_publish(topic.ptr, @intCast(topic.len), payload.ptr, @intCast(payload.len), @intFromEnum(qos));
@@ -136,9 +152,9 @@ pub fn parseJson(comptime T: type, payload: []const u8) !std.json.Parsed(T) {
 
 /// 構造体をJSONシリアライズしてパブリッシュする
 pub fn publishJson(topic: []const u8, value: anytype, qos: QoS) !Result {
-    var list = std.ArrayList(u8).init(allocator);
+    var list = std.array_list.Managed(u8).init(allocator);
     defer list.deinit();
-    try std.json.stringify(value, .{}, list.writer());
+    try list.writer().print("{f}", .{std.json.fmt(value, .{})});
     return publish(topic, list.items, qos);
 }
 
@@ -147,4 +163,52 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     _ = ret_addr;
     log(3, msg);
     @trap();
+}
+
+pub const WindowCounter = struct {
+    window_ms: u32,
+    timestamps: [128]i64 = undefined,
+    head: u8 = 0,
+    count_val: u8 = 0,
+
+    pub fn record(self: *WindowCounter, now: i64) void {
+        self.timestamps[self.head] = now;
+        self.head = (self.head + 1) % 128;
+        if (self.count_val < 128) {
+            self.count_val += 1;
+        }
+    }
+
+    pub fn count(self: *WindowCounter, now: i64) u8 {
+        var valid_count: u8 = 0;
+        var i: u8 = 0;
+        const threshold = now - @as(i64, self.window_ms);
+        while (i < self.count_val) : (i += 1) {
+            const idx = (self.head + 128 - self.count_val + i) % 128;
+            const ts = self.timestamps[idx];
+            if (ts >= threshold and ts <= now) {
+                valid_count += 1;
+            }
+        }
+        return valid_count;
+    }
+};
+
+test "WindowCounter: boundary" {
+    var wc = WindowCounter{ .window_ms = 3000 };
+    wc.record(0);
+    wc.record(2999);
+    wc.record(3001);
+    try std.testing.expectEqual(@as(u8, 2), wc.count(3001));
+}
+
+test "WindowCounter: wrap around" {
+    var wc = WindowCounter{ .window_ms = 10 };
+    var i: i64 = 0;
+    while (i < 130) : (i += 1) {
+        wc.record(i);
+    }
+    // Latest timestamps recorded are 0 to 129.
+    // The timestamps inside the 10ms window of 129 should be: 119 to 129 (11 items).
+    try std.testing.expectEqual(@as(u8, 11), wc.count(129));
 }
