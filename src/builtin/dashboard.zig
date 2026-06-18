@@ -119,6 +119,22 @@ pub const DashboardNode = struct {
                 defer self.allocator.free(json);
                 try self.bus.publish("core.system.graph.full", json, .Transient, self.node_id);
             }
+        } else {
+            // General publish to EventBus
+            var payload_str: []const u8 = undefined;
+            var allocated = false;
+            if (parsed.value.payload == .string) {
+                payload_str = parsed.value.payload.string;
+            } else {
+                var out_buf = std.ArrayList(u8){};
+                defer out_buf.deinit(self.allocator);
+                try out_buf.writer(self.allocator).print("{f}", .{std.json.fmt(parsed.value.payload, .{})});
+                payload_str = try self.allocator.dupe(u8, out_buf.items);
+                allocated = true;
+            }
+            defer if (allocated) self.allocator.free(payload_str);
+
+            try self.bus.publish(parsed.value.topic, payload_str, .Transient, self.node_id);
         }
     }
 

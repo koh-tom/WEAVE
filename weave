@@ -32,6 +32,49 @@ case "$1" in
         echo "Running EventBus logic test..."
         zig build bus_test
         ;;
+    "topic")
+        if [ "$2" = "pub" ]; then
+            topic="$3"
+            payload="$4"
+            if [ -z "$topic" ] || [ -z "$payload" ]; then
+                echo "Usage: weave topic pub <topic> <payload>"
+                exit 1
+            fi
+            port=3030
+            if [ -f "weave.json" ]; then
+                config_port=$(grep -o '"dashboard_port"[[:space:]]*:[[:space:]]*[0-9]\+' weave.json | grep -o '[0-9]\+')
+                if [ ! -z "$config_port" ]; then
+                    port=$config_port
+                fi
+            fi
+            /home/koh/.bun/bin/bun -e "
+                const topic = process.argv[1];
+                const rawPayload = process.argv[2];
+                const port = process.argv[3];
+                let payload;
+                try {
+                    payload = JSON.parse(rawPayload);
+                } catch (e) {
+                    payload = rawPayload;
+                }
+                const ws = new WebSocket('ws://localhost:' + port + '/ws');
+                ws.onopen = () => {
+                    ws.send(JSON.stringify({ topic, payload }));
+                    setTimeout(() => {
+                        ws.close();
+                        process.exit(0);
+                    }, 150);
+                };
+                ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                    process.exit(1);
+                };
+            " "$topic" "$payload" "$port"
+        else
+            echo "Usage: weave topic pub <topic> <payload>"
+            exit 1
+        fi
+        ;;
     *)
         echo "Usage: weave <command>"
         echo ""
@@ -42,5 +85,6 @@ case "$1" in
         echo "  monitor     Monitor all events via WsGateway (requires wscat)"
         echo "  stress      Run memory stress test"
         echo "  bus-test    Run internal EventBus tests"
+        echo "  topic pub   Publish an event to the EventBus"
         ;;
 esac

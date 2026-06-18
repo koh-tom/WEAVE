@@ -26,6 +26,9 @@ pub const Config = struct {
     weave_env: WeaveEnv = .development,
     wasm_stack_size: u32 = 128 * 1024,
     wasm_heap_size: u32 = 64 * 1024,
+    mock_obs_filepath: []const u8 = "mock_obs_received.jsonl",
+    use_mock_obs: bool = true,
+    mock_twitch_scenario: ?[]const u8 = null,
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
@@ -34,6 +37,8 @@ pub const Config = struct {
             .weave_env = .development,
             .wasm_stack_size = 128 * 1024,
             .wasm_heap_size = 64 * 1024,
+            .use_mock_obs = true,
+            .mock_twitch_scenario = null,
         };
 
         errdefer self.deinit(allocator);
@@ -42,6 +47,7 @@ pub const Config = struct {
         self.twitch_channel = try allocator.dupe(u8, self.twitch_channel);
         self.obs_host = try allocator.dupe(u8, self.obs_host);
         self.obs_password = try allocator.dupe(u8, self.obs_password);
+        self.mock_obs_filepath = try allocator.dupe(u8, self.mock_obs_filepath);
 
         // 1. 設定ファイルの読み込み (weave.json) - 任意
         if (std.fs.cwd().openFile("weave.json", .{})) |file| {
@@ -67,6 +73,10 @@ pub const Config = struct {
                     allocator.free(self.twitch_channel);
                     self.twitch_channel = try allocator.dupe(u8, v.string);
                 }
+                if (obj.get("mock_twitch_scenario")) |v| {
+                    if (self.mock_twitch_scenario) |s| allocator.free(s);
+                    self.mock_twitch_scenario = try allocator.dupe(u8, v.string);
+                }
                 if (obj.get("obs_host")) |v| {
                     allocator.free(self.obs_host);
                     self.obs_host = try allocator.dupe(u8, v.string);
@@ -76,6 +86,11 @@ pub const Config = struct {
                     allocator.free(self.obs_password);
                     self.obs_password = try allocator.dupe(u8, v.string);
                 }
+                if (obj.get("mock_obs_filepath")) |v| {
+                    allocator.free(self.mock_obs_filepath);
+                    self.mock_obs_filepath = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("use_mock_obs")) |v| self.use_mock_obs = v.bool;
                 if (obj.get("log_level")) |v| self.log_level = LogLevel.fromString(v.string);
                 if (obj.get("graph_full_interval_secs")) |v| self.graph_full_interval_secs = @intCast(v.integer);
                 if (obj.get("node_ws_token")) |v| self.node_ws_token = try allocator.dupe(u8, v.string);
@@ -159,6 +174,11 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 allocator.free(self.twitch_channel);
                 self.twitch_channel = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--mock-twitch")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                if (self.mock_twitch_scenario) |s| allocator.free(s);
+                self.mock_twitch_scenario = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--obs-host")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -173,6 +193,15 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 allocator.free(self.obs_password);
                 self.obs_password = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--mock-obs-file")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.mock_obs_filepath);
+                self.mock_obs_filepath = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--mock-obs")) {
+                self.use_mock_obs = true;
+            } else if (std.mem.eql(u8, arg, "--real-obs")) {
+                self.use_mock_obs = false;
             } else if (std.mem.eql(u8, arg, "--log-level")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -213,6 +242,8 @@ pub const Config = struct {
         allocator.free(self.twitch_channel);
         allocator.free(self.obs_host);
         allocator.free(self.obs_password);
+        allocator.free(self.mock_obs_filepath);
+        if (self.mock_twitch_scenario) |s| allocator.free(s);
         if (self.node_ws_token) |t| allocator.free(t);
         for (self.plugins.items) |p| {
             allocator.free(p);
@@ -229,9 +260,13 @@ fn printHelp() void {
         \\  --node-port <port>   Port for Node WebSocket Transport (default: 8081)
         \\  --dash-port <port>   Port for Dashboard HTTP Server (default: 3030)
         \\  --twitch <channel>   Twitch channel to join (default: SqLA)
+        \\  --mock-twitch <path> Path to mock Twitch jsonl scenario (replaces real Twitch IRC)
         \\  --obs-host <host>    OBS WebSocket host (default: 127.0.0.1)
         \\  --obs-port <port>    OBS WebSocket port (default: 4455)
         \\  --obs-pass <pass>    OBS WebSocket password (default: obs-password)
+        \\  --mock-obs-file <path> Path to mock OBS jsonl output (default: mock_obs_received.jsonl)
+        \\  --mock-obs            Use mock OBS node instead of real WebSocket client (default)
+        \\  --real-obs            Use real OBS WebSocket client
         \\  --graph-interval <s> Full topology publish interval in seconds (default: 60)
         \\  --help               Show this help
         \\
