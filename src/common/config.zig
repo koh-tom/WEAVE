@@ -27,7 +27,7 @@ pub const Config = struct {
     wasm_stack_size: u32 = 128 * 1024,
     wasm_heap_size: u32 = 64 * 1024,
     mock_obs_filepath: []const u8 = "mock_obs_received.jsonl",
-    use_mock_obs: bool = true,
+    mock_obs: bool = false,
     mock_twitch_scenario: ?[]const u8 = null,
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
@@ -37,7 +37,7 @@ pub const Config = struct {
             .weave_env = .development,
             .wasm_stack_size = 128 * 1024,
             .wasm_heap_size = 64 * 1024,
-            .use_mock_obs = true,
+            .mock_obs = false,
             .mock_twitch_scenario = null,
         };
 
@@ -90,7 +90,7 @@ pub const Config = struct {
                     allocator.free(self.mock_obs_filepath);
                     self.mock_obs_filepath = try allocator.dupe(u8, v.string);
                 }
-                if (obj.get("use_mock_obs")) |v| self.use_mock_obs = v.bool;
+                if (obj.get("mock_obs")) |v| self.mock_obs = v.bool;
                 if (obj.get("log_level")) |v| self.log_level = LogLevel.fromString(v.string);
                 if (obj.get("graph_full_interval_secs")) |v| self.graph_full_interval_secs = @intCast(v.integer);
                 if (obj.get("node_ws_token")) |v| self.node_ws_token = try allocator.dupe(u8, v.string);
@@ -199,9 +199,9 @@ pub const Config = struct {
                 allocator.free(self.mock_obs_filepath);
                 self.mock_obs_filepath = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--mock-obs")) {
-                self.use_mock_obs = true;
+                self.mock_obs = true;
             } else if (std.mem.eql(u8, arg, "--real-obs")) {
-                self.use_mock_obs = false;
+                self.mock_obs = false;
             } else if (std.mem.eql(u8, arg, "--log-level")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -265,8 +265,8 @@ fn printHelp() void {
         \\  --obs-port <port>    OBS WebSocket port (default: 4455)
         \\  --obs-pass <pass>    OBS WebSocket password (default: obs-password)
         \\  --mock-obs-file <path> Path to mock OBS jsonl output (default: mock_obs_received.jsonl)
-        \\  --mock-obs            Use mock OBS node instead of real WebSocket client (default)
-        \\  --real-obs            Use real OBS WebSocket client
+        \\  --mock-obs            Use mock OBS node instead of real WebSocket client
+        \\  --real-obs            Use real OBS WebSocket client (default)
         \\  --graph-interval <s> Full topology publish interval in seconds (default: 60)
         \\  --help               Show this help
         \\

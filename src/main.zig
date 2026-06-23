@@ -176,7 +176,7 @@ pub fn main() !void {
 
     var maybe_obs: ?*ObsEgressNode = null;
     var maybe_mock_obs: ?*MockObsEgressNode = null;
-    if (config.use_mock_obs) {
+    if (config.mock_obs) {
         maybe_mock_obs = try MockObsEgressNode.init(allocator, &core.bus, 2, config.obs_password, config.mock_obs_filepath);
         try maybe_mock_obs.?.connect(config.obs_host, config.obs_port);
     } else {
