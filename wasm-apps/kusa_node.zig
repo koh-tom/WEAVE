@@ -8,7 +8,7 @@ const TwitchMessage = struct {
 
 var wc = sdk.WindowCounter{ .window_ms = 3000 };
 var visible: bool = false;
-var last_trigger_ts: i64 = 0;
+var last_trigger_ts: i64 = -15000;
 
 export fn on_init() i32 {
     sdk.log(1, "[kusa_node] Initializing kusa_node Wasm plugin...");
@@ -64,7 +64,7 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
             wc.record(now);
             const count = wc.count(now);
 
-            if (count >= 10 and !visible) {
+            if (count >= 10 and !visible and now >= last_trigger_ts + 15000) {
                 const res = sdk.publishJson("ext.obs.scene.item_control", .{
                     .sceneName = "Overlay",
                     .itemName = "KusaEffect",
