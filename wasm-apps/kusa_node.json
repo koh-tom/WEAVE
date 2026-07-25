@@ -3,7 +3,7 @@
     "version": "0.1.0",
     "permissions": {
         "publish": [
-            "ext.obs.scene.item_control"
+            "core.obs.request.SetSceneItemEnabled"
         ],
         "subscribe": [
             "ext.twitch.chat.message"

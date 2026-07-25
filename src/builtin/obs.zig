@@ -146,6 +146,14 @@ pub const ObsEgressNode = struct {
                         };
                     } else if (op_int == 2) { // Identified
                         log.info("ObsEgress: Successfully identified with OBS", .{});
+                        // 初期状態で Overlay シーンのソースを非表示にして待機状態にする
+                        var init_id: usize = 1;
+                        while (init_id <= 5) : (init_id += 1) {
+                            var init_buf: [256]u8 = undefined;
+                            if (std.fmt.bufPrint(&init_buf, "{{\"op\":6,\"d\":{{\"requestType\":\"SetSceneItemEnabled\",\"requestId\":\"weave-init-{d}\",\"requestData\":{{\"sceneName\":\"Overlay\",\"sceneItemId\":{d},\"sceneItemEnabled\":false}}}}}}", .{ init_id, init_id })) |json| {
+                                self.sendFrame(json) catch {};
+                            } else |_| {}
+                        }
                     } else if (op_int == 5) { // Event
                         if (parsed.value.object.get("d")) |d| {
                             if (d.object.get("eventType")) |event_type| {
@@ -232,34 +240,81 @@ pub const ObsEgressNode = struct {
     }
 
     fn sendFrame(self: *ObsEgressNode, data: []const u8) !void {
-        var head: [10]u8 = undefined;
+        var head: [14]u8 = undefined; // max: 1 opcode + 1 len + 8 ext_len + 4 mask_key
         head[0] = 0x81; // Text, Final
         var h_len: usize = 2;
         if (data.len <= 125) {
-            head[1] = @intCast(data.len);
+            head[1] = @as(u8, @intCast(data.len)) | 0x80; // MASK bit set
         } else if (data.len <= 65535) {
-            head[1] = 126;
+            head[1] = 126 | 0x80; // MASK bit set
             std.mem.writeInt(u16, head[2..4], @intCast(data.len), .big);
             h_len = 4;
         } else {
-            head[1] = 127;
+            head[1] = 127 | 0x80; // MASK bit set
             std.mem.writeInt(u64, head[2..10], data.len, .big);
             h_len = 10;
         }
+
+        // RFC 6455 §5.3: Client MUST mask all frames sent to the server
+        const mask_key = [4]u8{ 0x37, 0xFA, 0x21, 0x3D };
+        head[h_len] = mask_key[0];
+        head[h_len + 1] = mask_key[1];
+        head[h_len + 2] = mask_key[2];
+        head[h_len + 3] = mask_key[3];
+        h_len += 4;
+
+        // XOR payload with mask key
+        const masked = self.allocator.alloc(u8, data.len) catch return error.OutOfMemory;
+        defer self.allocator.free(masked);
+        for (data, 0..) |byte, i| {
+            masked[i] = byte ^ mask_key[i % 4];
+        }
+
         self.mutex.lock();
         defer self.mutex.unlock();
         const s = self.stream orelse return error.NotConnected;
         try s.writeAll(head[0..h_len]);
-        try s.writeAll(data);
+        try s.writeAll(masked);
     }
 
     fn onMessage(context: ?*anyopaque, msg: *const event_bus.EventMessage) void {
         const self: *ObsEgressNode = @ptrCast(@alignCast(context));
 
-        // そのまま転送（payloadは既にOBS v5のリクエストJSONであることを期待）
-        self.sendFrame(msg.payload) catch |err| {
-            std.debug.print("ObsEgress: Failed to send frame to OBS: {any}\n", .{err});
-        };
+        if (std.mem.startsWith(u8, msg.topic, "core.obs.request.")) {
+            const req_type = msg.topic["core.obs.request.".len..];
+            if (std.mem.indexOf(u8, msg.payload, "\"op\"") != null) {
+                self.sendFrame(msg.payload) catch |err| {
+                    std.debug.print("ObsEgress: Failed to send raw frame to OBS: {any}\n", .{err});
+                };
+                return;
+            }
+
+            if (std.mem.eql(u8, req_type, "SetSceneItemEnabled")) {
+                const is_enabled = std.mem.indexOf(u8, msg.payload, "\"sceneItemEnabled\":true") != null or
+                    std.mem.indexOf(u8, msg.payload, "\"sceneItemEnabled\": true") != null;
+                const enabled_str = if (is_enabled) "true" else "false";
+
+                var item_id: usize = 1;
+                while (item_id <= 5) : (item_id += 1) {
+                    var buf: [512]u8 = undefined;
+                    if (std.fmt.bufPrint(&buf, "{{\"op\":6,\"d\":{{\"requestType\":\"SetSceneItemEnabled\",\"requestId\":\"weave-{d}-{d}\",\"requestData\":{{\"sceneName\":\"Overlay\",\"sceneItemId\":{d},\"sceneItemEnabled\":{s}}}}}}}", .{ msg.id, item_id, item_id, enabled_str })) |req_json| {
+                        self.sendFrame(req_json) catch {};
+                    } else |_| {}
+                }
+                return;
+            }
+
+            var buf: [4096]u8 = undefined;
+            const req_json = std.fmt.bufPrint(&buf, "{{\"op\":6,\"d\":{{\"requestType\":\"{s}\",\"requestId\":\"weave-{d}\",\"requestData\":{s}}}}}", .{ req_type, msg.id, msg.payload }) catch return;
+
+            self.sendFrame(req_json) catch |err| {
+                std.debug.print("ObsEgress: Failed to send wrapped frame to OBS: {any}\n", .{err});
+            };
+        } else {
+            self.sendFrame(msg.payload) catch |err| {
+                std.debug.print("ObsEgress: Failed to send frame to OBS: {any}\n", .{err});
+            };
+        }
     }
 
     fn onSubscribeAck(ctx: *anyopaque, topic: []const u8) void {

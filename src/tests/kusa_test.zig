@@ -38,6 +38,7 @@ test "WasmSubscriber: kusa_node logic test" {
     const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
 
     const meta = try pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &bus);
+    try pm.applyManifestSubscriptions(module_inst, &bus);
 
     const ObsContext = struct {
         visible_events: std.array_list.Managed(bool),
@@ -54,20 +55,20 @@ test "WasmSubscriber: kusa_node logic test" {
             const context = @as(*ObsContext, @ptrCast(@alignCast(ctx)));
             var parsed = std.json.parseFromSlice(struct {
                 sceneName: []const u8,
-                itemName: []const u8,
-                visible: bool,
+                sceneItemId: i64,
+                sceneItemEnabled: bool,
             }, std.testing.allocator, msg.payload, .{}) catch return;
             defer parsed.deinit();
 
-            if (std.mem.eql(u8, parsed.value.sceneName, "Overlay") and std.mem.eql(u8, parsed.value.itemName, "KusaEffect")) {
-                context.visible_events.append(parsed.value.visible) catch {};
+            if (std.mem.eql(u8, parsed.value.sceneName, "Overlay") and parsed.value.sceneItemId == 1) {
+                context.visible_events.append(parsed.value.sceneItemEnabled) catch {};
             }
         }
     };
 
     var obs_ctx = ObsContext.init(allocator);
     defer obs_ctx.deinit();
-    try bus.subscribe("ext.obs.scene.item_control", 99, S.cb, &obs_ctx);
+    try bus.subscribe("core.obs.request.SetSceneItemEnabled", 99, S.cb, &obs_ctx);
 
     const thread = try std.Thread.spawn(.{}, event_bus.EventBus.runDispatcher, .{&bus});
 

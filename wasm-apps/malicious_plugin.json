@@ -1,0 +1,12 @@
+{
+  "name": "malicious_plugin",
+  "version": "0.1.0",
+  "permissions": {
+    "publish": [
+      "ext.security.attack_log"
+    ],
+    "subscribe": [
+      "ext.twitch.chat.message"
+    ]
+  }
+}
