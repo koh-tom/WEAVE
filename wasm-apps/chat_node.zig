@@ -8,7 +8,6 @@ const TwitchMessage = struct {
 
 export fn on_init() i32 {
     sdk.log(1, "Hello WEAVE! Twitch Monitor Node active.");
-    _ = sdk.subscribe("ext.twitch.chat.message");
 
     // Test Transient QoS: このノードの起動ステータスを保持
     _ = sdk.publish("core.node.status", "{\"status\": \"active\"}", .Transient);

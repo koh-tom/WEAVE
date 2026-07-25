@@ -12,7 +12,6 @@ var last_trigger_ts: i64 = -15000;
 
 export fn on_init() i32 {
     sdk.log(1, "[kusa_node] Initializing kusa_node Wasm plugin...");
-    _ = sdk.subscribe("ext.twitch.chat.message");
     return 0;
 }
 
@@ -43,10 +42,10 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
 
         // 10 seconds auto-hide logic
         if (visible and now >= last_trigger_ts + 10000) {
-            const res = sdk.publishJson("ext.obs.scene.item_control", .{
+            const res = sdk.publishJson("core.obs.request.SetSceneItemEnabled", .{
                 .sceneName = "Overlay",
-                .itemName = "KusaEffect",
-                .visible = false,
+                .sceneItemId = 1,
+                .sceneItemEnabled = false,
             }, .BestEffort) catch |err| {
                 var err_buf: [128]u8 = undefined;
                 const err_msg = std.fmt.bufPrint(&err_buf, "[kusa_node] Error publishing hide request: {any}", .{err}) catch "[kusa_node] Error publishing hide request";
@@ -65,10 +64,10 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
             const count = wc.count(now);
 
             if (count >= 10 and !visible and now >= last_trigger_ts + 15000) {
-                const res = sdk.publishJson("ext.obs.scene.item_control", .{
+                const res = sdk.publishJson("core.obs.request.SetSceneItemEnabled", .{
                     .sceneName = "Overlay",
-                    .itemName = "KusaEffect",
-                    .visible = true,
+                    .sceneItemId = 1,
+                    .sceneItemEnabled = true,
                 }, .BestEffort) catch |err| {
                     var err_buf: [128]u8 = undefined;
                     const err_msg = std.fmt.bufPrint(&err_buf, "[kusa_node] Error publishing trigger request: {any}", .{err}) catch "[kusa_node] Error publishing trigger request";

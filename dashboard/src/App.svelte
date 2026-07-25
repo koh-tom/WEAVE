@@ -5,6 +5,8 @@
   import MetricCard from './lib/components/MetricCard.svelte';
   import EventLog from './lib/components/EventLog.svelte';
   import NodeGraph from './lib/components/NodeGraph.svelte';
+  import GrassOverlay from './lib/components/GrassOverlay.svelte';
+  import ChatSimulator from './lib/components/ChatSimulator.svelte';
 
   // タブ管理の状態
   let activeTab: 'stream' | 'topology' = 'stream';
@@ -16,46 +18,49 @@
 
 <main class="flex h-screen bg-white text-slate-800 font-sans overflow-hidden">
   <!-- Sidebar -->
-  <aside class="w-64 border-r border-slate-200 flex flex-col bg-slate-50 shrink-0">
+  <aside class="w-72 border-r border-slate-200 flex flex-col bg-slate-50 shrink-0">
     <!-- Header -->
     <div class="p-4 border-b border-slate-200">
       <h1 class="font-bold text-xl tracking-tight text-[#0A1C56]">WEAVE</h1>
       <div class="text-xs text-slate-800 mt-1 uppercase font-semibold tracking-wider">コア・ダッシュボード</div>
     </div>
-    
-    <div class="p-4 flex-1 flex flex-col gap-6 overflow-y-auto">
+
+    <div class="p-4 flex-1 flex flex-col gap-5 overflow-y-auto">
       <!-- Status -->
       <div>
         <div class="text-[10px] font-bold text-slate-800 uppercase tracking-widest mb-2">ステータス</div>
         <div class="flex items-center gap-2 text-sm text-[#0A1C56] font-bold">
-          <div class="w-2 h-2 bg-[#0A1C56] rounded-full"></div>
+          <div class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
           ゲートウェイ接続中
         </div>
       </div>
-      
+
+      <!-- Live Chat Simulator -->
+      <ChatSimulator />
+
       <!-- Metrics -->
       <div class="flex flex-col gap-2">
         <div class="text-[10px] font-bold text-slate-800 uppercase tracking-widest mb-1">メトリクス</div>
         <MetricCard label="処理速度" unit="EPS" />
-        
-        <div class="border border-slate-200 bg-white p-3 flex flex-col gap-1 shadow-sm">
-            <div class="text-[10px] font-bold text-slate-800 uppercase">累計イベント数</div>
-            <div class="text-xl font-mono text-[#0A1C56] font-bold">{$metrics.totalEvents.toLocaleString()}</div>
+
+        <div class="border border-slate-200 bg-white p-3 flex flex-col gap-1 shadow-sm rounded">
+          <div class="text-[10px] font-bold text-slate-800 uppercase">累計イベント数</div>
+          <div class="text-xl font-mono text-[#0A1C56] font-bold">{$metrics.totalEvents.toLocaleString()}</div>
         </div>
       </div>
-      
+
       <!-- Navigation -->
       <div>
         <div class="text-[10px] font-bold text-slate-800 uppercase tracking-widest mb-2">メニュー</div>
         <nav class="flex flex-col gap-1 text-sm">
-          <button 
-            class="text-left px-3 py-2 rounded font-medium transition-all {activeTab === 'stream' ? 'bg-[#0A1C56] text-white shadow-sm' : 'text-slate-800 hover:bg-slate-200'}"
+          <button
+            class="text-left px-3 py-2 rounded font-medium transition-all cursor-pointer {activeTab === 'stream' ? 'bg-[#0A1C56] text-white shadow-sm' : 'text-slate-800 hover:bg-slate-200'}"
             onclick={() => activeTab = 'stream'}
           >
             イベントストリーム
           </button>
-          <button 
-            class="text-left px-3 py-2 rounded font-medium transition-all {activeTab === 'topology' ? 'bg-[#0A1C56] text-white shadow-sm' : 'text-slate-800 hover:bg-slate-200'}"
+          <button
+            class="text-left px-3 py-2 rounded font-medium transition-all cursor-pointer {activeTab === 'topology' ? 'bg-[#0A1C56] text-white shadow-sm' : 'text-slate-800 hover:bg-slate-200'}"
             onclick={() => activeTab = 'topology'}
           >
             システムトポロジー
@@ -75,13 +80,19 @@
         {activeTab === 'stream' ? 'デバッグモード' : 'リアルタイムグラフ'}
       </div>
     </header>
-    
-    <div class="flex-1 p-4 overflow-hidden flex flex-col bg-slate-50/50">
-      {#if activeTab === 'stream'}
-        <EventLog />
-      {:else}
-        <NodeGraph />
-      {/if}
+
+    <div class="flex-1 p-4 overflow-hidden flex flex-col gap-4 bg-slate-50/50">
+      <!-- 仮想 OBS プレビュー領域 (常に上部に配置) -->
+      <GrassOverlay />
+
+      <!-- メインビュー (ストリームまたはトポロジー) -->
+      <div class="flex-1 flex flex-col min-h-0">
+        {#if activeTab === 'stream'}
+          <EventLog />
+        {:else}
+          <NodeGraph />
+        {/if}
+      </div>
     </div>
   </section>
 </main>

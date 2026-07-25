@@ -154,6 +154,20 @@ pub fn main() !void {
     const node_ws_thread = try std.Thread.spawn(.{}, runNodeWs, .{node_ws});
     const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{ &core, &config });
 
+    // 4. Dashboard (zap)
+    var dashboard = try DashboardNode.init(allocator, &core.bus, 10, config.dashboard_port);
+    try dashboard.start();
+
+    // 5. Wasmプラグイン
+    var symbols = host_api.getNativeSymbols();
+    try core.runtime.registerNatives("env", &symbols);
+
+    for (config.plugins.items) |path| {
+        core.loadPlugin(path) catch |err| {
+            log.err("Failed to load plugin '{s}': {any}", .{ path, err });
+        };
+    }
+
     // 3. ネイティブノード
     try core.graph.registerNode(1, "TwitchAdapter", .native);
     try core.bus.publish("core.node.registered", "{\"node_id\":1,\"name\":\"TwitchAdapter\",\"type\":\"native\"}", .Transient, 0);
@@ -188,20 +202,6 @@ pub fn main() !void {
     defer {
         if (maybe_mock_obs) |o| o.deinit();
         if (maybe_obs) |o| o.deinit();
-    }
-
-    // 4. Dashboard (zap)
-    var dashboard = try DashboardNode.init(allocator, &core.bus, 100, config.dashboard_port);
-    try dashboard.start();
-
-    // 5. Wasmプラグイン
-    var symbols = host_api.getNativeSymbols();
-    try core.runtime.registerNatives("env", &symbols);
-
-    for (config.plugins.items) |path| {
-        core.loadPlugin(path) catch |err| {
-            log.err("Failed to load plugin '{s}': {any}", .{ path, err });
-        };
     }
 
     log.info("Status: Running... (Press Ctrl+C to stop)", .{});
