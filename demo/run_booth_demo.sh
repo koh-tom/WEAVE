@@ -57,11 +57,12 @@ echo "[2/3] 展示構成:"
 echo " 🟢 WEAVE Core Daemon (Host)"
 echo " 🟢 Wasm Guest Plugin: kusa_node.wasm"
 echo " 🟢 Real OBS WebSocket: ${OBS_HOST}:${OBS_PORT}"
-echo " 🟢 Mock Twitch Chat Stream: 連続ループ再生 (demo/scenarios/kusa.jsonl)"
+echo " 🟣 Twitch: 無効化 (button-only mode)"
 echo " 🌐 Dashboard UI: http://localhost:3030"
 echo "--------------------------------------------------------"
 echo ""
-echo "🚀 実OBS接続モードでループデモを開始します..."
+echo "🚀 実OBS接続モードで起動します..."
+echo "   Dashboard 左サイドバーの「🌱 草ラッシュ (10連発)」ボタンで発火してください。"
 echo "   (Ctrl+C でいつでも停止できます)"
 echo ""
 
@@ -70,5 +71,5 @@ echo ""
   --obs-host "${OBS_HOST}" \
   --obs-port "${OBS_PORT}" \
   ${OBS_PASS_OPT} \
-  --mock-twitch demo/scenarios/kusa.jsonl \
+  --no-twitch \
   wasm-apps/kusa_node.wasm

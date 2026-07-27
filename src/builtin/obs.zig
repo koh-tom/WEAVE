@@ -146,13 +146,25 @@ pub const ObsEgressNode = struct {
                         };
                     } else if (op_int == 2) { // Identified
                         log.info("ObsEgress: Successfully identified with OBS", .{});
-                        // 初期状態で Overlay シーンのソースを非表示にして待機状態にする
-                        var init_id: usize = 1;
-                        while (init_id <= 5) : (init_id += 1) {
-                            var init_buf: [256]u8 = undefined;
-                            if (std.fmt.bufPrint(&init_buf, "{{\"op\":6,\"d\":{{\"requestType\":\"SetSceneItemEnabled\",\"requestId\":\"weave-init-{d}\",\"requestData\":{{\"sceneName\":\"Overlay\",\"sceneItemId\":{d},\"sceneItemEnabled\":false}}}}}}", .{ init_id, init_id })) |json| {
-                                self.sendFrame(json) catch {};
-                            } else |_| {}
+                        // NOTE: 旧実装は起動時に sceneItemId 1..5 を強制的に false へリセット
+                        // していたが、Image 以外のソース (Screen Capture 等) まで消してしまう
+                        // ため削除。OBS 側で望む初期状態を設定してください。
+                    } else if (op_int == 7) { // RequestResponse
+                        if (parsed.value.object.get("d")) |d| {
+                            const req_type = if (d.object.get("requestType")) |v| v.string else "?";
+                            var ok = true;
+                            if (d.object.get("requestStatus")) |status| {
+                                if (status.object.get("result")) |r| {
+                                    if (r == .bool) ok = r.bool;
+                                }
+                                if (!ok) {
+                                    const code = if (status.object.get("code")) |c| c.integer else 0;
+                                    const comment = if (status.object.get("comment")) |c| c.string else "";
+                                    log.err("ObsEgress: ❌ OBS rejected {s} (code={d}): {s}", .{ req_type, code, comment });
+                                } else {
+                                    log.debug("ObsEgress: ✓ {s} succeeded", .{req_type});
+                                }
+                            }
                         }
                     } else if (op_int == 5) { // Event
                         if (parsed.value.object.get("d")) |d| {
@@ -290,17 +302,32 @@ pub const ObsEgressNode = struct {
             }
 
             if (std.mem.eql(u8, req_type, "SetSceneItemEnabled")) {
-                const is_enabled = std.mem.indexOf(u8, msg.payload, "\"sceneItemEnabled\":true") != null or
-                    std.mem.indexOf(u8, msg.payload, "\"sceneItemEnabled\": true") != null;
-                const enabled_str = if (is_enabled) "true" else "false";
+                // payload から scene 名 / sceneItemId / sceneItemEnabled を抽出し、
+                // 指定された 1 件だけへ SetSceneItemEnabled を送る。
+                // 旧実装は id 1..5 を総当たりしていたため、Image 以外の
+                // シーンアイテム (Screen Capture 等) まで一緒に切り替わっていた。
+                const Payload = struct {
+                    sceneName: []const u8 = "Overlay",
+                    sceneItemId: i64 = 1,
+                    sceneItemEnabled: bool = true,
+                };
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const parsed = std.json.parseFromSliceLeaky(Payload, arena.allocator(), msg.payload, .{
+                    .ignore_unknown_fields = true,
+                }) catch |err| {
+                    log.err("ObsEgress: Failed to parse SetSceneItemEnabled payload: {any}", .{err});
+                    return;
+                };
 
-                var item_id: usize = 1;
-                while (item_id <= 5) : (item_id += 1) {
-                    var buf: [512]u8 = undefined;
-                    if (std.fmt.bufPrint(&buf, "{{\"op\":6,\"d\":{{\"requestType\":\"SetSceneItemEnabled\",\"requestId\":\"weave-{d}-{d}\",\"requestData\":{{\"sceneName\":\"Overlay\",\"sceneItemId\":{d},\"sceneItemEnabled\":{s}}}}}}}", .{ msg.id, item_id, item_id, enabled_str })) |req_json| {
-                        self.sendFrame(req_json) catch {};
-                    } else |_| {}
-                }
+                const enabled_str = if (parsed.sceneItemEnabled) "true" else "false";
+                var buf: [512]u8 = undefined;
+                if (std.fmt.bufPrint(&buf, "{{\"op\":6,\"d\":{{\"requestType\":\"SetSceneItemEnabled\",\"requestId\":\"weave-{d}\",\"requestData\":{{\"sceneName\":\"{s}\",\"sceneItemId\":{d},\"sceneItemEnabled\":{s}}}}}}}", .{ msg.id, parsed.sceneName, parsed.sceneItemId, enabled_str })) |req_json| {
+                    log.info("ObsEgress: → SetSceneItemEnabled scene='{s}' id={d} enabled={s}", .{ parsed.sceneName, parsed.sceneItemId, enabled_str });
+                    self.sendFrame(req_json) catch |err| {
+                        log.err("ObsEgress: Failed to send frame: {any}", .{err});
+                    };
+                } else |_| {}
                 return;
             }
 
