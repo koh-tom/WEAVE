@@ -6,7 +6,8 @@
             "core.obs.request.SetSceneItemEnabled"
         ],
         "subscribe": [
-            "ext.twitch.chat.message"
+            "ext.twitch.chat.message",
+            "core.system.tick"
         ]
     }
 }

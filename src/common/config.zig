@@ -29,6 +29,7 @@ pub const Config = struct {
     mock_obs_filepath: []const u8 = "mock_obs_received.jsonl",
     mock_obs: bool = false,
     mock_twitch_scenario: ?[]const u8 = null,
+    no_twitch: bool = false,
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
@@ -39,6 +40,7 @@ pub const Config = struct {
             .wasm_heap_size = 64 * 1024,
             .mock_obs = false,
             .mock_twitch_scenario = null,
+            .no_twitch = false,
         };
 
         errdefer self.deinit(allocator);
@@ -179,6 +181,8 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 if (self.mock_twitch_scenario) |s| allocator.free(s);
                 self.mock_twitch_scenario = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--no-twitch")) {
+                self.no_twitch = true;
             } else if (std.mem.eql(u8, arg, "--obs-host")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -261,6 +265,7 @@ fn printHelp() void {
         \\  --dash-port <port>   Port for Dashboard HTTP Server (default: 3030)
         \\  --twitch <channel>   Twitch channel to join (default: SqLA)
         \\  --mock-twitch <path> Path to mock Twitch jsonl scenario (replaces real Twitch IRC)
+        \\  --no-twitch          Disable Twitch entirely (button-only demo mode)
         \\  --obs-host <host>    OBS WebSocket host (default: 127.0.0.1)
         \\  --obs-port <port>    OBS WebSocket port (default: 4455)
         \\  --obs-pass <pass>    OBS WebSocket password (default: obs-password)

@@ -42,6 +42,30 @@ var run_mutex = std.Thread.Mutex{};
 var run_cond = std.Thread.Condition{};
 var running = std.atomic.Value(bool).init(true);
 
+/// 500ms 間隔で core.system.tick を publish する。
+/// Wasm プラグイン等が"時間の経過"を検知するために使う (例: kusa_node の auto-hide)。
+fn runTicker(core: *Core) void {
+    const interval_ns: u64 = 500 * std.time.ns_per_ms;
+    while (running.load(.acquire)) {
+        run_mutex.lock();
+        if (!running.load(.acquire)) {
+            run_mutex.unlock();
+            break;
+        }
+        run_cond.timedWait(&run_mutex, interval_ns) catch |err| {
+            if (err != error.Timeout) {
+                log.err("Ticker timedWait Error: {any}", .{err});
+            }
+        };
+        run_mutex.unlock();
+        if (!running.load(.acquire)) break;
+
+        core.bus.publish("core.system.tick", "{}", .BestEffort, 0) catch |err| {
+            log.err("Ticker publish error: {any}", .{err});
+        };
+    }
+}
+
 fn runGraphPublisher(core: *Core, config: *const Config) void {
     const interval_ns = @as(u64, config.graph_full_interval_secs) * std.time.ns_per_s;
 
@@ -153,6 +177,7 @@ pub fn main() !void {
     const ws_thread = try std.Thread.spawn(.{}, runWsGateway, .{ws_gateway});
     const node_ws_thread = try std.Thread.spawn(.{}, runNodeWs, .{node_ws});
     const graph_thread = try std.Thread.spawn(.{}, runGraphPublisher, .{ &core, &config });
+    const ticker_thread = try std.Thread.spawn(.{}, runTicker, .{&core});
 
     // 4. Dashboard (zap)
     var dashboard = try DashboardNode.init(allocator, &core.bus, 10, config.dashboard_port);
@@ -168,20 +193,26 @@ pub fn main() !void {
         };
     }
 
-    // 3. ネイティブノード
-    try core.graph.registerNode(1, "TwitchAdapter", .native);
-    try core.bus.publish("core.node.registered", "{\"node_id\":1,\"name\":\"TwitchAdapter\",\"type\":\"native\"}", .Transient, 0);
-
+    // 3. ネイティブノード (Twitch)
+    // --no-twitch 指定時は Twitch 系スレッドを一切起動しない
+    // (Dashboard の「草ラッシュ」ボタン等、外部からの pub のみで発火させたい時に使う)
     var maybe_twitch: ?TwitchAdapter = null;
     var maybe_mock_twitch: ?MockTwitchAdapter = null;
-    var twitch_thread: std.Thread = undefined;
+    var twitch_thread: ?std.Thread = null;
 
-    if (config.mock_twitch_scenario) |scenario_path| {
-        maybe_mock_twitch = try MockTwitchAdapter.init(allocator, &core.bus, 1, scenario_path);
-        twitch_thread = try std.Thread.spawn(.{}, runMockTwitch, .{&maybe_mock_twitch.?});
+    if (!config.no_twitch) {
+        try core.graph.registerNode(1, "TwitchAdapter", .native);
+        try core.bus.publish("core.node.registered", "{\"node_id\":1,\"name\":\"TwitchAdapter\",\"type\":\"native\"}", .Transient, 0);
+
+        if (config.mock_twitch_scenario) |scenario_path| {
+            maybe_mock_twitch = try MockTwitchAdapter.init(allocator, &core.bus, 1, scenario_path);
+            twitch_thread = try std.Thread.spawn(.{}, runMockTwitch, .{&maybe_mock_twitch.?});
+        } else {
+            maybe_twitch = TwitchAdapter.init(allocator, &core.bus, 1, config.twitch_channel);
+            twitch_thread = try std.Thread.spawn(.{}, runTwitch, .{&maybe_twitch.?});
+        }
     } else {
-        maybe_twitch = TwitchAdapter.init(allocator, &core.bus, 1, config.twitch_channel);
-        twitch_thread = try std.Thread.spawn(.{}, runTwitch, .{&maybe_twitch.?});
+        log.info("Status: --no-twitch enabled. Chat input is button/manual only.", .{});
     }
     defer {
         if (maybe_mock_twitch) |*t| t.deinit();
@@ -230,10 +261,11 @@ pub fn main() !void {
     // 7. 各スレッドの終了を待機・リソース解放
     dashboard.deinit();
 
-    twitch_thread.join();
+    if (twitch_thread) |t| t.join();
     ws_thread.join();
     node_ws_thread.join();
     graph_thread.join();
+    ticker_thread.join();
     dispatcher_thread.join();
 
     log.info("Status: Shutdown complete.", .{});
