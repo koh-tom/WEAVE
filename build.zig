@@ -172,6 +172,33 @@ pub fn build(b: *std.Build) void {
     const stress_step = b.step("stress", "Run memory stress test (Phase 2.1)");
     stress_step.dependOn(&run_stress_cmd.step);
 
+    // --- Blast Radius Audit CLI (ADR-008, pure Zig / WAMR 非依存) ---
+    const audit_exe = b.addExecutable(.{
+        .name = "weave-audit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/audit_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    audit_exe.use_llvm = true;
+    audit_exe.use_lld = true;
+    b.installArtifact(audit_exe);
+
+    const run_audit = b.addRunArtifact(audit_exe);
+    if (b.args) |args| run_audit.addArgs(args);
+    const audit_step = b.step("audit", "Run blast-radius audit CLI");
+    audit_step.dependOn(&run_audit.step);
+
+    const audit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/audit/blast.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_audit_tests = b.addRunArtifact(audit_tests);
+
     // --- Pure Zig EventBus Test ---
     const bus_test_exe = b.addExecutable(.{
         .name = "bus_test",
@@ -278,11 +305,13 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_sdk_tests.step);
+    test_step.dependOn(&run_audit_tests.step);
 
     // --- Test All Step ---
     const test_all_step = b.step("test_all", "Run all tests (unit, EventBus, and stress tests)");
     test_all_step.dependOn(&run_unit_tests.step);
     test_all_step.dependOn(&run_sdk_tests.step);
+    test_all_step.dependOn(&run_audit_tests.step);
     test_all_step.dependOn(&run_bus_test.step);
     test_all_step.dependOn(&run_stress_cmd.step);
 
