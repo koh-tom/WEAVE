@@ -199,6 +199,49 @@ pub fn build(b: *std.Build) void {
     });
     const run_audit_tests = b.addRunArtifact(audit_tests);
 
+    // --- Ed25519 署名 CLI (weave-key, トラストアンカー Stage 1, 純 Zig) ---
+    const keytool_exe = b.addExecutable(.{
+        .name = "weave-key",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/keytool_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    keytool_exe.use_llvm = true;
+    keytool_exe.use_lld = true;
+    b.installArtifact(keytool_exe);
+
+    const run_keytool = b.addRunArtifact(keytool_exe);
+    if (b.args) |args| run_keytool.addArgs(args);
+    const keytool_step = b.step("key", "Run Ed25519 key/sign CLI");
+    keytool_step.dependOn(&run_keytool.step);
+
+    const signing_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/security/signing.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_signing_tests = b.addRunArtifact(signing_tests);
+
+    // --- 中央バス オーバーヘッド ベンチ (ADR-006, WAMR 非依存) ---
+    const bench_exe = b.addExecutable(.{
+        .name = "bus_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    bench_exe.root_module.addImport("common", common_module);
+    bench_exe.use_llvm = true;
+    bench_exe.use_lld = true;
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run central-bus overhead benchmark");
+    bench_step.dependOn(&run_bench.step);
+
     // --- Pure Zig EventBus Test ---
     const bus_test_exe = b.addExecutable(.{
         .name = "bus_test",
@@ -306,12 +349,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_sdk_tests.step);
     test_step.dependOn(&run_audit_tests.step);
+    test_step.dependOn(&run_signing_tests.step);
 
     // --- Test All Step ---
     const test_all_step = b.step("test_all", "Run all tests (unit, EventBus, and stress tests)");
     test_all_step.dependOn(&run_unit_tests.step);
     test_all_step.dependOn(&run_sdk_tests.step);
     test_all_step.dependOn(&run_audit_tests.step);
+    test_all_step.dependOn(&run_signing_tests.step);
     test_all_step.dependOn(&run_bus_test.step);
     test_all_step.dependOn(&run_stress_cmd.step);
 
