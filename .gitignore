@@ -34,4 +34,4 @@ wasm-apps/*.wasm
 .vscode/
 .idea/
 .DS_Store
-.history/
+.history/.weave/
