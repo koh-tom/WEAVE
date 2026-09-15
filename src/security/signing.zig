@@ -132,6 +132,21 @@ pub const TrustStore = struct {
         return false;
     }
 
+    /// 信頼する公開鍵のいずれかで署名が検証できれば true。
+    /// (署名者を明示しないため、trust store の各鍵で試行する)
+    pub fn verifyAny(self: *const TrustStore, sig_bytes: [64]u8, wasm: []const u8, manifest: []const u8) bool {
+        for (self.keys.items) |k| {
+            if (verify(k, sig_bytes, wasm, manifest)) |_| {
+                return true;
+            } else |_| {}
+        }
+        return false;
+    }
+
+    pub fn isEmpty(self: *const TrustStore) bool {
+        return self.keys.items.len == 0;
+    }
+
     /// hex 公開鍵を 1 行ずつ並べたファイルを読み込む (`#` 始まりはコメント)。
     pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !TrustStore {
         var store = TrustStore{};
@@ -208,4 +223,33 @@ test "trust store membership" {
     try store.add(allocator, kp.public_key.toBytes());
     try std.testing.expect(store.isTrusted(kp.public_key.toBytes()));
     try std.testing.expect(!store.isTrusted(other.public_key.toBytes()));
+}
+
+test "trust store verifyAny: trusted signer accepted, others rejected" {
+    const allocator = std.testing.allocator;
+    const signer = Ed25519.KeyPair.generate();
+    const untrusted = Ed25519.KeyPair.generate();
+    const wasm = "\x00asm plugin body";
+    const manifest = "{\"permissions\":{\"publish\":[\"core.obs.request.*\"]}}";
+
+    var store = TrustStore{};
+    defer store.deinit(allocator);
+    try store.add(allocator, signer.public_key.toBytes());
+
+    // 信頼された鍵で署名 → 受理
+    const good_sig = try sign(signer, wasm, manifest);
+    try std.testing.expect(store.verifyAny(good_sig, wasm, manifest));
+
+    // 信頼されていない鍵で署名 → 拒否
+    const bad_sig = try sign(untrusted, wasm, manifest);
+    try std.testing.expect(!store.verifyAny(bad_sig, wasm, manifest));
+
+    // 正規署名でも manifest 改ざん → 拒否
+    try std.testing.expect(!store.verifyAny(good_sig, wasm, "{\"permissions\":{\"publish\":[\"#\"]}}"));
+
+    // 空の trust store → 常に拒否
+    var empty = TrustStore{};
+    defer empty.deinit(allocator);
+    try std.testing.expect(!empty.verifyAny(good_sig, wasm, manifest));
+    try std.testing.expect(empty.isEmpty());
 }

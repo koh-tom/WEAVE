@@ -30,6 +30,9 @@ pub const Config = struct {
     mock_obs: bool = false,
     mock_twitch_scenario: ?[]const u8 = null,
     no_twitch: bool = false,
+    // 署名検証 (トラストアンカー Stage 1): "off" | "warn" | "strict"
+    signature_mode: []const u8 = "off",
+    trust_keys_path: []const u8 = ".weave/trusted_keys",
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
@@ -50,6 +53,8 @@ pub const Config = struct {
         self.obs_host = try allocator.dupe(u8, self.obs_host);
         self.obs_password = try allocator.dupe(u8, self.obs_password);
         self.mock_obs_filepath = try allocator.dupe(u8, self.mock_obs_filepath);
+        self.signature_mode = try allocator.dupe(u8, self.signature_mode);
+        self.trust_keys_path = try allocator.dupe(u8, self.trust_keys_path);
 
         // 1. 設定ファイルの読み込み (weave.json) - 任意
         if (std.fs.cwd().openFile("weave.json", .{})) |file| {
@@ -99,6 +104,14 @@ pub const Config = struct {
                 if (obj.get("weave_env")) |v| self.weave_env = WeaveEnv.fromString(v.string);
                 if (obj.get("wasm_stack_size")) |v| self.wasm_stack_size = @intCast(v.integer);
                 if (obj.get("wasm_heap_size")) |v| self.wasm_heap_size = @intCast(v.integer);
+                if (obj.get("signature_mode")) |v| {
+                    allocator.free(self.signature_mode);
+                    self.signature_mode = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("trust_keys_path")) |v| {
+                    allocator.free(self.trust_keys_path);
+                    self.trust_keys_path = try allocator.dupe(u8, v.string);
+                }
                 if (obj.get("plugins")) |v| {
                     if (v == .array) {
                         for (v.array.items) |p| {
@@ -123,6 +136,11 @@ pub const Config = struct {
         if (std.process.getEnvVarOwned(allocator, "WEAVE_ENV")) |val| {
             defer allocator.free(val);
             self.weave_env = WeaveEnv.fromString(val);
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_SIGNATURE_MODE")) |val| {
+            allocator.free(self.signature_mode);
+            self.signature_mode = val;
         } else |_| {}
 
         if (std.process.getEnvVarOwned(allocator, "WEAVE_WASM_STACK_SIZE")) |val| {
@@ -214,6 +232,16 @@ pub const Config = struct {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
                 self.graph_full_interval_secs = try std.fmt.parseInt(u32, args[i], 10);
+            } else if (std.mem.eql(u8, arg, "--signature-mode")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.signature_mode);
+                self.signature_mode = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--trust-keys")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.trust_keys_path);
+                self.trust_keys_path = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--help")) {
                 printHelp();
                 std.process.exit(0);
@@ -247,6 +275,8 @@ pub const Config = struct {
         allocator.free(self.obs_host);
         allocator.free(self.obs_password);
         allocator.free(self.mock_obs_filepath);
+        allocator.free(self.signature_mode);
+        allocator.free(self.trust_keys_path);
         if (self.mock_twitch_scenario) |s| allocator.free(s);
         if (self.node_ws_token) |t| allocator.free(t);
         for (self.plugins.items) |p| {
@@ -273,6 +303,8 @@ fn printHelp() void {
         \\  --mock-obs            Use mock OBS node instead of real WebSocket client
         \\  --real-obs            Use real OBS WebSocket client (default)
         \\  --graph-interval <s> Full topology publish interval in seconds (default: 60)
+        \\  --signature-mode <m> Plugin signature enforcement: off|warn|strict (default: off)
+        \\  --trust-keys <path>  Trusted public keys file (default: .weave/trusted_keys)
         \\  --help               Show this help
         \\
     , .{});

@@ -145,6 +145,11 @@ pub fn main() !void {
     core.pm.wasm_stack_size = config.wasm_stack_size;
     core.pm.wasm_heap_size = config.wasm_heap_size;
 
+    // 署名検証 (トラストアンカー Stage 1) の設定
+    core.configureSignature(config.signature_mode, config.trust_keys_path) catch |err| {
+        log.warn("Signature: failed to load trust store: {any}", .{err});
+    };
+
     // 2. トランスポートの設定
     var log_transport = LogTransport.init("DebugLogger");
     try core.tm.register(log_transport.asTransport());
@@ -276,6 +281,8 @@ test {
     _ = @import("core/graph.zig");
     _ = @import("core/manifest.zig");
     _ = @import("core/plugin_manager.zig");
+    _ = @import("core/core.zig");
+    _ = @import("security/signing.zig");
     _ = @import("common/config.zig");
     _ = @import("tests/oom_test.zig");
     _ = @import("tests/mock_test.zig");
