@@ -35,3 +35,4 @@ wasm-apps/*.wasm
 .idea/
 .DS_Store
 .history/.weave/
+wasm-apps/*.sig
