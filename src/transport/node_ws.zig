@@ -96,6 +96,11 @@ pub const NodeWsTransport = struct {
 
     pub fn deinit(self: *NodeWsTransport) void {
         self.stop();
+        // run() スレッド join 後に安全にサーバ fd を閉じる。
+        if (self.server) |*s| {
+            s.deinit();
+            self.server = null;
+        }
         self.mutex.lock();
         self.clients.deinit(self.allocator);
         self.mutex.unlock();
@@ -105,10 +110,9 @@ pub const NodeWsTransport = struct {
 
     pub fn stop(self: *NodeWsTransport) void {
         self.running = false;
-        if (self.server) |*s| {
-            s.deinit();
-            self.server = null;
-        }
+        // accept() でブロック中の run() スレッドを起こす (Linux では close() では起きない)。
+        // サーバ fd 自体の close は join 後に deinit() で行う。
+        self.wakeupAccept();
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -116,6 +120,14 @@ pub const NodeWsTransport = struct {
             client.deinit();
         }
         self.clients.clearRetainingCapacity();
+    }
+
+    fn wakeupAccept(self: *NodeWsTransport) void {
+        if (self.server == null) return;
+        const addr = std.net.Address.parseIp("127.0.0.1", self.port) catch return;
+        if (std.net.tcpConnectToAddress(addr)) |conn| {
+            conn.close();
+        } else |_| {}
     }
 
     pub fn run(self: *NodeWsTransport) !void {

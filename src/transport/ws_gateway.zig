@@ -30,6 +30,11 @@ pub const WsGateway = struct {
 
     pub fn deinit(self: *WsGateway) void {
         self.stop();
+        // ここに来るのは run() スレッドが join 済みの後。安全にサーバ fd を閉じる。
+        if (self.server) |*s| {
+            s.deinit();
+            self.server = null;
+        }
         self.mutex.lock();
         self.clients.deinit(self.allocator);
         self.mutex.unlock();
@@ -38,11 +43,11 @@ pub const WsGateway = struct {
 
     pub fn stop(self: *WsGateway) void {
         self.running = false;
-        if (self.server) |*s| {
-            // 注意: accept中に別スレッドから閉じるとエラーになるので、それを捕捉して抜ける
-            s.deinit();
-            self.server = null;
-        }
+        // accept() でブロック中の run() スレッドを起こす。
+        // Linux では別スレッドからの close() は accept() を返さないため、
+        // 自分のポートへ捨て接続を1本張って accept() を確実にリターンさせる。
+        // (サーバ fd 自体の close は、スレッド join 後に deinit() で行う)
+        self.wakeupAccept();
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -50,6 +55,14 @@ pub const WsGateway = struct {
             client.close();
         }
         self.clients.clearRetainingCapacity();
+    }
+
+    fn wakeupAccept(self: *WsGateway) void {
+        if (self.server == null) return;
+        const addr = std.net.Address.parseIp("127.0.0.1", self.port) catch return;
+        if (std.net.tcpConnectToAddress(addr)) |conn| {
+            conn.close();
+        } else |_| {}
     }
 
     /// 接続待ち受けループ（別スレッドで実行することを想定）
