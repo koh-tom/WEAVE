@@ -22,6 +22,7 @@ pub const ResultCode = enum(i32) {
     ERROR_INVALID_PARAMETER = 3,
     ERROR_QUEUE_FULL = 4,
     ERROR_NOT_FOUND = 5,
+    ERROR_RATE_LIMITED = 6,
 };
 
 /// ログレベル

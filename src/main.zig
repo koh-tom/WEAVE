@@ -103,6 +103,7 @@ fn sigHandler(sig: i32) callconv(.c) void {
 }
 
 pub fn main() !void {
+    const t_start = std.time.milliTimestamp();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -138,6 +139,11 @@ pub fn main() !void {
 
     core.bus.graph = &core.graph;
     core.graph.bus = &core.bus;
+
+    // 監査ログ: core.security.* をファイルに記録 (ACL違反/レート制限/署名不正の証跡)
+    var audit = @import("core/audit_log.zig").AuditLog.init(allocator, config.audit_log_path);
+    audit.subscribeBus(&core.bus) catch |err| log.warn("AuditLog: subscribe failed: {any}", .{err});
+    log.info("Audit: security events -> {s}", .{config.audit_log_path});
 
     host_api.global_bus = &core.bus;
     host_api.global_plugin_manager = &core.pm;
@@ -240,7 +246,7 @@ pub fn main() !void {
         if (maybe_obs) |o| o.deinit();
     }
 
-    log.info("Status: Running... (Press Ctrl+C to stop)", .{});
+    log.info("Status: Ready in {} ms. Running... (Press Ctrl+C to stop)", .{std.time.milliTimestamp() - t_start});
 
     while (running.load(.acquire)) {
         std.Thread.sleep(100 * std.time.ns_per_ms);
@@ -282,6 +288,8 @@ test {
     _ = @import("core/manifest.zig");
     _ = @import("core/plugin_manager.zig");
     _ = @import("core/core.zig");
+    _ = @import("core/rate_limiter.zig");
+    _ = @import("core/audit_log.zig");
     _ = @import("security/signing.zig");
     _ = @import("common/config.zig");
     _ = @import("tests/oom_test.zig");

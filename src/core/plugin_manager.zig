@@ -3,6 +3,7 @@ const wamr = @import("wamr_libs.zig").wamr;
 const manifest = @import("manifest.zig");
 const event_bus = @import("event_bus.zig");
 const WasmSubscriber = @import("wasm_subscriber.zig").WasmSubscriber;
+const RateLimiter = @import("rate_limiter.zig").RateLimiter;
 
 pub const PluginMetadata = struct {
     node_id: u32,
@@ -13,6 +14,7 @@ pub const PluginMetadata = struct {
     module: wamr.wasm_module_t,
     instance: wamr.wasm_module_inst_t,
     subscriber: ?WasmSubscriber = null,
+    rate_limiter: RateLimiter = .{},
 
     pub fn deinit(self: *PluginMetadata, allocator: std.mem.Allocator) void {
         if (self.subscriber) |*sub| sub.deinit();
@@ -69,6 +71,7 @@ pub const PluginManager = struct {
             .module = module,
             .instance = instance,
             .subscriber = try WasmSubscriber.init(instance, node_id, bus, self),
+            .rate_limiter = RateLimiter.init(parsed.value.rate_limit_eps),
         };
         self.next_node_id += 1;
 

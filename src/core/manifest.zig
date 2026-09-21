@@ -4,6 +4,8 @@ pub const Manifest = struct {
     name: []const u8,
     version: []const u8,
     permissions: Permissions,
+    /// ノード単位の publish レート上限 (events/sec)。0 または未指定で無制限。
+    rate_limit_eps: f64 = 0,
 
     pub const Permissions = struct {
         publish: [][]const u8,
