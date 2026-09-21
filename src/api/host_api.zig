@@ -54,7 +54,15 @@ export fn os_api_publish(
             meta.node_id,
             topic,
         });
+        emitSecurity(bus, "acl_denied", meta.node_id, meta.manifest_parsed.value.name, "publish", topic);
         return toI32(.ERROR_PERMISSION_DENIED);
+    }
+
+    // レート制限 (Token Bucket / ノード単位)。Bot 暴走がバスを埋め尽くすのを防ぐ。
+    if (!meta.rate_limiter.tryConsume(std.time.milliTimestamp())) {
+        if (enable_log) std.debug.print("Rate limit: Plugin '{s}' (Node {}) exceeded {d:.0} eps on '{s}' -> dropped\n", .{ meta.manifest_parsed.value.name, meta.node_id, meta.manifest_parsed.value.rate_limit_eps, topic });
+        emitSecurity(bus, "rate_limited", meta.node_id, meta.manifest_parsed.value.name, "publish", topic);
+        return toI32(.ERROR_RATE_LIMITED);
     }
 
     const qos_val = if (qos >= 3) event_bus.QoS.BestEffort else @as(event_bus.QoS, @enumFromInt(@as(u32, @intCast(qos))));
@@ -91,6 +99,7 @@ export fn os_api_subscribe(
             meta.node_id,
             topic,
         });
+        emitSecurity(bus, "acl_denied", meta.node_id, meta.manifest_parsed.value.name, "subscribe", topic);
         return toI32(.ERROR_PERMISSION_DENIED);
     }
 
@@ -130,6 +139,15 @@ export fn os_api_log(
             else => log.info("[{s}] {s}", .{ name, msg }),
         }
     }
+}
+
+/// セキュリティイベントを core.security.* に発行する (監査ログが購読)。
+fn emitSecurity(bus: *event_bus.EventBus, subtopic: []const u8, node_id: u32, name: []const u8, action: []const u8, topic: []const u8) void {
+    var topic_buf: [96]u8 = undefined;
+    const full_topic = std.fmt.bufPrint(&topic_buf, "core.security.{s}", .{subtopic}) catch return;
+    var buf: [512]u8 = undefined;
+    const payload = std.fmt.bufPrint(&buf, "{{\"node_id\":{},\"name\":\"{s}\",\"action\":\"{s}\",\"topic\":\"{s}\"}}", .{ node_id, name, action, topic }) catch return;
+    _ = bus.publish(full_topic, payload, .Transient, 0) catch {};
 }
 
 pub threadlocal var current_message_timestamp: i64 = 0;

@@ -33,6 +33,7 @@ pub const Config = struct {
     // 署名検証 (トラストアンカー Stage 1): "off" | "warn" | "strict"
     signature_mode: []const u8 = "off",
     trust_keys_path: []const u8 = ".weave/trusted_keys",
+    audit_log_path: []const u8 = "audit.log",
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
@@ -55,6 +56,7 @@ pub const Config = struct {
         self.mock_obs_filepath = try allocator.dupe(u8, self.mock_obs_filepath);
         self.signature_mode = try allocator.dupe(u8, self.signature_mode);
         self.trust_keys_path = try allocator.dupe(u8, self.trust_keys_path);
+        self.audit_log_path = try allocator.dupe(u8, self.audit_log_path);
 
         // 1. 設定ファイルの読み込み (weave.json) - 任意
         if (std.fs.cwd().openFile("weave.json", .{})) |file| {
@@ -111,6 +113,10 @@ pub const Config = struct {
                 if (obj.get("trust_keys_path")) |v| {
                     allocator.free(self.trust_keys_path);
                     self.trust_keys_path = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("audit_log_path")) |v| {
+                    allocator.free(self.audit_log_path);
+                    self.audit_log_path = try allocator.dupe(u8, v.string);
                 }
                 if (obj.get("plugins")) |v| {
                     if (v == .array) {
@@ -242,6 +248,11 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 allocator.free(self.trust_keys_path);
                 self.trust_keys_path = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--audit-log")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.audit_log_path);
+                self.audit_log_path = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--help")) {
                 printHelp();
                 std.process.exit(0);
@@ -277,6 +288,7 @@ pub const Config = struct {
         allocator.free(self.mock_obs_filepath);
         allocator.free(self.signature_mode);
         allocator.free(self.trust_keys_path);
+        allocator.free(self.audit_log_path);
         if (self.mock_twitch_scenario) |s| allocator.free(s);
         if (self.node_ws_token) |t| allocator.free(t);
         for (self.plugins.items) |p| {
@@ -305,6 +317,7 @@ fn printHelp() void {
         \\  --graph-interval <s> Full topology publish interval in seconds (default: 60)
         \\  --signature-mode <m> Plugin signature enforcement: off|warn|strict (default: off)
         \\  --trust-keys <path>  Trusted public keys file (default: .weave/trusted_keys)
+        \\  --audit-log <path>   Security audit log (JSON Lines, default: audit.log)
         \\  --help               Show this help
         \\
     , .{});
