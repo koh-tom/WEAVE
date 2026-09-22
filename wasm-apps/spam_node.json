@@ -1,0 +1,9 @@
+{
+    "name": "spam_node",
+    "version": "0.1.0",
+    "permissions": {
+        "publish": ["ext.chat.spam"],
+        "subscribe": ["core.system.tick"]
+    },
+    "rate_limit_eps": 5
+}
