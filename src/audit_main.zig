@@ -17,6 +17,7 @@ const default_manifests = [_][]const u8{
     "wasm-apps/bad_node.json",
     "wasm-apps/scene_switcher.json",
     "wasm-apps/malicious_plugin.json",
+    "wasm-apps/spam_node.json",
 };
 
 pub fn main() !void {

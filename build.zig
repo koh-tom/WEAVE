@@ -310,10 +310,28 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
     });
 
+    const spam_node = b.addExecutable(.{
+        .name = "spam_node",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("wasm-apps/spam_node.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+        }),
+    });
+    spam_node.root_module.addImport("plugin_sdk", sdk_module);
+    spam_node.root_module.addImport("common", common_module);
+    spam_node.rdynamic = true;
+    spam_node.entry = .disabled;
+
+    const install_spam = b.addInstallArtifact(spam_node, .{
+        .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
+    });
+
     const wasm_step = b.step("wasm", "Build Wasm plugins");
     wasm_step.dependOn(&install_chat.step);
     wasm_step.dependOn(&install_bad.step);
     wasm_step.dependOn(&install_kusa.step);
+    wasm_step.dependOn(&install_spam.step);
 
     // デフォルトの install ステップが Wasm ビルドにも依存するようにする
     b.getInstallStep().dependOn(wasm_step);
@@ -363,7 +381,7 @@ pub fn build(b: *std.Build) void {
     // --- Clean Step ---
     const clean_step = b.step("clean", "Remove build artifacts and Wasm plugins");
     const clean_cmd = b.addSystemCommand(&[_][]const u8{
-        "rm", "-rf", "zig-cache", "zig-out", ".zig-cache", "wasm-apps/chat_node.wasm", "wasm-apps/bad_node.wasm", "wasm-apps/kusa_node.wasm", "build_err.log", "test_err.log", "src/bus_test_wrapper.zig", "src/stress_test_wrapper.zig",
+        "rm", "-rf", "zig-cache", "zig-out", ".zig-cache", "wasm-apps/chat_node.wasm", "wasm-apps/bad_node.wasm", "wasm-apps/kusa_node.wasm", "wasm-apps/spam_node.wasm", "build_err.log", "test_err.log", "src/bus_test_wrapper.zig", "src/stress_test_wrapper.zig",
     });
     clean_step.dependOn(&clean_cmd.step);
 }
