@@ -3,10 +3,13 @@
     "version": "0.1.0",
     "permissions": {
         "publish": [
-            "core.node.status"
+            "ext.chat_node.status"
         ],
         "subscribe": [
             "ext.twitch.#"
+        ],
+        "data_access": [
+            "pii"
         ]
     }
 }

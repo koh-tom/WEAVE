@@ -66,7 +66,7 @@ test "EventBus: QoS BestEffort Drop" {
     // 3つ目はドロップされるはず
     try bus.publish("drop.me", "3", .BestEffort, 0);
 
-    try std.testing.expectEqual(@as(usize, 2), bus.queue.count);
+    try std.testing.expectEqual(@as(usize, 2), bus.core_cell.queueDepth());
 
     // ディスパッチャを起動して空にする
     const dispatcher_thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});

@@ -1,0 +1,18 @@
+{
+    "abi_version": 1,
+    "name": "howl_a",
+    "version": "1.0.0",
+    "description": "howling (echo loop) demo",
+    "permissions": {
+        "publish": [
+            "ext.howl.a"
+        ],
+        "subscribe": [
+            "ext.howl.b",
+            "ext.twitch.chat.message"
+        ],
+        "data_access": [
+            "pii"
+        ]
+    }
+}

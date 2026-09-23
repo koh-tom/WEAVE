@@ -106,10 +106,14 @@ pub const VerifyMode = enum {
     warn, // 検証するが、失敗しても警告のみで load (development 既定)
     strict, // 検証失敗・署名なし・未知の署名者は load 拒否 (production 既定)
 
+    /// 未知の文字列は null (呼び出し側で起動を拒否する)。
+    /// 以前は typo が黙って warn になり、strict のつもりで未署名プラグインが動いていた。
+    pub fn parse(s: []const u8) ?VerifyMode {
+        return std.meta.stringToEnum(VerifyMode, s);
+    }
+
     pub fn fromString(s: []const u8) VerifyMode {
-        if (std.mem.eql(u8, s, "strict")) return .strict;
-        if (std.mem.eql(u8, s, "off")) return .off;
-        return .warn;
+        return parse(s) orelse .warn;
     }
 };
 

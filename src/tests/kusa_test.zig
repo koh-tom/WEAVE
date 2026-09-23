@@ -96,33 +96,33 @@ test "WasmSubscriber: kusa_node logic test" {
     try std.testing.expectEqual(@as(usize, 1), obs_ctx.visible_events.items.len);
     try std.testing.expectEqual(true, obs_ctx.visible_events.items[0]);
 
-    // 3. Send message containing 'w' at t = 11499 (less than 10 seconds since t=1500).
+    // 3. Send message containing 'w' at t = 6499 (less than 5 seconds since t=1500).
     // It should not trigger hide or show event.
-    try bus.publishWithMessageTimestamp("ext.twitch.chat.message", "{\"user\":\"user\",\"message\":\"w\"}", .BestEffort, 0, 11499);
+    try bus.publishWithMessageTimestamp("ext.twitch.chat.message", "{\"user\":\"user\",\"message\":\"w\"}", .BestEffort, 0, 6499);
     bus.waitIdle();
     try std.testing.expectEqual(@as(usize, 1), obs_ctx.visible_events.items.len);
 
-    // 4. Send message at t = 11500 (exactly 10 seconds since trigger at t=1500).
+    // 4. Send message at t = 6500 (exactly 5 seconds since trigger at t=1500).
     // This should trigger auto-hide (visible=false).
-    try bus.publishWithMessageTimestamp("ext.twitch.chat.message", "{\"user\":\"user\",\"message\":\"no grass message\"}", .BestEffort, 0, 11500);
+    try bus.publishWithMessageTimestamp("ext.twitch.chat.message", "{\"user\":\"user\",\"message\":\"no grass message\"}", .BestEffort, 0, 6500);
     bus.waitIdle();
     try std.testing.expectEqual(@as(usize, 2), obs_ctx.visible_events.items.len);
     try std.testing.expectEqual(false, obs_ctx.visible_events.items[1]);
 
-    // 5. Send 10 messages containing 'w' within 3 seconds, ending at t = 16000 (within 15s cooldown since t=1500).
+    // 5. Send 10 messages containing 'w' within 3 seconds, at t = 8000 (within 7s cooldown since t=1500).
     // It should NOT trigger show event.
     i = 0;
     while (i < 10) : (i += 1) {
-        try bus.publishWithMessageTimestamp("ext.twitch.chat.message", "{\"user\":\"user\",\"message\":\"w\"}", .BestEffort, 0, 16000);
+        try bus.publishWithMessageTimestamp("ext.twitch.chat.message", "{\"user\":\"user\",\"message\":\"w\"}", .BestEffort, 0, 8000);
     }
     bus.waitIdle();
     try std.testing.expectEqual(@as(usize, 2), obs_ctx.visible_events.items.len);
 
-    // 6. Send 10 messages containing 'w' within 3 seconds, ending at t = 17000 (after 15s cooldown has passed since t=1500).
+    // 6. Send 10 messages containing 'w' within 3 seconds, at t = 8600 (after 7s cooldown has passed since t=1500).
     // This should trigger show event (visible=true).
     i = 0;
     while (i < 10) : (i += 1) {
-        try bus.publishWithMessageTimestamp("ext.twitch.chat.message", "{\"user\":\"user\",\"message\":\"w\"}", .BestEffort, 0, 17000);
+        try bus.publishWithMessageTimestamp("ext.twitch.chat.message", "{\"user\":\"user\",\"message\":\"w\"}", .BestEffort, 0, 8600);
     }
     bus.waitIdle();
     try std.testing.expectEqual(@as(usize, 3), obs_ctx.visible_events.items.len);

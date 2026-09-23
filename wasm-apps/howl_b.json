@@ -1,0 +1,15 @@
+{
+    "abi_version": 1,
+    "name": "howl_b",
+    "version": "1.0.0",
+    "description": "howling (echo loop) demo",
+    "permissions": {
+        "publish": [
+            "ext.howl.b"
+        ],
+        "subscribe": [
+            "ext.howl.a"
+        ],
+        "data_access": []
+    }
+}

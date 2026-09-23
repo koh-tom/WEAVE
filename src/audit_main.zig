@@ -1,24 +1,33 @@
-//! `weave-audit` — Blast Radius 監査 CLI
+//! `weave-audit` — 影響範囲の監査 CLI (ADR-008 / R9)
 //!
 //! 使い方:
-//!   weave-audit                         全ノードの影響範囲を要約
-//!   weave-audit <node-name>             指定ノードの詳細 blast radius
-//!   weave-audit --manifests a.json b.json ...   監査対象の manifest を明示
+//!   weave-audit                          全ノードの要約 (侵害時・障害時の両方)
+//!   weave-audit <node>                   侵害されたら何ができるか (security blast radius)
+//!   weave-audit --failure <node>         落ちたらどこまで止まるか (failure radius)
+//!   weave-audit --manifests a.json ...   監査対象の manifest を明示 (既定: wasm-apps/*.json を走査)
 //!
-//! manifest を明示しない場合は wasm-apps/ の既定セットを走査する。
-//! builtin (TwitchAdapter / ObsEgress) は常に含める。
+//! builtin (Core / TwitchAdapter / ObsEgress) は常に含める。
+//! 実行前に、宣言 (manifest) だけから計算する。コードを読まないので難読化に左右されない。
 
 const std = @import("std");
 const blast = @import("audit/blast.zig");
 
-const default_manifests = [_][]const u8{
-    "wasm-apps/kusa_node.json",
-    "wasm-apps/chat_node.json",
-    "wasm-apps/bad_node.json",
-    "wasm-apps/scene_switcher.json",
-    "wasm-apps/malicious_plugin.json",
-    "wasm-apps/spam_node.json",
-};
+fn collectManifests(arena: std.mem.Allocator, dir_path: []const u8, out: *std.ArrayListUnmanaged([]const u8)) !void {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var it = dir.iterate();
+    var names = std.ArrayListUnmanaged([]const u8){};
+    while (try it.next()) |e| {
+        if (e.kind != .file or !std.mem.endsWith(u8, e.name, ".json")) continue;
+        try names.append(arena, try std.fs.path.join(arena, &.{ dir_path, e.name }));
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    try out.appendSlice(arena, names.items);
+}
 
 pub fn main() !void {
     var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -26,8 +35,8 @@ pub fn main() !void {
     const arena = arena_inst.allocator();
 
     const args = try std.process.argsAlloc(arena);
-
     var target: ?[]const u8 = null;
+    var failure_target: ?[]const u8 = null;
     var manifest_paths = std.ArrayListUnmanaged([]const u8){};
 
     var i: usize = 1;
@@ -39,77 +48,94 @@ pub fn main() !void {
                 try manifest_paths.append(arena, args[i]);
             }
             i -= 1;
+        } else if (std.mem.eql(u8, arg, "--failure")) {
+            i += 1;
+            if (i >= args.len) return printUsage();
+            failure_target = args[i];
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printUsage();
-            return;
+            return printUsage();
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             target = arg;
         }
     }
 
-    if (manifest_paths.items.len == 0) {
-        for (default_manifests) |p| try manifest_paths.append(arena, p);
-    }
+    if (manifest_paths.items.len == 0) try collectManifests(arena, "wasm-apps", &manifest_paths);
 
-    // ノード収集: builtin + manifest
     var nodes = std.ArrayListUnmanaged(blast.Node){};
-    const builtins = try blast.builtinNodes(arena);
-    for (builtins) |b| try nodes.append(arena, b);
-
+    for (try blast.builtinNodes(arena)) |b| try nodes.append(arena, b);
     for (manifest_paths.items) |path| {
         const node = blast.loadManifestNode(arena, path) catch |err| {
             std.debug.print("warn: skip {s}: {any}\n", .{ path, err });
             continue;
         };
-        try nodes.append(arena, node);
+        // 同名の manifest (obs_compat の複製など) は 1 つにまとめる
+        var dup = false;
+        for (nodes.items) |n| {
+            if (std.mem.eql(u8, n.name, node.name)) dup = true;
+        }
+        if (!dup) try nodes.append(arena, node);
     }
 
-    var stdout_buf: [1]u8 = undefined;
+    var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     const w = &stdout_writer.interface;
 
-    if (target) |t| {
-        const report = blast.computeBlast(arena, nodes.items, t) catch |err| {
-            if (err == error.NodeNotFound) {
-                std.debug.print("error: node '{s}' not found. Known nodes:\n", .{t});
-                for (nodes.items) |n| std.debug.print("  - {s}\n", .{n.name});
-                return;
-            }
-            return err;
-        };
+    if (failure_target) |t| {
+        const r = blast.computeFailure(arena, nodes.items, t) catch |err| return notFound(err, t, nodes.items);
+        try blast.printFailure(w, r);
+    } else if (target) |t| {
+        const report = blast.computeBlast(arena, nodes.items, t) catch |err| return notFound(err, t, nodes.items);
         try blast.printReport(w, report);
     } else {
-        // 要約: 全ノードについて「シンク到達可否」「PII 読取可否」を一覧
-        try w.print("\n=== WEAVE Blast Radius Summary ({d} nodes) ===\n\n", .{nodes.items.len});
-        try w.print("{s: <24} {s: <8} {s: <14} {s}\n", .{ "NODE", "KIND", "REAL-WORLD", "READS PII?" });
-        try w.print("{s: <24} {s: <8} {s: <14} {s}\n", .{ "----", "----", "----------", "----------" });
+        try w.print("\n=== WEAVE Impact Summary ({d} nodes) ===\n", .{nodes.items.len});
+        try w.print("侵害されたら (security) / 落ちたら (failure) の上限を、宣言だけから起動前に計算\n\n", .{});
+        try w.print("{s: <20} {s: <7} {s: <16} {s: <11} {s}\n", .{ "NODE", "KIND", "REACHES SINK", "READS PII", "IF DOWN, ALSO STOPS" });
+        try w.print("{s: <20} {s: <7} {s: <16} {s: <11} {s}\n", .{ "----", "----", "------------", "---------", "-------------------" });
         for (nodes.items) |n| {
             const report = try blast.computeBlast(arena, nodes.items, n.name);
-            const reaches_sink = report.reachable_sinks.len > 0;
             var reads_pii = false;
             for (report.readable) |r| {
                 if (blast.classify(r.topic) == .pii) reads_pii = true;
             }
-            try w.print("{s: <24} {s: <8} {s: <14} {s}\n", .{
+            const f = try blast.computeFailure(arena, nodes.items, n.name);
+            var stops: std.ArrayListUnmanaged(u8) = .{};
+            for (f.stalled, 0..) |s, k| {
+                if (k > 0) try stops.appendSlice(arena, ", ");
+                try stops.appendSlice(arena, s);
+            }
+            try w.print("{s: <20} {s: <7} {s: <16} {s: <11} {s}\n", .{
                 n.name,
                 n.kind,
-                if (reaches_sink) "YES (⚠)" else "no",
-                if (reads_pii) "YES (⚠)" else "no",
+                if (report.reachable_sinks.len > 0) "YES (!)" else "no",
+                if (reads_pii) "YES (!)" else "no",
+                if (stops.items.len == 0) "(nothing)" else stops.items,
             });
         }
-        try w.print("\n(詳細は `weave-audit <node-name>` で表示)\n\n", .{});
+        try w.print("\n詳細: `weave-audit <node>` (侵害時) / `weave-audit --failure <node>` (障害時)\n\n", .{});
     }
     try w.flush();
 }
 
+fn notFound(err: anyerror, t: []const u8, nodes: []const blast.Node) !void {
+    if (err != error.NodeNotFound) return err;
+    std.debug.print("error: node '{s}' not found. Known nodes:\n", .{t});
+    for (nodes) |n| std.debug.print("  - {s}\n", .{n.name});
+    std.process.exit(1);
+}
+
 fn printUsage() void {
     std.debug.print(
-        \\weave-audit — Blast Radius 監査 (ADR-008)
+        \\weave-audit — 影響範囲の監査 (ADR-008 / R9)
         \\
         \\Usage:
-        \\  weave-audit                    全ノードの影響範囲を要約
-        \\  weave-audit <node-name>        指定ノードの詳細
-        \\  weave-audit --manifests <paths...>   監査対象を明示
+        \\  weave-audit                        全ノードの要約
+        \\  weave-audit <node>                 侵害されたら何ができるか
+        \\  weave-audit --failure <node>       落ちたらどこまで止まるか
+        \\  weave-audit --manifests <paths...> 監査対象を明示 (既定: wasm-apps/*.json)
         \\
     , .{});
+}
+
+test {
+    _ = blast;
 }

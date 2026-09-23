@@ -1,351 +1,425 @@
+//! OBS WebSocket v5 への送信ノード (ObsEgress)。
+//!
+//! `core.obs.request.<RequestType>` を購読し、OBS に要求を送る。トピックの末尾が要求種別で、
+//! これが権限の単位 (manifest の publish 宣言) になる。
+//!
+//! v1 の変更点:
+//! - **意図した状態の再適用 (R6)**: 冪等な状態設定要求 (表示切替・シーン切替など) を
+//!   「WEAVE が意図した OBS の状態」として保持し、OBS に (再) 接続したら全て再適用する。
+//!   OBS が落ちて戻っても、オーバーレイの表示状態が自動で元通りになる。
+//!   未接続中の要求も捨てずに、状態として合流させて接続後に送る。
+//! - **生フレームの素通しを廃止**: 以前は payload に "op" があれば OBS へそのまま送っており、
+//!   SetSceneItemEnabled しか許可されていないプラグインが任意の要求 (配信停止など) を送れた。
+//! - 自前 WebSocket (ws_proto) を使い、ランダムなキーとマスク・Accept の検証を行う。
+//! - 接続状態を `core.obs.link` で通知し、切断中はノード状態を degraded にする。
+
 const std = @import("std");
 const event_bus = @import("../core/event_bus.zig");
+const ws = @import("../transport/ws_proto.zig");
 const log = @import("../common/log.zig");
 
-/// OBS WebSocket v5 制御用ノード
-/// core.obs.request.* トピックを監視し、OBSを操作します。
+/// 冪等な (最後の値だけが意味を持つ) 要求。再接続時に再適用する
+const STATEFUL = [_]struct { request: []const u8, keys: []const []const u8 }{
+    .{ .request = "SetSceneItemEnabled", .keys = &.{ "sceneName", "sceneItemId" } },
+    .{ .request = "SetCurrentProgramScene", .keys = &.{} },
+    .{ .request = "SetInputMute", .keys = &.{"inputName"} },
+    .{ .request = "SetSourceFilterEnabled", .keys = &.{ "sourceName", "filterName" } },
+};
+
+/// 「WEAVE が意図した OBS の状態」。キー = 要求種別 + 対象を特定するフィールド
+pub const DesiredState = struct {
+    allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex = .{},
+    /// key -> { request_type, request_data (JSON) }
+    map: std.StringArrayHashMapUnmanaged(Entry) = .{},
+
+    pub const Entry = struct { request_type: []u8, data: []u8 };
+
+    pub fn init(allocator: std.mem.Allocator) DesiredState {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *DesiredState) void {
+        var it = self.map.iterator();
+        while (it.next()) |e| {
+            self.allocator.free(e.key_ptr.*);
+            self.allocator.free(e.value_ptr.request_type);
+            self.allocator.free(e.value_ptr.data);
+        }
+        self.map.deinit(self.allocator);
+    }
+
+    /// 要求が状態設定なら記録して true を返す
+    pub fn record(self: *DesiredState, request_type: []const u8, data_json: []const u8) !bool {
+        const spec = for (STATEFUL) |s| {
+            if (std.mem.eql(u8, s.request, request_type)) break s;
+        } else return false;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, data_json, .{}) catch return false;
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+
+        var key: std.ArrayListUnmanaged(u8) = .{};
+        defer key.deinit(self.allocator);
+        try key.appendSlice(self.allocator, request_type);
+        for (spec.keys) |k| {
+            try key.append(self.allocator, '|');
+            const v = parsed.value.object.get(k) orelse return false;
+            try key.writer(self.allocator).print("{f}", .{std.json.fmt(v, .{})});
+        }
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const gop = try self.map.getOrPut(self.allocator, key.items);
+        if (gop.found_existing) {
+            self.allocator.free(gop.value_ptr.data);
+            gop.value_ptr.data = try self.allocator.dupe(u8, data_json);
+        } else {
+            gop.key_ptr.* = try self.allocator.dupe(u8, key.items);
+            gop.value_ptr.* = .{
+                .request_type = try self.allocator.dupe(u8, request_type),
+                .data = try self.allocator.dupe(u8, data_json),
+            };
+        }
+        return true;
+    }
+
+    pub fn count(self: *DesiredState) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.map.count();
+    }
+
+    /// 全エントリをコピーして返す (呼び出し側が freeCopies で解放)
+    pub fn copies(self: *DesiredState, allocator: std.mem.Allocator) ![]Entry {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const out = try allocator.alloc(Entry, self.map.count());
+        var i: usize = 0;
+        var it = self.map.iterator();
+        while (it.next()) |e| : (i += 1) {
+            out[i] = .{ .request_type = try allocator.dupe(u8, e.value_ptr.request_type), .data = try allocator.dupe(u8, e.value_ptr.data) };
+        }
+        return out;
+    }
+
+    pub fn freeCopies(allocator: std.mem.Allocator, entries: []Entry) void {
+        for (entries) |e| {
+            allocator.free(e.request_type);
+            allocator.free(e.data);
+        }
+        allocator.free(entries);
+    }
+};
+
 pub const ObsEgressNode = struct {
     allocator: std.mem.Allocator,
     bus: *event_bus.EventBus,
-    stream: ?std.net.Stream,
     node_id: u32,
     password: ?[]const u8,
-    running: bool,
-    mutex: std.Thread.Mutex,
-    thread: ?std.Thread,
-    host: ?[]const u8,
-    port: u16,
+    host: ?[]const u8 = null,
+    port: u16 = 0,
+
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    identified: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// stream と送信を守る
+    mutex: std.Thread.Mutex = .{},
+    stream: ?std.net.Stream = null,
+    thread: ?std.Thread = null,
+
+    desired: DesiredState,
+    /// 状態でない要求 (コマンド) の送信待ち。接続後に順に送る。上限を超えたら古いものを捨てる
+    outbox: std.ArrayListUnmanaged([]u8) = .{},
+    outbox_max: usize = 64,
+    next_request: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
+    connections: u64 = 0,
+    reconnects: u64 = 0,
+    reapplied_total: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, node_id: u32, password: ?[]const u8) !*ObsEgressNode {
         const self = try allocator.create(ObsEgressNode);
         self.* = .{
             .allocator = allocator,
             .bus = bus,
-            .stream = null,
             .node_id = node_id,
             .password = if (password) |p| try allocator.dupe(u8, p) else null,
-            .running = false,
-            .mutex = .{},
-            .thread = null,
-            .host = null,
-            .port = 0,
+            .desired = DesiredState.init(allocator),
         };
         return self;
     }
 
     pub fn stop(self: *ObsEgressNode) void {
-        self.running = false;
-        if (self.stream) |s| s.close();
+        self.running.store(false, .release);
+        self.mutex.lock();
+        if (self.stream) |s| std.posix.shutdown(s.handle, .both) catch {};
+        self.mutex.unlock();
     }
 
     pub fn deinit(self: *ObsEgressNode) void {
         self.stop();
         if (self.thread) |t| t.join();
+        self.mutex.lock();
+        if (self.stream) |s| s.close();
+        self.stream = null;
+        for (self.outbox.items) |o| self.allocator.free(o);
+        self.outbox.deinit(self.allocator);
+        self.mutex.unlock();
+        self.desired.deinit();
         if (self.password) |p| self.allocator.free(p);
         if (self.host) |h| self.allocator.free(h);
         self.allocator.destroy(self);
     }
 
-    /// OBSへの接続と認証プロセスをバックグラウンドで開始する
+    /// OBS への接続をバックグラウンドで開始し、要求トピックを購読する
     pub fn connect(self: *ObsEgressNode, host: []const u8, port: u16) !void {
         self.host = try self.allocator.dupe(u8, host);
         self.port = port;
-        self.running = true;
+        self.running.store(true, .release);
 
-        // 購読開始（接続前でも行っておく）
-        try self.bus.subscribe("core.obs.request.*", self.node_id, ObsEgressNode.onMessage, self);
+        // OBS への送信は専用セル "egress" で行う (OBS が遅くても他の配送を待たせない)
+        const cell = self.bus.getCell("egress") orelse try self.bus.createCell("egress", .{ .trust = .core });
+        // グラフ登録を購読より先に行う (逆順だと購読が記録されず、トポロジから OBS への辺が消える)
+        if (self.bus.graph) |g| try g.registerNodeIn(self.node_id, "ObsEgress", .native, cell.name);
+        try self.bus.subscribeEx("core.obs.request.*", self.node_id, ObsEgressNode.onMessage, self, .{ .cell = cell });
 
-        // グラフ登録
-        if (self.bus.graph) |g| {
-            try g.registerNode(self.node_id, "ObsEgress", .native);
-        }
+        self.thread = try std.Thread.spawn(.{}, runRetryLoop, .{self});
+    }
 
-        self.thread = try std.Thread.spawn(.{}, ObsEgressNode.runRetryLoop, .{self});
+    fn publishLink(self: *ObsEgressNode, connected: bool) void {
+        var buf: [160]u8 = undefined;
+        const payload = std.fmt.bufPrint(&buf, "{{\"connected\":{},\"reconnects\":{d},\"desired\":{d}}}", .{ connected, self.reconnects, self.desired.count() }) catch return;
+        self.bus.publish("core.obs.link", payload, .Transient, self.node_id) catch {};
+        if (self.bus.graph) |g| g.updateNodeStatus(self.node_id, if (connected) .active else .degraded);
     }
 
     fn runRetryLoop(self: *ObsEgressNode) void {
-        var retry_count: u32 = 0;
-        while (self.running) {
-            self.doConnectAndReceive(&retry_count) catch |err| {
-                if (err != error.EndOfStream) {
-                    log.err("ObsEgress: Connection failed: {any}", .{err});
+        // OBS の再起動に素早く追従するため、最初は短い間隔で再試行する
+        const backoff_ms = [_]u64{ 250, 250, 250, 250, 500, 1000, 2000, 5000 };
+        var attempt: usize = 0;
+        while (self.running.load(.acquire)) {
+            self.doConnectAndReceive() catch |err| {
+                if (err != error.EndOfStream and self.running.load(.acquire)) {
+                    if (attempt == 0) log.warn("ObsEgress: connection failed: {any}", .{err});
                 }
             };
-
-            if (!self.running) break;
-
-            const shift = @as(u6, @intCast(@min(10, retry_count)));
-            const backoff: u64 = @min(30, @as(u64, 1) << shift);
-            log.info("ObsEgress: Retrying in {d} seconds...", .{backoff});
-            var slept_ns: u64 = 0;
-            const target_ns = backoff * std.time.ns_per_s;
-            while (slept_ns < target_ns and self.running) {
-                std.Thread.sleep(100 * std.time.ns_per_ms);
-                slept_ns += 100 * std.time.ns_per_ms;
+            const was_identified = self.identified.swap(false, .acq_rel);
+            self.mutex.lock();
+            if (self.stream) |s| s.close();
+            self.stream = null;
+            self.mutex.unlock();
+            if (was_identified) {
+                attempt = 0;
+                self.publishLink(false);
+                log.warn("ObsEgress: disconnected from OBS; will re-apply {d} desired state(s) on reconnect", .{self.desired.count()});
             }
-            retry_count += 1;
+            if (!self.running.load(.acquire)) break;
+            const wait = backoff_ms[@min(attempt, backoff_ms.len - 1)];
+            attempt += 1;
+            var slept: u64 = 0;
+            while (slept < wait and self.running.load(.acquire)) : (slept += 50) std.Thread.sleep(50 * std.time.ns_per_ms);
         }
     }
 
-    fn doConnectAndReceive(self: *ObsEgressNode, retry_count: *u32) !void {
+    fn doConnectAndReceive(self: *ObsEgressNode) !void {
         const host = self.host orelse return;
-        const address = try std.net.Address.parseIp(host, self.port);
-
+        const address = try std.net.Address.resolveIp(host, self.port);
         const stream = try std.net.tcpConnectToAddress(address);
-
         self.mutex.lock();
-        if (self.stream) |s| s.close();
         self.stream = stream;
         self.mutex.unlock();
 
-        log.info("ObsEgress: Connected to OBS. Starting handshake...", .{});
-        try self.clientHandshake(host, self.port);
-        log.info("ObsEgress: WebSocket handshake completed.", .{});
+        try ws.clientHandshake(stream, host, self.port, "/", "");
+        log.info("ObsEgress: WebSocket handshake completed ({s}:{d})", .{ host, self.port });
 
-        // 接続とハンドシェイクが成功したらリトライ回数をリセット
-        retry_count.* = 0;
-
-        try self.receiverLoop();
-    }
-
-    fn clientHandshake(self: *ObsEgressNode, host: []const u8, port: u16) !void {
-        var buf: [1024]u8 = undefined;
-        const request = try std.fmt.bufPrint(&buf, "GET / HTTP/1.1\r\n" ++
-            "Host: {s}:{}\r\n" ++
-            "Upgrade: websocket\r\n" ++
-            "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
-            "Sec-WebSocket-Version: 13\r\n\r\n", .{ host, port });
-        try self.stream.?.writeAll(request);
-
-        var resp_buf: [1024]u8 = undefined;
-        const n = try self.stream.?.read(&resp_buf);
-        if (n == 0) return error.HandshakeFailed;
-        if (std.mem.indexOf(u8, resp_buf[0..n], "101 Switching Protocols") == null) {
-            return error.HandshakeRejected;
-        }
-    }
-
-    fn receiverLoop(self: *ObsEgressNode) !void {
-        while (self.running) {
-            const frame = try self.readFrame();
+        while (self.running.load(.acquire)) {
+            const frame = try ws.readMessage(stream, self.allocator, 16 * 1024 * 1024);
             defer self.allocator.free(frame.payload);
-
-            if (frame.opcode == 0x8) break; // Close
-
-            const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch continue;
-            defer parsed.deinit();
-
-            const op = parsed.value.object.get("op") orelse continue;
-            switch (op) {
-                .integer => |op_int| {
-                    if (op_int == 0) { // Hello
-                        self.handleHello(parsed.value.object) catch |err| {
-                            log.err("ObsEgress: Auth failed: {any}", .{err});
-                            return err;
-                        };
-                    } else if (op_int == 2) { // Identified
-                        log.info("ObsEgress: Successfully identified with OBS", .{});
-                        // NOTE: 旧実装は起動時に sceneItemId 1..5 を強制的に false へリセット
-                        // していたが、Image 以外のソース (Screen Capture 等) まで消してしまう
-                        // ため削除。OBS 側で望む初期状態を設定してください。
-                    } else if (op_int == 7) { // RequestResponse
-                        if (parsed.value.object.get("d")) |d| {
-                            const req_type = if (d.object.get("requestType")) |v| v.string else "?";
-                            var ok = true;
-                            if (d.object.get("requestStatus")) |status| {
-                                if (status.object.get("result")) |r| {
-                                    if (r == .bool) ok = r.bool;
-                                }
-                                if (!ok) {
-                                    const code = if (status.object.get("code")) |c| c.integer else 0;
-                                    const comment = if (status.object.get("comment")) |c| c.string else "";
-                                    log.err("ObsEgress: ❌ OBS rejected {s} (code={d}): {s}", .{ req_type, code, comment });
-                                } else {
-                                    log.debug("ObsEgress: ✓ {s} succeeded", .{req_type});
-                                }
-                            }
-                        }
-                    } else if (op_int == 5) { // Event
-                        if (parsed.value.object.get("d")) |d| {
-                            if (d.object.get("eventType")) |event_type| {
-                                var topic_buf: [128]u8 = undefined;
-                                if (std.fmt.bufPrint(&topic_buf, "core.obs.event.{s}", .{event_type.string})) |topic| {
-                                    self.bus.publish(topic, frame.payload, .Transient, self.node_id) catch |err| {
-                                        log.err("ObsEgress: Failed to publish OBS event: {any}", .{err});
-                                    };
-                                } else |_| {}
-                            }
-                        }
-                    }
+            switch (frame.opcode) {
+                .close => return error.EndOfStream,
+                .ping => {
+                    self.mutex.lock();
+                    ws.writeFrame(stream, .pong, frame.payload, true) catch {};
+                    self.mutex.unlock();
+                    continue;
                 },
+                .text => {},
                 else => continue,
+            }
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+            const op = parsed.value.object.get("op") orelse continue;
+            if (op != .integer) continue;
+            const d = parsed.value.object.get("d") orelse continue;
+            if (d != .object) continue;
+            switch (op.integer) {
+                0 => try self.handleHello(d.object),
+                2 => self.onIdentified(),
+                5 => self.onEvent(d.object, frame.payload),
+                7 => onResponse(d.object),
+                else => {},
             }
         }
     }
 
-    fn handleHello(self: *ObsEgressNode, hello: std.json.ObjectMap) !void {
-        const d = hello.get("d") orelse return error.InvalidHello;
-        const auth_ptr = d.object.get("authentication");
+    fn handleHello(self: *ObsEgressNode, d: std.json.ObjectMap) !void {
         var buf: [512]u8 = undefined;
         var msg: []const u8 = undefined;
-        if (auth_ptr) |auth| {
-            // 認証が必要
-            const challenge = auth.object.get("challenge").?.string;
-            const salt = auth.object.get("salt").?.string;
+        if (d.get("authentication")) |auth| {
+            if (auth != .object) return error.InvalidHello;
+            const challenge_v = auth.object.get("challenge") orelse return error.InvalidHello;
+            const salt_v = auth.object.get("salt") orelse return error.InvalidHello;
+            if (challenge_v != .string or salt_v != .string) return error.InvalidHello;
             const password = self.password orelse return error.PasswordRequired;
-
-            // hash = base64(sha256(base64(sha256(password + salt)) + challenge))
-            var h1_out: [32]u8 = undefined;
-            var h1 = std.crypto.hash.sha2.Sha256.init(.{});
-            h1.update(password);
-            h1.update(salt);
-            h1.final(&h1_out);
-
-            var b1_buf: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
-            const b1 = std.base64.standard.Encoder.encode(&b1_buf, &h1_out);
-
-            var h2_out: [32]u8 = undefined;
-            var h2 = std.crypto.hash.sha2.Sha256.init(.{});
-            h2.update(b1);
-            h2.update(challenge);
-            h2.final(&h2_out);
-
-            var b2_buf: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
-            const b2 = std.base64.standard.Encoder.encode(&b2_buf, &h2_out);
-
-            msg = try std.fmt.bufPrint(&buf, "{{\"op\":1,\"d\":{{\"rpcVersion\":1,\"authentication\":\"{s}\"}}}}", .{b2});
+            const secret = authString(password, salt_v.string, challenge_v.string);
+            msg = try std.fmt.bufPrint(&buf, "{{\"op\":1,\"d\":{{\"rpcVersion\":1,\"authentication\":\"{s}\",\"eventSubscriptions\":33}}}}", .{secret});
         } else {
-            // 認証なし
-            msg = try std.fmt.bufPrint(&buf, "{{\"op\":1,\"d\":{{\"rpcVersion\":1}}}}", .{});
+            msg = "{\"op\":1,\"d\":{\"rpcVersion\":1,\"eventSubscriptions\":33}}";
         }
-
-        try self.sendFrame(msg);
+        try self.sendRaw(msg);
     }
 
-    fn readFrame(self: *ObsEgressNode) !struct { opcode: u4, payload: []u8 } {
-        var head: [2]u8 = undefined;
-        try self.readExact(&head);
-        const opcode: u4 = @intCast(head[0] & 0x0F);
-        var len: u64 = head[1] & 0x7F;
-        if (len == 126) {
-            var ext: [2]u8 = undefined;
-            try self.readExact(&ext);
-            len = std.mem.readInt(u16, &ext, .big);
-        } else if (len == 127) {
-            var ext: [8]u8 = undefined;
-            try self.readExact(&ext);
-            len = std.mem.readInt(u64, &ext, .big);
-        }
-        const payload = try self.allocator.alloc(u8, @intCast(len));
-        try self.readExact(payload);
-        return .{ .opcode = opcode, .payload = payload };
+    /// OBS WebSocket v5 認証: base64(sha256(base64(sha256(password + salt)) + challenge))
+    pub fn authString(password: []const u8, salt: []const u8, challenge: []const u8) [44]u8 {
+        var h1: [32]u8 = undefined;
+        var s1 = std.crypto.hash.sha2.Sha256.init(.{});
+        s1.update(password);
+        s1.update(salt);
+        s1.final(&h1);
+        var b1: [44]u8 = undefined;
+        _ = std.base64.standard.Encoder.encode(&b1, &h1);
+        var h2: [32]u8 = undefined;
+        var s2 = std.crypto.hash.sha2.Sha256.init(.{});
+        s2.update(&b1);
+        s2.update(challenge);
+        s2.final(&h2);
+        var out: [44]u8 = undefined;
+        _ = std.base64.standard.Encoder.encode(&out, &h2);
+        return out;
     }
 
-    fn readExact(self: *ObsEgressNode, buf: []u8) !void {
-        var total: usize = 0;
-        while (total < buf.len) {
-            const n = try self.stream.?.read(buf[total..]);
-            if (n == 0) return error.EndOfStream;
-            total += n;
+    fn onIdentified(self: *ObsEgressNode) void {
+        self.identified.store(true, .release);
+        self.connections += 1;
+        log.info("ObsEgress: identified with OBS", .{});
+        self.reconcile();
+        // 未接続中に溜まったコマンドを順に送る
+        self.mutex.lock();
+        const pending = self.outbox.toOwnedSlice(self.allocator) catch &.{};
+        self.mutex.unlock();
+        defer {
+            for (pending) |p| self.allocator.free(p);
+            self.allocator.free(pending);
+        }
+        for (pending) |p| self.sendRaw(p) catch {};
+        self.publishLink(true);
+    }
+
+    /// 意図した状態を OBS に再適用する
+    fn reconcile(self: *ObsEgressNode) void {
+        const entries = self.desired.copies(self.allocator) catch return;
+        defer DesiredState.freeCopies(self.allocator, entries);
+        if (entries.len == 0) return;
+        for (entries) |e| self.sendRequest(e.request_type, e.data) catch {};
+        self.reapplied_total += entries.len;
+        if (self.connections > 1) {
+            self.reconnects += 1;
+            log.info("ObsEgress: re-applied {d} desired state(s) after reconnect", .{entries.len});
         }
     }
 
-    fn sendFrame(self: *ObsEgressNode, data: []const u8) !void {
-        var head: [14]u8 = undefined; // max: 1 opcode + 1 len + 8 ext_len + 4 mask_key
-        head[0] = 0x81; // Text, Final
-        var h_len: usize = 2;
-        if (data.len <= 125) {
-            head[1] = @as(u8, @intCast(data.len)) | 0x80; // MASK bit set
-        } else if (data.len <= 65535) {
-            head[1] = 126 | 0x80; // MASK bit set
-            std.mem.writeInt(u16, head[2..4], @intCast(data.len), .big);
-            h_len = 4;
-        } else {
-            head[1] = 127 | 0x80; // MASK bit set
-            std.mem.writeInt(u64, head[2..10], data.len, .big);
-            h_len = 10;
+    fn onEvent(self: *ObsEgressNode, d: std.json.ObjectMap, raw: []const u8) void {
+        const et = d.get("eventType") orelse return;
+        if (et != .string) return;
+        var topic_buf: [128]u8 = undefined;
+        const topic = std.fmt.bufPrint(&topic_buf, "core.obs.event.{s}", .{et.string}) catch return;
+        self.bus.publish(topic, raw, .Transient, self.node_id) catch {};
+    }
+
+    fn onResponse(d: std.json.ObjectMap) void {
+        const status = d.get("requestStatus") orelse return;
+        if (status != .object) return;
+        const result = status.object.get("result") orelse return;
+        if (result == .bool and !result.bool) {
+            const rt = if (d.get("requestType")) |v| (if (v == .string) v.string else "?") else "?";
+            const comment = if (status.object.get("comment")) |c| (if (c == .string) c.string else "") else "";
+            log.err("ObsEgress: OBS rejected {s}: {s}", .{ rt, comment });
         }
+    }
 
-        // RFC 6455 §5.3: Client MUST mask all frames sent to the server
-        const mask_key = [4]u8{ 0x37, 0xFA, 0x21, 0x3D };
-        head[h_len] = mask_key[0];
-        head[h_len + 1] = mask_key[1];
-        head[h_len + 2] = mask_key[2];
-        head[h_len + 3] = mask_key[3];
-        h_len += 4;
-
-        // XOR payload with mask key
-        const masked = self.allocator.alloc(u8, data.len) catch return error.OutOfMemory;
-        defer self.allocator.free(masked);
-        for (data, 0..) |byte, i| {
-            masked[i] = byte ^ mask_key[i % 4];
-        }
-
+    fn sendRaw(self: *ObsEgressNode, data: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
         const s = self.stream orelse return error.NotConnected;
-        try s.writeAll(head[0..h_len]);
-        try s.writeAll(masked);
+        try ws.writeFrame(s, .text, data, true);
+    }
+
+    fn buildRequest(self: *ObsEgressNode, request_type: []const u8, data_json: []const u8) ![]u8 {
+        const id = self.next_request.fetchAdd(1, .monotonic);
+        return std.fmt.allocPrint(self.allocator, "{{\"op\":6,\"d\":{{\"requestType\":\"{s}\",\"requestId\":\"weave-{d}\",\"requestData\":{s}}}}}", .{ request_type, id, data_json });
+    }
+
+    fn sendRequest(self: *ObsEgressNode, request_type: []const u8, data_json: []const u8) !void {
+        const req = try self.buildRequest(request_type, data_json);
+        defer self.allocator.free(req);
+        try self.sendRaw(req);
+    }
+
+    /// 要求を処理する (egress セルの executor 上)
+    pub fn handleRequest(self: *ObsEgressNode, request_type: []const u8, payload: []const u8) void {
+        // 要求種別はトピックの一部なので英数字のみ (validTopic 済み)。requestData は JSON オブジェクトに限る
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch {
+            log.warn("ObsEgress: {s}: requestData must be a JSON object", .{request_type});
+            return;
+        };
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+
+        const stateful = self.desired.record(request_type, payload) catch false;
+        if (self.identified.load(.acquire)) {
+            self.sendRequest(request_type, payload) catch |err| log.warn("ObsEgress: send failed: {any}", .{err});
+            return;
+        }
+        if (stateful) return; // 状態は接続後の reconcile で送られる
+        const req = self.buildRequest(request_type, payload) catch return;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.outbox.items.len >= self.outbox_max) {
+            self.allocator.free(self.outbox.orderedRemove(0));
+        }
+        self.outbox.append(self.allocator, req) catch self.allocator.free(req);
     }
 
     fn onMessage(context: ?*anyopaque, msg: *const event_bus.EventMessage) void {
-        const self: *ObsEgressNode = @ptrCast(@alignCast(context));
-
-        if (std.mem.startsWith(u8, msg.topic, "core.obs.request.")) {
-            const req_type = msg.topic["core.obs.request.".len..];
-            if (std.mem.indexOf(u8, msg.payload, "\"op\"") != null) {
-                self.sendFrame(msg.payload) catch |err| {
-                    std.debug.print("ObsEgress: Failed to send raw frame to OBS: {any}\n", .{err});
-                };
-                return;
-            }
-
-            if (std.mem.eql(u8, req_type, "SetSceneItemEnabled")) {
-                // payload から scene 名 / sceneItemId / sceneItemEnabled を抽出し、
-                // 指定された 1 件だけへ SetSceneItemEnabled を送る。
-                // 旧実装は id 1..5 を総当たりしていたため、Image 以外の
-                // シーンアイテム (Screen Capture 等) まで一緒に切り替わっていた。
-                const Payload = struct {
-                    sceneName: []const u8 = "Overlay",
-                    sceneItemId: i64 = 1,
-                    sceneItemEnabled: bool = true,
-                };
-                var arena = std.heap.ArenaAllocator.init(self.allocator);
-                defer arena.deinit();
-                const parsed = std.json.parseFromSliceLeaky(Payload, arena.allocator(), msg.payload, .{
-                    .ignore_unknown_fields = true,
-                }) catch |err| {
-                    log.err("ObsEgress: Failed to parse SetSceneItemEnabled payload: {any}", .{err});
-                    return;
-                };
-
-                const enabled_str = if (parsed.sceneItemEnabled) "true" else "false";
-                var buf: [512]u8 = undefined;
-                if (std.fmt.bufPrint(&buf, "{{\"op\":6,\"d\":{{\"requestType\":\"SetSceneItemEnabled\",\"requestId\":\"weave-{d}\",\"requestData\":{{\"sceneName\":\"{s}\",\"sceneItemId\":{d},\"sceneItemEnabled\":{s}}}}}}}", .{ msg.id, parsed.sceneName, parsed.sceneItemId, enabled_str })) |req_json| {
-                    log.info("ObsEgress: → SetSceneItemEnabled scene='{s}' id={d} enabled={s}", .{ parsed.sceneName, parsed.sceneItemId, enabled_str });
-                    self.sendFrame(req_json) catch |err| {
-                        log.err("ObsEgress: Failed to send frame: {any}", .{err});
-                    };
-                } else |_| {}
-                return;
-            }
-
-            var buf: [4096]u8 = undefined;
-            const req_json = std.fmt.bufPrint(&buf, "{{\"op\":6,\"d\":{{\"requestType\":\"{s}\",\"requestId\":\"weave-{d}\",\"requestData\":{s}}}}}", .{ req_type, msg.id, msg.payload }) catch return;
-
-            self.sendFrame(req_json) catch |err| {
-                std.debug.print("ObsEgress: Failed to send wrapped frame to OBS: {any}\n", .{err});
-            };
-        } else {
-            self.sendFrame(msg.payload) catch |err| {
-                std.debug.print("ObsEgress: Failed to send frame to OBS: {any}\n", .{err});
-            };
-        }
-    }
-
-    fn onSubscribeAck(ctx: *anyopaque, topic: []const u8) void {
-        _ = ctx;
-        _ = topic;
+        const self: *ObsEgressNode = @ptrCast(@alignCast(context orelse return));
+        const prefix = "core.obs.request.";
+        if (!std.mem.startsWith(u8, msg.topic, prefix)) return;
+        self.handleRequest(msg.topic[prefix.len..], msg.payload);
     }
 };
+
+test "OBS auth string matches the obs-websocket v5 algorithm" {
+    // obs-websocket の仕様例: password="supersecretpassword", salt="lM1GncleQOaCu9lT1yeUZhFYnqhsLLP1G5lAGo3ixaI=",
+    // challenge="+IxH4CnCiqpX1rM9scsNynZzbOe4KhDeYcTNS3PDaeY=" → "1Ct943GAT+6YQUUX47Ia/ncufilbe6+oD6lY+5kaCu4="
+    const out = ObsEgressNode.authString("supersecretpassword", "lM1GncleQOaCu9lT1yeUZhFYnqhsLLP1G5lAGo3ixaI=", "+IxH4CnCiqpX1rM9scsNynZzbOe4KhDeYcTNS3PDaeY=");
+    try std.testing.expectEqualStrings("1Ct943GAT+6YQUUX47Ia/ncufilbe6+oD6lY+5kaCu4=", &out);
+}
+
+test "DesiredState keeps the last value per target" {
+    const a = std.testing.allocator;
+    var d = DesiredState.init(a);
+    defer d.deinit();
+    try std.testing.expect(try d.record("SetSceneItemEnabled", "{\"sceneName\":\"Overlay\",\"sceneItemId\":1,\"sceneItemEnabled\":true}"));
+    try std.testing.expect(try d.record("SetSceneItemEnabled", "{\"sceneName\":\"Overlay\",\"sceneItemId\":1,\"sceneItemEnabled\":false}"));
+    try std.testing.expect(try d.record("SetSceneItemEnabled", "{\"sceneName\":\"Overlay\",\"sceneItemId\":2,\"sceneItemEnabled\":true}"));
+    try std.testing.expect(try d.record("SetCurrentProgramScene", "{\"sceneName\":\"Game\"}"));
+    try std.testing.expect(!try d.record("StartStream", "{}")); // 状態ではない
+    try std.testing.expectEqual(@as(usize, 3), d.count());
+    const c = try d.copies(a);
+    defer DesiredState.freeCopies(a, c);
+    var found_false = false;
+    for (c) |e| {
+        if (std.mem.indexOf(u8, e.data, "\"sceneItemId\":1") != null and std.mem.indexOf(u8, e.data, "false") != null) found_false = true;
+    }
+    try std.testing.expect(found_false);
+}

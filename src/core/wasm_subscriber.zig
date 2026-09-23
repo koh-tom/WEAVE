@@ -8,11 +8,20 @@ pub const WasmSubscriber = struct {
     node_id: u32,
     bus: *event_bus.EventBus,
     manager: *@import("plugin_manager.zig").PluginManager, // 追加
+    /// このプラグインが所属するセル (配送はこのセルの executor 上で行われる)
+    cell: ?*event_bus.Cell = null,
     mutex: std.Thread.Mutex = .{},
 
     // リスタートスロットリング用
     consecutive_failures: u32 = 0,
     last_failure_time: i64 = 0,
+    /// trap 後の再起動要求。exec_env を破棄してから (callback の末尾で) 実行する。
+    /// 旧インスタンスの exec_env が生きている間にインスタンスを破棄しないため。
+    restart_pending: bool = false,
+    /// on_message 1 回あたりの命令数上限 (manifest `limits.max_instructions`)。0 = 無制限
+    max_instructions: u32 = 0,
+    /// on_init の命令数上限 (manifest `limits.max_init_instructions`)。0 = 無制限
+    max_init_instructions: u32 = 0,
 
     // 関数ハンドルキャッシュ
     func_os_alloc: ?wamr.wasm_function_inst_t = null,
@@ -20,7 +29,7 @@ pub const WasmSubscriber = struct {
     func_get_heap_usage: ?wamr.wasm_function_inst_t = null,
     func_os_reset_heap: ?wamr.wasm_function_inst_t = null,
 
-    const MAX_RESTART_ATTEMPTS: u32 = 5;
+    pub const MAX_RESTART_ATTEMPTS: u32 = 5;
     const BASE_BACKOFF_MS: i64 = 1000; // 1秒
 
     // WASM exec_env のスタックサイズ (Zig std.json の再帰に対応)
@@ -52,14 +61,21 @@ pub const WasmSubscriber = struct {
         self.func_os_reset_heap = wamr.wasm_runtime_lookup_function(new_inst, "os_reset_heap");
     }
 
+    /// exec_env に命令数上限を設定する (P0-1)。超過すると "instruction limit exceeded" で trap し、
+    /// 通常の trap と同じく fault → 再起動の経路に乗る。上限は wasm_runtime_call_wasm 1 回ごとに効く。
+    pub fn setInstructionLimit(env: wamr.wasm_exec_env_t, limit: u32) void {
+        const n: c_int = if (limit == 0) -1 else @intCast(@min(limit, std.math.maxInt(c_int)));
+        wamr.wasm_runtime_set_instruction_count_limit(env, n);
+    }
+
     pub fn deinit(self: *WasmSubscriber) void {
         _ = self;
     }
 
     fn handleFault(self: *WasmSubscriber, env: wamr.wasm_exec_env_t, exception_msg: []const u8) void {
         // 障害分離 (Fault Isolation) 時のフェイルセーフ通知
-        var fault_buf: [256]u8 = undefined;
-        const fault_payload = std.fmt.bufPrint(&fault_buf, "{{\"node_id\":{},\"exception\":\"{s}\"}}", .{ self.node_id, exception_msg }) catch "";
+        var fault_buf: [512]u8 = undefined;
+        const fault_payload = std.fmt.bufPrint(&fault_buf, "{{\"node_id\":{},\"exception\":{f}}}", .{ self.node_id, std.json.fmt(exception_msg, .{}) }) catch "";
         if (fault_payload.len > 0) {
             _ = self.bus.publish("core.node.fault", fault_payload, .Transient, self.node_id) catch |err| {
                 log.err("WasmSubscriber: Failed to publish fault event: {any}", .{err});
@@ -67,7 +83,7 @@ pub const WasmSubscriber = struct {
         }
 
         if (self.bus.graph) |g| {
-            g.updateNodeStatus(self.node_id, .fault);
+            g.updateNodeStatus(self.node_id, .restarting);
             var buf: [128]u8 = undefined;
             const payload = std.fmt.bufPrint(&buf, "{{\"node_id\":{},\"status\":\"fault\"}}", .{self.node_id}) catch "";
             _ = self.bus.publish("core.node.status_changed", payload, .Transient, 0) catch {};
@@ -79,6 +95,7 @@ pub const WasmSubscriber = struct {
 
         if (self.consecutive_failures >= MAX_RESTART_ATTEMPTS) {
             log.err("WasmSubscriber: Node {} has failed {} times. Giving up on automatic restart.", .{ self.node_id, self.consecutive_failures });
+            if (self.bus.graph) |g| g.updateNodeStatus(self.node_id, .stopped);
             if (self.func_os_reset_heap) |reset_func| {
                 var reset_argv = [_]u32{0};
                 _ = wamr.wasm_runtime_call_wasm(env, reset_func, 0, &reset_argv);
@@ -99,8 +116,14 @@ pub const WasmSubscriber = struct {
         }
         self.last_failure_time = now;
 
-        // 自動復旧 (Restart) のトリガー
+        // 自動復旧 (Restart) の予約。実行は callback 末尾の runPendingRestart で行う
         log.info("WasmSubscriber: Triggering automatic restart for Node {} (attempt {}/{})", .{ self.node_id, self.consecutive_failures, MAX_RESTART_ATTEMPTS });
+        self.restart_pending = true;
+    }
+
+    fn runPendingRestart(self: *WasmSubscriber) void {
+        if (!self.restart_pending) return;
+        self.restart_pending = false;
         self.manager.restartPlugin(self.node_id, self.bus) catch |err| {
             log.err("WasmSubscriber: Auto-restart failed for Node {}: {any}", .{ self.node_id, err });
         };
@@ -112,6 +135,8 @@ pub const WasmSubscriber = struct {
         // 排他制御のロック
         self.mutex.lock();
         defer self.mutex.unlock();
+        // 下の exec_env の defer より先に登録する = exec_env 破棄の後に実行される
+        defer self.runPendingRestart();
 
         // リスタート上限に達している場合はコールバックを無視
         if (self.consecutive_failures >= MAX_RESTART_ATTEMPTS) {
@@ -122,6 +147,7 @@ pub const WasmSubscriber = struct {
         const env = wamr.wasm_runtime_create_exec_env(self.instance, EXEC_ENV_STACK_SIZE);
         if (env == null) return;
         defer wamr.wasm_runtime_destroy_exec_env(env);
+        setInstructionLimit(env, self.max_instructions);
 
         const alloc_func = self.func_os_alloc orelse return;
 
@@ -175,6 +201,9 @@ pub const WasmSubscriber = struct {
         // on_message実行
         if (self.func_on_message) |func| {
             @import("../api/host_api.zig").current_message_timestamp = msg.timestamp;
+            @import("../api/host_api.zig").current_message_id = msg.id;
+            @import("../api/host_api.zig").current_message_hops = msg.hops;
+            defer @import("../api/host_api.zig").current_message_id = 0;
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
             if (!wamr.wasm_runtime_call_wasm(env, func, 4, &msg_argv)) {
                 var exception_msg: []const u8 = "unknown execution trap";

@@ -1,8 +1,25 @@
+//! EventBus — コントロールプレーン (購読表・ACL の最終関門・ルーティング) と、
+//! セル (Cell) ごとの実行器 (executor) からなる。
+//!
+//! 設計の要点 (docs/v1_plan_2026-09.md §4, §12):
+//! - **セル = 障害ドメイン = スケジューリング単位**。各セルが専用のキューとスレッドを持つ。
+//!   あるセルのノードが遅い / 再起動中 / 無限ループしても、他セルの配送は待たされない。
+//! - **購読は同期コールバックを呼ばない**。Transient の再配送も含め、配送は必ず
+//!   宛先セルのキュー経由で行う。旧実装はロック保持中に同期コールバックしており、
+//!   再起動中のプラグインへ毒メッセージを再配送してデッドロックした (P0-6)。
+//! - **メッセージは参照カウント**で、宛先セルの数だけ共有される (コピーしない)。
+//! - **トピックのインターンを廃止**。任意トピックを publish され続けてもホストの
+//!   メモリが単調増加しない (P1-2)。Transient の保持数にも上限を設ける。
+//! - **因果の深さ (hops)**: プラグインが処理中のメッセージに反応して publish すると
+//!   hops+1 になる。上限を超えた連鎖はハウリング (無限反響) とみなして止める。
+
 const std = @import("std");
 const common = @import("../common/types.zig");
+const pattern = @import("pattern.zig");
+const topics = @import("topics.zig");
 
-/// イベントのQoSレベル
 pub const QoS = common.QoS;
+pub const IntrospectionLevel = common.IntrospectionLevel;
 
 /// ホスト内で管理されるメッセージのエンベロープ
 pub const EventMessage = struct {
@@ -12,21 +29,10 @@ pub const EventMessage = struct {
     source_node_id: u32,
     qos: QoS,
     payload: []const u8,
-
-    pub fn clone(self: EventMessage, allocator: std.mem.Allocator) !EventMessage {
-        return EventMessage{
-            .id = self.id,
-            .topic = self.topic, // topic はインターン化されている前提
-            .timestamp = self.timestamp,
-            .source_node_id = self.source_node_id,
-            .qos = self.qos,
-            .payload = try allocator.dupe(u8, self.payload),
-        };
-    }
-
-    pub fn deinit(self: EventMessage, allocator: std.mem.Allocator) void {
-        allocator.free(self.payload);
-    }
+    /// このメッセージを発行する契機になったメッセージの id (因果トレース)
+    parent_id: u64 = 0,
+    /// 因果の深さ。外部入力 = 0
+    hops: u8 = 0,
 };
 
 /// 購読コールバック
@@ -34,885 +40,1181 @@ pub const SubscribeCallback = *const fn (context: ?*anyopaque, msg: *const Event
 
 pub const Subscriber = struct {
     node_id: u32,
+    cell: *Cell,
     context: ?*anyopaque,
     callback: SubscribeCallback,
+    /// 自分が発行したメッセージも受け取るか (Inspector などのタップ用)
+    receive_own: bool = false,
 };
 
-pub const WildcardSubscription = struct {
-    pattern: []const u8,
-    subscriber: Subscriber,
+/// 参照カウント付きの共有メッセージ。topic と payload は 1 つのバッファに入る。
+pub const SharedMsg = struct {
+    msg: EventMessage,
+    refs: std.atomic.Value(u32),
+    buf: []u8,
+
+    fn create(allocator: std.mem.Allocator, base: EventMessage, initial_refs: u32) !*SharedMsg {
+        const buf = try allocator.alloc(u8, base.topic.len + base.payload.len);
+        errdefer allocator.free(buf);
+        @memcpy(buf[0..base.topic.len], base.topic);
+        @memcpy(buf[base.topic.len..], base.payload);
+        const self = try allocator.create(SharedMsg);
+        self.* = .{
+            .msg = base,
+            .refs = std.atomic.Value(u32).init(initial_refs),
+            .buf = buf,
+        };
+        self.msg.topic = buf[0..base.topic.len];
+        self.msg.payload = buf[base.topic.len..];
+        return self;
+    }
+
+    pub fn retain(self: *SharedMsg) void {
+        _ = self.refs.fetchAdd(1, .monotonic);
+    }
+
+    pub fn release(self: *SharedMsg, allocator: std.mem.Allocator) void {
+        if (self.refs.fetchSub(1, .acq_rel) == 1) {
+            allocator.free(self.buf);
+            allocator.destroy(self);
+        }
+    }
 };
 
-/// MPSC イベントキュー
-pub const EventQueue = struct {
+pub const ControlFn = *const fn (ctx: *anyopaque) void;
+
+const Item = struct {
+    msg: ?*SharedMsg = null,
+    subs: []Subscriber = &.{},
+    control: ?ControlFn = null,
+    control_ctx: ?*anyopaque = null,
+    enq_ns: i128 = 0,
+};
+
+/// セルの信頼レベル
+pub const Trust = enum {
+    core,
+    trusted,
+    untrusted,
+    remote,
+
+    pub fn fromString(s: []const u8) ?Trust {
+        return std.meta.stringToEnum(Trust, s);
+    }
+};
+
+pub const CellOptions = struct {
+    trust: Trust = .core,
+    capacity: usize = 1024,
+    /// 他セルから入ってよいトピック (購読できる範囲の上限)
+    bridges_in: []const []const u8 = &.{"#"},
+    /// 他セルへ出してよいトピック (publish できる範囲の上限)
+    bridges_out: []const []const u8 = &.{"#"},
+};
+
+/// セルの保守タスク (再起動のスケジューリングなど)。executor スレッド上で呼ばれ、
+/// 次に呼んでほしい時刻 (ms, std.math.maxInt(i64) = 不要) を返す。
+pub const Task = struct {
+    ctx: *anyopaque,
+    run: *const fn (ctx: *anyopaque, now_ms: i64) i64,
+};
+
+/// 未処理アイテム数の追跡 (waitIdle 用)
+const Tracker = struct {
+    pending: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    /// 近い将来に実行予定の再起動など
+    scheduled: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
+
+    fn inc(self: *Tracker) void {
+        _ = self.pending.fetchAdd(1, .acq_rel);
+    }
+
+    fn dec(self: *Tracker) void {
+        if (self.pending.fetchSub(1, .acq_rel) == 1) self.notify();
+    }
+
+    fn notify(self: *Tracker) void {
+        self.mutex.lock();
+        self.cond.broadcast();
+        self.mutex.unlock();
+    }
+
+    fn idle(self: *Tracker) bool {
+        return self.pending.load(.acquire) == 0 and self.scheduled.load(.acquire) == 0;
+    }
+};
+
+threadlocal var tl_current_cell: ?*Cell = null;
+
+/// 現在のスレッドがセルの executor ならそのセルを返す
+pub fn currentCell() ?*Cell {
+    return tl_current_cell;
+}
+
+pub const LatencyStats = struct {
+    p50_us: u32 = 0,
+    p99_us: u32 = 0,
+    max_us: u32 = 0,
+    samples: usize = 0,
+};
+
+pub const Cell = struct {
     allocator: std.mem.Allocator,
-    messages: []EventMessage,
-    mutex: std.Thread.Mutex,
-    cond_not_full: std.Thread.Condition,
-    cond_not_empty: std.Thread.Condition,
-    is_shutdown: bool,
-    capacity: usize,
-    count: usize,
+    name: []const u8,
+    trust: Trust,
+    bridges_in: [][]const u8,
+    bridges_out: [][]const u8,
+    tracker: *Tracker,
+
+    mutex: std.Thread.Mutex = .{},
+    not_empty: std.Thread.Condition = .{},
+    not_full: std.Thread.Condition = .{},
+    items: []Item,
     head: usize = 0,
     tail: usize = 0,
+    count: usize = 0,
+    capacity: usize,
+    shutdown: bool = false,
+    thread: ?std.Thread = null,
 
-    pub fn init(allocator: std.mem.Allocator, capacity: usize) !EventQueue {
-        const messages = try allocator.alloc(EventMessage, capacity);
-        return EventQueue{
+    task_mutex: std.Thread.Mutex = .{},
+    tasks: std.ArrayListUnmanaged(Task) = .{},
+
+    delivered: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    dropped: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    lat_mutex: std.Thread.Mutex = .{},
+    lat_ring: [512]u32 = undefined,
+    lat_len: usize = 0,
+    lat_pos: usize = 0,
+
+    fn create(allocator: std.mem.Allocator, name: []const u8, opts: CellOptions, tracker: *Tracker) !*Cell {
+        const self = try allocator.create(Cell);
+        errdefer allocator.destroy(self);
+        const items = try allocator.alloc(Item, opts.capacity);
+        errdefer allocator.free(items);
+        self.* = .{
             .allocator = allocator,
-            .messages = messages,
-            .mutex = .{},
-            .cond_not_full = .{},
-            .cond_not_empty = .{},
-            .is_shutdown = false,
-            .capacity = capacity,
-            .count = 0,
-            .head = 0,
-            .tail = 0,
+            .name = try allocator.dupe(u8, name),
+            .trust = opts.trust,
+            .bridges_in = try dupeList(allocator, opts.bridges_in),
+            .bridges_out = try dupeList(allocator, opts.bridges_out),
+            .tracker = tracker,
+            .items = items,
+            .capacity = opts.capacity,
+        };
+        return self;
+    }
+
+    fn dupeList(allocator: std.mem.Allocator, src: []const []const u8) ![][]const u8 {
+        const out = try allocator.alloc([]const u8, src.len);
+        for (src, 0..) |s, i| out[i] = try allocator.dupe(u8, s);
+        return out;
+    }
+
+    fn freeList(allocator: std.mem.Allocator, list: [][]const u8) void {
+        for (list) |s| allocator.free(s);
+        allocator.free(list);
+    }
+
+    fn destroy(self: *Cell) void {
+        // 残っているアイテムを解放
+        while (self.count > 0) {
+            const it = self.items[self.head];
+            self.head = (self.head + 1) % self.capacity;
+            self.count -= 1;
+            if (it.msg) |m| m.release(self.allocator);
+            if (it.subs.len > 0) self.allocator.free(it.subs);
+        }
+        self.allocator.free(self.items);
+        self.allocator.free(self.name);
+        freeList(self.allocator, self.bridges_in);
+        freeList(self.allocator, self.bridges_out);
+        self.tasks.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+
+    /// このセルのノードが topic を受け取ってよいか
+    pub fn allowsIn(self: *const Cell, topic: []const u8) bool {
+        for (self.bridges_in) |b| if (pattern.isMatch(b, topic)) return true;
+        return false;
+    }
+
+    /// このセルのノードが topic を publish してよいか
+    pub fn allowsOut(self: *const Cell, topic: []const u8) bool {
+        for (self.bridges_out) |b| if (pattern.isMatch(b, topic)) return true;
+        return false;
+    }
+
+    /// パターン p (manifest の publish 宣言) が bridges_out に収まっているか
+    pub fn coversOut(self: *const Cell, p: []const u8) bool {
+        for (self.bridges_out) |b| if (pattern.covers(b, p)) return true;
+        return false;
+    }
+
+    /// パターン p (購読) が bridges_in と交差するか
+    pub fn intersectsIn(self: *const Cell, p: []const u8) bool {
+        for (self.bridges_in) |b| if (pattern.intersect(b, p)) return true;
+        return false;
+    }
+
+    const PushError = error{ QueueFull, QueueShutdown };
+
+    fn push(self: *Cell, item: Item, block: bool) PushError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.shutdown) return error.QueueShutdown;
+        while (self.count >= self.capacity) {
+            if (!block) return error.QueueFull;
+            self.not_full.wait(&self.mutex);
+            if (self.shutdown) return error.QueueShutdown;
+        }
+        var it = item;
+        it.enq_ns = std.time.nanoTimestamp();
+        self.items[self.tail] = it;
+        self.tail = (self.tail + 1) % self.capacity;
+        self.count += 1;
+        self.not_empty.signal();
+    }
+
+    const Pop = union(enum) { item: Item, timeout, closed };
+
+    fn pop(self: *Cell, timeout_ns: ?u64) Pop {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (self.count == 0) {
+            if (self.shutdown) return .closed;
+            if (timeout_ns) |t| {
+                self.not_empty.timedWait(&self.mutex, t) catch {
+                    if (self.count == 0) return if (self.shutdown) .closed else .timeout;
+                };
+            } else {
+                self.not_empty.wait(&self.mutex);
+            }
+        }
+        const it = self.items[self.head];
+        self.head = (self.head + 1) % self.capacity;
+        self.count -= 1;
+        self.not_full.signal();
+        return .{ .item = it };
+    }
+
+    /// executor スレッド上で任意の処理を実行させる (プラグインの on_init など)。
+    /// キューの順序が保たれるので、それ以前に積まれた配送の後に実行される。
+    pub fn post(self: *Cell, f: ControlFn, ctx: *anyopaque) !void {
+        self.tracker.inc();
+        self.push(.{ .control = f, .control_ctx = ctx }, currentCell() == null) catch |e| {
+            self.tracker.dec();
+            return e;
         };
     }
 
-    pub fn deinit(self: *EventQueue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        while (self.count > 0) {
-            self.messages[self.head].deinit(self.allocator);
-            self.head = (self.head + 1) % self.capacity;
-            self.count -= 1;
-        }
-        self.allocator.free(self.messages);
+    pub fn addTask(self: *Cell, task: Task) !void {
+        self.task_mutex.lock();
+        defer self.task_mutex.unlock();
+        try self.tasks.append(self.allocator, task);
     }
 
-    pub fn shutdown(self: *EventQueue) void {
+    pub fn removeTask(self: *Cell, ctx: *anyopaque) void {
+        self.task_mutex.lock();
+        defer self.task_mutex.unlock();
+        var i: usize = 0;
+        while (i < self.tasks.items.len) {
+            if (self.tasks.items[i].ctx == ctx) {
+                _ = self.tasks.swapRemove(i);
+            } else i += 1;
+        }
+    }
+
+    /// タスクを起こす (再起動の予約直後などに、待機中の executor を即座に回す)
+    pub fn wake(self: *Cell) void {
         self.mutex.lock();
-        self.is_shutdown = true;
+        self.not_empty.signal();
         self.mutex.unlock();
-
-        self.cond_not_empty.broadcast();
-        self.cond_not_full.broadcast();
     }
 
-    pub fn push(self: *EventQueue, msg: EventMessage, block_if_full: bool) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.is_shutdown) return error.QueueShutdown;
-
-        while (self.count >= self.capacity) {
-            if (!block_if_full) return error.QueueFull;
-            self.cond_not_full.wait(&self.mutex);
-            if (self.is_shutdown) return error.QueueShutdown;
+    fn runTasks(self: *Cell) i64 {
+        const now = std.time.milliTimestamp();
+        var next: i64 = std.math.maxInt(i64);
+        self.task_mutex.lock();
+        // タスク実行中に addTask されてもよいようにコピーしてから回す
+        var buf: [64]Task = undefined;
+        const n = @min(self.tasks.items.len, buf.len);
+        @memcpy(buf[0..n], self.tasks.items[0..n]);
+        self.task_mutex.unlock();
+        for (buf[0..n]) |t| {
+            const due = t.run(t.ctx, now);
+            if (due < next) next = due;
         }
-
-        self.messages[self.tail] = msg;
-        self.tail = (self.tail + 1) % self.capacity;
-        self.count += 1;
-
-        self.cond_not_empty.signal();
+        return next;
     }
 
-    pub fn pop(self: *EventQueue) ?EventMessage {
+    fn recordLatency(self: *Cell, enq_ns: i128) void {
+        const d = std.time.nanoTimestamp() - enq_ns;
+        const us: u32 = if (d <= 0) 0 else @intCast(@min(@divTrunc(d, 1000), std.math.maxInt(u32)));
+        self.lat_mutex.lock();
+        defer self.lat_mutex.unlock();
+        self.lat_ring[self.lat_pos] = us;
+        self.lat_pos = (self.lat_pos + 1) % self.lat_ring.len;
+        if (self.lat_len < self.lat_ring.len) self.lat_len += 1;
+    }
+
+    /// 直近の配送レイテンシ (キュー投入 → コールバック完了) の分位点
+    pub fn latency(self: *Cell) LatencyStats {
+        var tmp: [512]u32 = undefined;
+        self.lat_mutex.lock();
+        const n = self.lat_len;
+        @memcpy(tmp[0..n], self.lat_ring[0..n]);
+        self.lat_mutex.unlock();
+        if (n == 0) return .{};
+        std.mem.sort(u32, tmp[0..n], {}, std.sort.asc(u32));
+        return .{
+            .p50_us = tmp[(n - 1) / 2],
+            .p99_us = tmp[@min(n - 1, (n * 99) / 100)],
+            .max_us = tmp[n - 1],
+            .samples = n,
+        };
+    }
+
+    pub fn queueDepth(self: *Cell) usize {
         self.mutex.lock();
         defer self.mutex.unlock();
+        return self.count;
+    }
 
-        while (self.count == 0) {
-            if (self.is_shutdown) return null;
-            self.cond_not_empty.wait(&self.mutex);
+    fn dispatch(self: *Cell, item: Item) void {
+        if (item.control) |f| {
+            f(item.control_ctx.?);
+            return;
         }
+        const sm = item.msg orelse return;
+        defer sm.release(self.allocator);
+        defer if (item.subs.len > 0) self.allocator.free(item.subs);
+        for (item.subs) |sub| {
+            if (sub.receive_own or sub.node_id != sm.msg.source_node_id) {
+                sub.callback(sub.context, &sm.msg);
+            }
+        }
+        _ = self.delivered.fetchAdd(1, .monotonic);
+        self.recordLatency(item.enq_ns);
+    }
 
-        const msg = self.messages[self.head];
-        self.head = (self.head + 1) % self.capacity;
-        self.count -= 1;
-        self.cond_not_full.signal();
-        return msg;
+    fn run(self: *Cell) void {
+        tl_current_cell = self;
+        defer tl_current_cell = null;
+        var next_due: i64 = std.math.maxInt(i64);
+        while (true) {
+            var timeout: ?u64 = null;
+            if (next_due != std.math.maxInt(i64)) {
+                const now = std.time.milliTimestamp();
+                const wait_ms: i64 = @max(0, next_due - now);
+                timeout = @as(u64, @intCast(wait_ms)) * std.time.ns_per_ms + 1;
+            } else {
+                // タスクが追加されうるので、無期限ではなく定期的に起きる
+                timeout = 200 * std.time.ns_per_ms;
+            }
+            switch (self.pop(timeout)) {
+                .item => |it| {
+                    self.dispatch(it);
+                    next_due = self.runTasks();
+                    self.tracker.dec();
+                },
+                .timeout => next_due = self.runTasks(),
+                .closed => break,
+            }
+        }
+    }
+
+    fn close(self: *Cell) void {
+        self.mutex.lock();
+        self.shutdown = true;
+        self.not_empty.broadcast();
+        self.not_full.broadcast();
+        self.mutex.unlock();
     }
 };
 
-pub const IntrospectionLevel = common.IntrospectionLevel;
+const SubEntry = struct {
+    pattern: []const u8,
+    sub: Subscriber,
+};
+
+pub const PublishOptions = struct {
+    qos: QoS = .BestEffort,
+    source: u32 = 0,
+    timestamp: ?i64 = null,
+    parent_id: u64 = 0,
+    hops: u8 = 0,
+};
+
+pub const PublishError = error{ InvalidTopic, QueueFull, QueueShutdown, OutOfMemory, HopLimitExceeded };
 
 /// Event Bus コア実装 (スレッドセーフ)
 pub const EventBus = struct {
     allocator: std.mem.Allocator,
-    subscribers: std.StringHashMap(std.ArrayListUnmanaged(Subscriber)),
-    wildcard_subs: std.ArrayListUnmanaged(WildcardSubscription),
-    topic_cache: std.StringHashMap([]const u8), // 追加: トピック名のインターン化用
-    queue: EventQueue,
-    next_msg_id: u64,
-    verbose: bool,
-    mutex: std.Thread.Mutex,
-    cond_idle: std.Thread.Condition, // 追加: アイドル状態通知用
+    mutex: std.Thread.Mutex = .{},
+    /// 完全一致の購読 (トピック → 購読者)
+    exact: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Subscriber)) = .{},
+    /// ワイルドカード購読
+    wildcard: std.ArrayListUnmanaged(SubEntry) = .{},
+    /// Transient の最新値 (キーは保持している SharedMsg の topic)
+    retained: std.StringHashMapUnmanaged(*SharedMsg) = .{},
 
-    last_messages: std.StringHashMap(EventMessage), // 追加: Transient用の最新メッセージ保持
+    next_msg_id: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
+    cells: std.ArrayListUnmanaged(*Cell) = .{},
+    core_cell: *Cell,
+    tracker: *Tracker,
+    running: bool = false,
+    stop_event: std.Thread.ResetEvent = .{},
+    join_mutex: std.Thread.Mutex = .{},
 
-    // デッドロック回避用
-    dispatcher_thread_id: std.atomic.Value(usize),
-    // 配送中のメッセージ数
-    busy_count: std.atomic.Value(usize),
-
-    /// 全イベントの配送時に呼ばれるグローバル・オブザーバー（トランスポート等で使用）
-    global_observer: ?struct {
-        ctx: *anyopaque,
-        callback: *const fn (ctx: *anyopaque, msg: *const EventMessage) void,
-    } = null,
     graph: ?*@import("graph.zig").SystemGraph = null,
     introspection_level: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(IntrospectionLevel.metadata)),
+    verbose: bool = true,
+
+    max_retained: usize = 4096,
+    max_hops: u8 = 16,
+    queue_capacity: usize,
+
+    dropped_total: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    loops_detected: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     pub fn init(allocator: std.mem.Allocator, queue_capacity: usize) !EventBus {
-        return EventBus{
+        const tracker = try allocator.create(Tracker);
+        tracker.* = .{};
+        errdefer allocator.destroy(tracker);
+        const core = try Cell.create(allocator, "core", .{ .trust = .core, .capacity = queue_capacity }, tracker);
+        var self = EventBus{
             .allocator = allocator,
-            .subscribers = std.StringHashMap(std.ArrayListUnmanaged(Subscriber)).init(allocator),
-            .wildcard_subs = .{},
-            .topic_cache = std.StringHashMap([]const u8).init(allocator),
-            .queue = try EventQueue.init(allocator, queue_capacity),
-            .last_messages = std.StringHashMap(EventMessage).init(allocator),
-            .next_msg_id = 1,
-            .verbose = true,
-            .mutex = .{},
-            .cond_idle = .{},
-            .dispatcher_thread_id = std.atomic.Value(usize).init(0),
-            .busy_count = std.atomic.Value(usize).init(0),
-            .graph = null,
-            .introspection_level = std.atomic.Value(u8).init(@intFromEnum(IntrospectionLevel.metadata)),
+            .core_cell = core,
+            .tracker = tracker,
+            .queue_capacity = queue_capacity,
         };
+        try self.cells.append(allocator, core);
+        return self;
     }
 
     pub fn deinit(self: *EventBus) void {
+        self.stop();
+        self.join();
+        var it = self.exact.iterator();
+        while (it.next()) |e| {
+            self.allocator.free(e.key_ptr.*);
+            e.value_ptr.deinit(self.allocator);
+        }
+        self.exact.deinit(self.allocator);
+        for (self.wildcard.items) |w| self.allocator.free(w.pattern);
+        self.wildcard.deinit(self.allocator);
+        var rit = self.retained.valueIterator();
+        while (rit.next()) |m| m.*.release(self.allocator);
+        self.retained.deinit(self.allocator);
+        for (self.cells.items) |c| c.destroy();
+        self.cells.deinit(self.allocator);
+        self.allocator.destroy(self.tracker);
+    }
+
+    // ------------------------------------------------------------------
+    // セル
+    // ------------------------------------------------------------------
+
+    pub fn createCell(self: *EventBus, name: []const u8, opts: CellOptions) !*Cell {
         self.mutex.lock();
         defer self.mutex.unlock();
+        for (self.cells.items) |c| if (std.mem.eql(u8, c.name, name)) return error.CellExists;
+        var o = opts;
+        if (o.capacity == 0) o.capacity = self.queue_capacity;
+        const cell = try Cell.create(self.allocator, name, o, self.tracker);
+        errdefer cell.destroy();
+        try self.cells.append(self.allocator, cell);
+        if (self.running) cell.thread = try std.Thread.spawn(.{}, Cell.run, .{cell});
+        return cell;
+    }
 
-        var it = self.subscribers.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            var list = entry.value_ptr.*;
-            list.deinit(self.allocator);
+    pub fn getCell(self: *EventBus, name: []const u8) ?*Cell {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.cells.items) |c| if (std.mem.eql(u8, c.name, name)) return c;
+        return null;
+    }
+
+    pub fn defaultCell(self: *EventBus) *Cell {
+        return self.core_cell;
+    }
+
+    /// 全セルの executor スレッドを起動する
+    pub fn start(self: *EventBus) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.running) return;
+        self.running = true;
+        for (self.cells.items) |c| {
+            if (c.thread == null) c.thread = try std.Thread.spawn(.{}, Cell.run, .{c});
         }
-        self.subscribers.deinit();
+    }
 
-        for (self.wildcard_subs.items) |ws| {
-            self.allocator.free(ws.pattern);
-        }
-        self.wildcard_subs.deinit(self.allocator);
-
-        // トピックキャッシュの解放
-        var tc_it = self.topic_cache.iterator();
-        while (tc_it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.topic_cache.deinit();
-
-        var last_it = self.last_messages.iterator();
-        while (last_it.next()) |entry| {
-            entry.value_ptr.deinit(self.allocator);
-        }
-        self.last_messages.deinit();
-
-        self.queue.deinit();
+    /// 互換 API: executor 群を起動し、stop() されるまでブロックし、全スレッドを join する。
+    pub fn runDispatcher(self: *EventBus) void {
+        self.start() catch |err| {
+            std.debug.print("EventBus: failed to start executors: {any}\n", .{err});
+            return;
+        };
+        self.stop_event.wait();
+        self.join();
     }
 
     pub fn stop(self: *EventBus) void {
-        self.queue.shutdown();
-        self.cond_idle.broadcast();
+        self.mutex.lock();
+        const cells = self.cells.items;
+        self.mutex.unlock();
+        for (cells) |c| c.close();
+        self.stop_event.set();
+        self.tracker.notify();
     }
 
-    pub fn waitIdle(self: *EventBus) void {
+    /// 全 executor の終了を待つ (stop 後に呼ぶ)。複数スレッドから呼ばれても安全
+    /// (runDispatcher のスレッドと deinit が同時に呼ぶことがある)。
+    pub fn join(self: *EventBus) void {
+        self.join_mutex.lock();
+        defer self.join_mutex.unlock();
         self.mutex.lock();
-        defer self.mutex.unlock();
-
-        while (true) {
-            // キューの中身を安全に確認
-            self.queue.mutex.lock();
-            const q_count = self.queue.count;
-            const shutdown = self.queue.is_shutdown;
-            self.queue.mutex.unlock();
-
-            const b_count = self.busy_count.load(.acquire);
-
-            if ((q_count == 0 and b_count == 0) or shutdown) break;
-
-            // アイドル状態になるまで待機 (ポーリングなし)
-            self.cond_idle.wait(&self.mutex);
+        const cells = self.cells.items;
+        self.mutex.unlock();
+        for (cells) |c| {
+            if (c.thread) |t| {
+                t.join();
+                c.thread = null;
+            }
         }
     }
 
-    /// アイドル状態になった可能性を通知する
-    pub fn notifyPotentialIdle(self: *EventBus) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.cond_idle.signal();
+    /// 全キューが空で、実行中の配送も予定された再起動も無い状態になるまで待つ
+    pub fn waitIdle(self: *EventBus) void {
+        self.tracker.mutex.lock();
+        defer self.tracker.mutex.unlock();
+        while (!self.tracker.idle() and !self.stop_event.isSet()) {
+            self.tracker.cond.timedWait(&self.tracker.mutex, 5 * std.time.ns_per_ms) catch {};
+        }
     }
 
-    // ワイルドカードマッチングロジック (MQTT-like)
-    // + : single level
-    // # : multi level (must be at the end)
-    pub fn isMatch(pattern: []const u8, topic: []const u8) bool {
-        if (std.mem.eql(u8, pattern, "#")) return true;
+    /// 近い将来に実行予定の処理を登録/解除する (waitIdle がそれを待つ)
+    pub fn scheduleBegin(self: *EventBus) void {
+        _ = self.tracker.scheduled.fetchAdd(1, .acq_rel);
+    }
+    pub fn scheduleEnd(self: *EventBus) void {
+        if (self.tracker.scheduled.fetchSub(1, .acq_rel) == 1) self.tracker.notify();
+    }
 
-        var p_it = std.mem.splitScalar(u8, pattern, '.');
-        var t_it = std.mem.splitScalar(u8, topic, '.');
+    // ------------------------------------------------------------------
+    // 購読
+    // ------------------------------------------------------------------
 
-        while (true) {
-            const p_part = p_it.next();
-            const t_part = t_it.next();
+    pub const SubscribeOptions = struct {
+        cell: ?*Cell = null,
+        receive_own: bool = false,
+        /// SystemGraph に購読として記録するか (Inspector / ゲートウェイ等のタップは記録しない)
+        record_graph: bool = true,
+    };
 
-            // パターンが終了
-            if (p_part == null) {
-                // トピックも終了していればマッチ
-                return t_part == null;
-            }
+    /// 互換 API: core セルで購読する
+    pub fn subscribe(self: *EventBus, topic: []const u8, node_id: u32, callback: SubscribeCallback, context: ?*anyopaque) !void {
+        return self.subscribeEx(topic, node_id, callback, context, .{});
+    }
 
-            // MQTT形式の '#' : それ以降全てにマッチ（パターンの途中にあっても複数レベルを許容する）
-            if (std.mem.eql(u8, p_part.?, "#")) {
-                if (p_it.rest().len == 0) {
-                    return true;
+    /// 購読を登録する。同じ (node_id, パターン) の二重登録は無視する (冪等)。
+    /// Transient の最新値があれば、宛先セルのキュー経由で配送する (同期呼び出しはしない)。
+    pub fn subscribeEx(self: *EventBus, topic: []const u8, node_id: u32, callback: SubscribeCallback, context: ?*anyopaque, opts: SubscribeOptions) !void {
+        if (!pattern.validPattern(topic)) return error.InvalidTopic;
+        const cell = opts.cell orelse self.core_cell;
+        const sub = Subscriber{ .node_id = node_id, .cell = cell, .context = context, .callback = callback, .receive_own = opts.receive_own };
+
+        var replay = std.ArrayListUnmanaged(*SharedMsg){};
+        defer replay.deinit(self.allocator);
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (pattern.hasWildcard(topic)) {
+                for (self.wildcard.items) |w| {
+                    if (w.sub.node_id == node_id and w.sub.context == context and std.mem.eql(u8, w.pattern, topic)) return;
                 }
-                const p_rest = p_it.rest();
-                while (true) {
-                    const t_rest = t_it.rest();
-                    if (isMatch(p_rest, t_rest)) return true;
-                    if (t_it.next() == null) break;
+                const owned = try self.allocator.dupe(u8, topic);
+                errdefer self.allocator.free(owned);
+                try self.wildcard.append(self.allocator, .{ .pattern = owned, .sub = sub });
+                var it = self.retained.iterator();
+                while (it.next()) |e| {
+                    if (pattern.isMatch(topic, e.key_ptr.*) and cell.allowsIn(e.key_ptr.*)) {
+                        e.value_ptr.*.retain();
+                        replay.append(self.allocator, e.value_ptr.*) catch e.value_ptr.*.release(self.allocator);
+                    }
                 }
-                return false;
+            } else {
+                const gop = try self.exact.getOrPut(self.allocator, topic);
+                if (!gop.found_existing) {
+                    gop.key_ptr.* = self.allocator.dupe(u8, topic) catch |err| {
+                        _ = self.exact.remove(topic);
+                        return err;
+                    };
+                    gop.value_ptr.* = .{};
+                }
+                for (gop.value_ptr.items) |s| {
+                    if (s.node_id == node_id and s.context == context) return;
+                }
+                try gop.value_ptr.append(self.allocator, sub);
+                if (self.retained.get(topic)) |m| {
+                    if (cell.allowsIn(topic)) {
+                        m.retain();
+                        replay.append(self.allocator, m) catch m.release(self.allocator);
+                    }
+                }
             }
+        }
 
-            // トピックが先に終わってしまったら不一致（'#' の場合を除く）
-            if (t_part == null) return false;
+        if (self.verbose) std.debug.print("Node {} subscribed to topic pattern '{s}' (cell {s})\n", .{ node_id, topic, cell.name });
 
-            // '+' または '*' : この階層だけスキップして次へ
-            if (std.mem.eql(u8, p_part.?, "+") or std.mem.eql(u8, p_part.?, "*")) {
+        if (opts.record_graph) {
+            if (self.graph) |g| g.updateSubscription(node_id, topic) catch {};
+        }
+
+        for (replay.items) |m| {
+            if (m.msg.source_node_id == node_id and !opts.receive_own) {
+                m.release(self.allocator);
                 continue;
             }
-
-            // 文字列の完全一致を確認
-            if (!std.mem.eql(u8, p_part.?, t_part.?)) return false;
-        }
-    }
-
-    fn traceMessage(self: *EventBus, msg: *const EventMessage) void {
-        const level = @as(IntrospectionLevel, @enumFromInt(self.introspection_level.load(.monotonic)));
-        if (level == .off) return;
-        // 自己再帰（トレースのトレース）を防止
-        if (std.mem.eql(u8, msg.topic, "core.system.event_traced")) return;
-        // グラフ更新は頻繁すぎるため、デバッグが煩雑になる場合は除外することも検討できるが、
-        // 現状は全件トレースを基本とする。
-
-        // ペイロードの処理（現在の観測レベルに従う）
-        const payload_json = if (level == .contents)
-            msg.payload
-        else
-            "{\"hidden\":true}";
-
-        var buf: [16384]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}", .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json })) |trace_json| {
-            _ = self.publish("core.system.event_traced", trace_json, .BestEffort, 0) catch {};
-        } else |_| {
-            if (std.fmt.allocPrint(self.allocator, "{{\"id\":{},\"topic\":\"{s}\",\"source\":{},\"timestamp\":{},\"qos\":{},\"payload\":{s}}}", .{ msg.id, msg.topic, msg.source_node_id, msg.timestamp, @intFromEnum(msg.qos), payload_json })) |trace_json| {
-                defer self.allocator.free(trace_json);
-                _ = self.publish("core.system.event_traced", trace_json, .BestEffort, 0) catch {};
-            } else |err| {
-                if (self.verbose) std.debug.print("Tracing: Failed to allocate memory for trace: {any}\n", .{err});
-            }
-        }
-    }
-    pub fn registerDispatcherThread(self: *EventBus) void {
-        const tid = @as(usize, @intCast(std.Thread.getCurrentId()));
-        self.dispatcher_thread_id.store(tid, .monotonic);
-    }
-
-    fn getInternedTopic(self: *EventBus, topic: []const u8) ![]const u8 {
-        if (self.topic_cache.get(topic)) |cached| {
-            return cached;
-        }
-        const duped = try self.allocator.dupe(u8, topic);
-        try self.topic_cache.put(duped, duped);
-        return duped;
-    }
-
-    pub fn subscribe(self: *EventBus, topic: []const u8, node_id: u32, callback: SubscribeCallback, context: ?*anyopaque) !void {
-        self.mutex.lock();
-
-        // ワイルドカードが含まれているかチェック
-        const is_wildcard = std.mem.indexOfScalar(u8, topic, '*') != null or
-            std.mem.indexOfScalar(u8, topic, '+') != null or
-            std.mem.indexOfScalar(u8, topic, '#') != null;
-
-        if (is_wildcard) {
-            try self.wildcard_subs.append(self.allocator, .{
-                .pattern = try self.allocator.dupe(u8, topic),
-                .subscriber = .{
-                    .node_id = node_id,
-                    .context = context,
-                    .callback = callback,
-                },
-            });
-        } else {
-            const result = try self.subscribers.getOrPut(topic);
-            if (!result.found_existing) {
-                result.key_ptr.* = try self.allocator.dupe(u8, topic);
-                result.value_ptr.* = std.ArrayListUnmanaged(Subscriber){};
-            }
-            try result.value_ptr.append(self.allocator, Subscriber{
-                .node_id = node_id,
-                .context = context,
-                .callback = callback,
-            });
-        }
-
-        // 購読リストへの追加が終わったのでアンロック (Deadlock回避)
-        // 以降の graph.updateSubscription 内での publish 呼び出しを安全にする
-        self.mutex.unlock();
-
-        if (self.verbose) std.debug.print("Node {} subscribed to topic pattern '{s}'\n", .{ node_id, topic });
-
-        if (self.graph) |g| {
-            g.updateSubscription(node_id, topic) catch |err| {
-                std.debug.print("EventBus: Failed to update graph subscription: {any}\n", .{err});
+            const subs = self.allocator.alloc(Subscriber, 1) catch {
+                m.release(self.allocator);
+                continue;
+            };
+            subs[0] = sub;
+            self.tracker.inc();
+            cell.push(.{ .msg = m, .subs = subs }, false) catch {
+                self.tracker.dec();
+                self.allocator.free(subs);
+                m.release(self.allocator);
+                _ = cell.dropped.fetchAdd(1, .monotonic);
             };
         }
+    }
 
-        // Transient QoS の最新メッセージがあれば即座に配送
+    /// (node_id, パターン) の購読を解除する
+    pub fn unsubscribe(self: *EventBus, node_id: u32, topic: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.last_messages.get(topic)) |msg| {
-            if (msg.source_node_id != node_id) {
-                if (self.verbose) std.debug.print("QoS: Dispatching Transient message to new subscriber (Topic: {s})\n", .{topic});
-                callback(context, &msg);
+        if (pattern.hasWildcard(topic)) {
+            var i: usize = 0;
+            while (i < self.wildcard.items.len) {
+                const w = self.wildcard.items[i];
+                if (w.sub.node_id == node_id and std.mem.eql(u8, w.pattern, topic)) {
+                    self.allocator.free(w.pattern);
+                    _ = self.wildcard.orderedRemove(i);
+                } else i += 1;
+            }
+        } else if (self.exact.getPtr(topic)) |list| {
+            var i: usize = 0;
+            while (i < list.items.len) {
+                if (list.items[i].node_id == node_id) {
+                    _ = list.orderedRemove(i);
+                } else i += 1;
             }
         }
     }
 
-    pub fn publish(
-        self: *EventBus,
-        topic: []const u8,
-        payload: []const u8,
-        qos: QoS,
-        source_node_id: u32,
-    ) anyerror!void {
-        // システム制御トピックの処理
+    /// ノードの全購読を解除する
+    pub fn unsubscribeAll(self: *EventBus, node_id: u32) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var i: usize = 0;
+        while (i < self.wildcard.items.len) {
+            const w = self.wildcard.items[i];
+            if (w.sub.node_id == node_id) {
+                self.allocator.free(w.pattern);
+                _ = self.wildcard.orderedRemove(i);
+            } else i += 1;
+        }
+        var it = self.exact.valueIterator();
+        while (it.next()) |list| {
+            var j: usize = 0;
+            while (j < list.items.len) {
+                if (list.items[j].node_id == node_id) {
+                    _ = list.orderedRemove(j);
+                } else j += 1;
+            }
+        }
+    }
+
+    /// ノードの購読数
+    pub fn subscriptionCount(self: *EventBus, node_id: u32) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var n: usize = 0;
+        for (self.wildcard.items) |w| {
+            if (w.sub.node_id == node_id) n += 1;
+        }
+        var it = self.exact.valueIterator();
+        while (it.next()) |list| {
+            for (list.items) |s| if (s.node_id == node_id) {
+                n += 1;
+            };
+        }
+        return n;
+    }
+
+    // ------------------------------------------------------------------
+    // 発行
+    // ------------------------------------------------------------------
+
+    /// ワイルドカードマッチ (互換 API)
+    pub fn isMatch(p: []const u8, topic: []const u8) bool {
+        return pattern.isMatch(p, topic);
+    }
+
+    pub fn publish(self: *EventBus, topic: []const u8, payload: []const u8, qos: QoS, source_node_id: u32) PublishError!void {
+        return self.publishEx(topic, payload, .{ .qos = qos, .source = source_node_id });
+    }
+
+    pub fn publishWithMessageTimestamp(self: *EventBus, topic: []const u8, payload: []const u8, qos: QoS, source_node_id: u32, timestamp: i64) PublishError!void {
+        return self.publishEx(topic, payload, .{ .qos = qos, .source = source_node_id, .timestamp = timestamp });
+    }
+
+    pub fn publishEx(self: *EventBus, topic: []const u8, payload: []const u8, opts: PublishOptions) PublishError!void {
+        if (!pattern.validTopic(topic)) return error.InvalidTopic;
+
         if (std.mem.eql(u8, topic, "core.system.introspection")) {
-            var level_str: ?[]const u8 = null;
-
-            // JSON としてパースを試みる
-            const parsed_json = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch null;
-            if (parsed_json) |pj| {
-                switch (pj.value) {
-                    .string => |s| {
-                        level_str = s;
-                    },
-                    .object => |obj| {
-                        if (obj.get("level")) |val| {
-                            if (val == .string) {
-                                level_str = val.string;
-                            }
-                        }
-                    },
-                    else => {},
-                }
-
-                if (level_str) |s| {
-                    const str = std.mem.trim(u8, s, "\"");
-                    var buf: [32]u8 = undefined;
-                    if (str.len < buf.len) {
-                        const lower_str = std.ascii.lowerString(&buf, str);
-                        if (std.meta.stringToEnum(IntrospectionLevel, lower_str)) |level| {
-                            self.mutex.lock();
-                            const old_level = @as(IntrospectionLevel, @enumFromInt(self.introspection_level.load(.monotonic)));
-                            var changed = false;
-                            if (old_level != level) {
-                                self.introspection_level.store(@intFromEnum(level), .monotonic);
-                                changed = true;
-                            }
-                            self.mutex.unlock();
-
-                            if (changed) {
-                                std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
-                                var evt_buf: [128]u8 = undefined;
-                                const evt_payload = std.fmt.bufPrint(&evt_buf, "{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ @tagName(old_level), @tagName(level) }) catch "{}";
-
-                                self.publish("core.system.introspection.changed", evt_payload, .Transient, 0) catch |err| {
-                                    std.debug.print("Failed to publish introspection changed event: {any}\n", .{err});
-                                };
-                            }
-                        }
-                    }
-                }
-                pj.deinit();
-                return;
-            }
-
-            // パースに失敗した場合は、フォールバックとして payload 自体を使う
-            const str = std.mem.trim(u8, payload, "\"");
-            var buf: [32]u8 = undefined;
-            if (str.len < buf.len) {
-                const lower_str = std.ascii.lowerString(&buf, str);
-                if (std.meta.stringToEnum(IntrospectionLevel, lower_str)) |level| {
-                    self.mutex.lock();
-                    const old_level = @as(IntrospectionLevel, @enumFromInt(self.introspection_level.load(.monotonic)));
-                    var changed = false;
-                    if (old_level != level) {
-                        self.introspection_level.store(@intFromEnum(level), .monotonic);
-                        changed = true;
-                    }
-                    self.mutex.unlock();
-
-                    if (changed) {
-                        std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
-                        var evt_buf: [128]u8 = undefined;
-                        const evt_payload = std.fmt.bufPrint(&evt_buf, "{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ @tagName(old_level), @tagName(level) }) catch "{}";
-
-                        self.publish("core.system.introspection.changed", evt_payload, .Transient, 0) catch |err| {
-                            std.debug.print("Failed to publish introspection changed event: {any}\n", .{err});
-                        };
-                    }
-                }
-            }
+            self.handleIntrospection(payload);
             return;
         }
 
-        self.mutex.lock();
-        const msg_id = self.next_msg_id;
-        self.next_msg_id += 1;
-        const interned_topic = try self.getInternedTopic(topic);
-        self.mutex.unlock();
+        if (opts.hops > self.max_hops) {
+            _ = self.loops_detected.fetchAdd(1, .monotonic);
+            if (self.verbose) std.debug.print("EventBus: hop limit exceeded on '{s}' (source {})\n", .{ topic, opts.source });
+            return error.HopLimitExceeded;
+        }
 
-        if (self.graph) |g| {
-            g.recordPublish(source_node_id, interned_topic) catch |err| {
-                std.debug.print("EventBus: Failed to record graph publish: {any}\n", .{err});
+        const id = self.next_msg_id.fetchAdd(1, .monotonic);
+        const base = EventMessage{
+            .id = id,
+            .topic = topic,
+            .timestamp = opts.timestamp orelse std.time.milliTimestamp(),
+            .source_node_id = opts.source,
+            .qos = opts.qos,
+            .payload = payload,
+            .parent_id = opts.parent_id,
+            .hops = opts.hops,
+        };
+
+        // 宛先の収集 (セルごとにまとめる)。1 プラグイン = 1 セルなのでセル数に上限は置かない。
+        // 32 セルまではスタック上で済ませ、それを超えたらヒープに広げる
+        var sfa = std.heap.stackFallback(32 * @sizeOf(Group), self.allocator);
+        const ga = sfa.get();
+        var groups: std.ArrayListUnmanaged(Group) = .{};
+        defer {
+            for (groups.items) |*g| g.subs.deinit(self.allocator);
+            groups.deinit(ga);
+        }
+
+        // 宛先も保持も無ければメッセージ本体を確保しない
+        var sm_opt: ?*SharedMsg = null;
+        defer if (sm_opt) |sm| sm.release(self.allocator);
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (self.exact.get(topic)) |list| {
+                for (list.items) |s| try addToGroup(self.allocator, ga, &groups, s, topic, opts.source);
+            }
+            for (self.wildcard.items) |w| {
+                if (pattern.isMatch(w.pattern, topic)) try addToGroup(self.allocator, ga, &groups, w.sub, topic, opts.source);
+            }
+            if (groups.items.len > 0 or opts.qos == .Transient) {
+                // 1 参照 = 発行処理自身 (defer で解放)
+                const sm = try SharedMsg.create(self.allocator, base, 1);
+                sm_opt = sm;
+                if (opts.qos == .Transient) self.retainLocked(sm);
+            }
+        }
+
+        if (self.graph) |g| g.recordPublish(opts.source, topic) catch {};
+
+        const sm = sm_opt orelse return;
+        const block = opts.qos == .Reliable and currentCell() == null;
+        for (groups.items) |*g| {
+            const subs = g.subs.toOwnedSlice(self.allocator) catch continue;
+            sm.retain();
+            self.tracker.inc();
+            g.cell.push(.{ .msg = sm, .subs = subs }, block) catch |err| {
+                self.tracker.dec();
+                self.allocator.free(subs);
+                sm.release(self.allocator);
+                _ = g.cell.dropped.fetchAdd(1, .monotonic);
+                _ = self.dropped_total.fetchAdd(1, .monotonic);
+                if (err == error.QueueShutdown) return err;
+                if (self.verbose) std.debug.print("QoS: drop '{s}' for cell '{s}' (queue full)\n", .{ topic, g.cell.name });
             };
         }
+    }
 
-        const msg = EventMessage{
-            .id = msg_id,
-            .topic = interned_topic,
-            .timestamp = std.time.milliTimestamp(),
-            .source_node_id = source_node_id,
-            .qos = qos,
-            .payload = try self.allocator.dupe(u8, payload),
-        };
+    const Group = struct { cell: *Cell, subs: std.ArrayListUnmanaged(Subscriber) };
 
-        // Transient QoS の場合は最新メッセージとして保存
-        if (qos == .Transient) {
-            self.mutex.lock();
-            const gop = try self.last_messages.getOrPut(interned_topic);
-            if (!gop.found_existing) {
-                gop.key_ptr.* = interned_topic;
-            } else {
-                gop.value_ptr.deinit(self.allocator);
-            }
-            gop.value_ptr.* = try msg.clone(self.allocator);
-            self.mutex.unlock();
-        }
-
-        var block = (qos == .Reliable);
-        const tid = self.dispatcher_thread_id.load(.monotonic);
-        if (tid != 0 and tid == @as(usize, @intCast(std.Thread.getCurrentId()))) {
-            // ディスパッチャスレッド自身によるPublishはデッドロック回避のためブロックしない
-            block = false;
-        }
-
-        self.queue.push(msg, block) catch |err| {
-            if (err == error.QueueFull) {
-                if (self.verbose) std.debug.print("QoS: drop event '{s}' due to full queue (Source: {})\n", .{ topic, source_node_id });
-                self.allocator.free(msg.payload);
+    fn addToGroup(allocator: std.mem.Allocator, ga: std.mem.Allocator, groups: *std.ArrayListUnmanaged(Group), s: Subscriber, topic: []const u8, source: u32) !void {
+        // 発行元自身には届けない (タップを除く)。ここで除外しておけば自己宛てでキューが詰まらない
+        if (s.node_id == source and !s.receive_own) return;
+        if (!s.cell.allowsIn(topic)) return;
+        for (groups.items) |*g| {
+            if (g.cell == s.cell) {
+                try g.subs.append(allocator, s);
                 return;
             }
-            self.allocator.free(msg.payload);
-            return err;
-        };
-
-        if (self.verbose) std.debug.print("Enqueuing event '{s}' (ID: {}, QoS: {any})\n", .{ topic, msg_id, qos });
+        }
+        const g = try groups.addOne(ga);
+        g.* = .{ .cell = s.cell, .subs = .{} };
+        try g.subs.append(allocator, s);
     }
 
-    pub fn publishWithMessageTimestamp(
-        self: *EventBus,
-        topic: []const u8,
-        payload: []const u8,
-        qos: QoS,
-        source_node_id: u32,
-        timestamp: i64,
-    ) anyerror!void {
+    fn retainLocked(self: *EventBus, sm: *SharedMsg) void {
+        if (self.retained.getEntry(sm.msg.topic)) |e| {
+            e.value_ptr.*.release(self.allocator);
+            sm.retain();
+            e.key_ptr.* = sm.msg.topic;
+            e.value_ptr.* = sm;
+            return;
+        }
+        if (self.retained.count() >= self.max_retained) return;
+        sm.retain();
+        self.retained.put(self.allocator, sm.msg.topic, sm) catch sm.release(self.allocator);
+    }
+
+    pub const RetainedEntry = struct { topic: []u8, payload: []u8, ts: i64 = 0 };
+
+    /// Transient の最新値のコピーを返す (スナップショット用)。呼び出し側が free する。
+    pub fn snapshotRetained(self: *EventBus, allocator: std.mem.Allocator, filter: ?*const fn ([]const u8) bool) !std.ArrayListUnmanaged(RetainedEntry) {
+        var out: std.ArrayListUnmanaged(RetainedEntry) = .{};
         self.mutex.lock();
-        const msg_id = self.next_msg_id;
-        self.next_msg_id += 1;
-        const interned_topic = try self.getInternedTopic(topic);
-        self.mutex.unlock();
-
-        if (self.graph) |g| {
-            g.recordPublish(source_node_id, interned_topic) catch |err| {
-                std.debug.print("EventBus: Failed to record graph publish: {any}\n", .{err});
-            };
+        defer self.mutex.unlock();
+        var it = self.retained.valueIterator();
+        while (it.next()) |m| {
+            if (filter) |f| if (!f(m.*.msg.topic)) continue;
+            try out.append(allocator, .{ .topic = try allocator.dupe(u8, m.*.msg.topic), .payload = try allocator.dupe(u8, m.*.msg.payload), .ts = m.*.msg.timestamp });
         }
-
-        const msg = EventMessage{
-            .id = msg_id,
-            .topic = interned_topic,
-            .timestamp = timestamp,
-            .source_node_id = source_node_id,
-            .qos = qos,
-            .payload = try self.allocator.dupe(u8, payload),
-        };
-
-        // Transient QoS の場合は最新メッセージとして保存
-        if (qos == .Transient) {
-            self.mutex.lock();
-            const gop = try self.last_messages.getOrPut(interned_topic);
-            if (!gop.found_existing) {
-                gop.key_ptr.* = interned_topic;
-            } else {
-                gop.value_ptr.deinit(self.allocator);
-            }
-            gop.value_ptr.* = try msg.clone(self.allocator);
-            self.mutex.unlock();
-        }
-
-        var block = (qos == .Reliable);
-        const tid = self.dispatcher_thread_id.load(.monotonic);
-        if (tid != 0 and tid == @as(usize, @intCast(std.Thread.getCurrentId()))) {
-            // ディスパッチャスレッド自身によるPublishはデッドロック回避のためブロックしない
-            block = false;
-        }
-
-        self.queue.push(msg, block) catch |err| {
-            if (err == error.QueueFull) {
-                if (self.verbose) std.debug.print("QoS: drop event '{s}' due to full queue (Source: {})\n", .{ topic, source_node_id });
-                self.allocator.free(msg.payload);
-                return;
-            }
-            self.allocator.free(msg.payload);
-            return err;
-        };
-
-        if (self.verbose) std.debug.print("Enqueuing event '{s}' (ID: {}, QoS: {any})\n", .{ topic, msg_id, qos });
+        return out;
     }
 
-    pub fn dispatch(self: *EventBus, msg: *const EventMessage) void {
-        _ = self.busy_count.fetchAdd(1, .acquire);
-        defer _ = self.busy_count.fetchSub(1, .release);
-
+    /// 保持中の最新値の payload をコピーして返す
+    pub fn retainedPayload(self: *EventBus, allocator: std.mem.Allocator, topic: []const u8) ?[]u8 {
         self.mutex.lock();
-        // 1. 完全一致の購読者
-        const subs_snapshot = if (self.subscribers.getPtr(msg.topic)) |list|
-            self.allocator.dupe(Subscriber, list.items) catch null
-        else
-            null;
-
-        // 2. ワイルドカード一致の購読者
-        var wildcard_matches: std.ArrayListUnmanaged(Subscriber) = .{};
-        defer wildcard_matches.deinit(self.allocator);
-        for (self.wildcard_subs.items) |ws| {
-            if (EventBus.isMatch(ws.pattern, msg.topic)) {
-                wildcard_matches.append(self.allocator, ws.subscriber) catch {};
-            }
-        }
-        self.mutex.unlock();
-
-        // 配送実行
-        if (subs_snapshot) |snapshot| {
-            defer self.allocator.free(snapshot);
-            for (snapshot) |sub| {
-                if (sub.node_id != msg.source_node_id) {
-                    sub.callback(sub.context, msg);
-                }
-            }
-        }
-
-        for (wildcard_matches.items) |sub| {
-            if (sub.node_id != msg.source_node_id) {
-                sub.callback(sub.context, msg);
-            }
-        }
-
-        // グローバル・オブザーバーへの通知
-        if (self.global_observer) |obs| {
-            obs.callback(obs.ctx, msg);
-        }
-
-        // イベント追跡トピックの発行
-        self.traceMessage(msg);
+        defer self.mutex.unlock();
+        const m = self.retained.get(topic) orelse return null;
+        return allocator.dupe(u8, m.msg.payload) catch null;
     }
 
-    /// イベント配送ループの実行（別スレッドで呼ぶことを想定）
-    pub fn runDispatcher(self: *EventBus) void {
-        self.registerDispatcherThread();
-        if (self.verbose) std.debug.print("Status: Event Dispatcher Thread started\n", .{});
-        while (true) {
-            if (self.queue.pop()) |msg| {
-                self.dispatch(&msg);
-                msg.deinit(self.allocator); // 配送完了後にヒープメモリを解放
-                self.notifyPotentialIdle(); // アイドル状態の可能性を通知
-            } else {
-                self.notifyPotentialIdle();
-                break;
-            }
-        }
-        if (self.verbose) std.debug.print("Status: Event Dispatcher Thread stopped\n", .{});
+    fn handleIntrospection(self: *EventBus, payload: []const u8) void {
+        var level_str: []const u8 = std.mem.trim(u8, payload, " \t\r\n\"");
+        var parsed: ?std.json.Parsed(std.json.Value) = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch null;
+        defer if (parsed) |*p| p.deinit();
+        if (parsed) |p| switch (p.value) {
+            .string => |s| level_str = s,
+            .object => |o| if (o.get("level")) |v| {
+                if (v == .string) level_str = v.string;
+            },
+            else => {},
+        };
+        var buf: [32]u8 = undefined;
+        if (level_str.len >= buf.len) return;
+        const lower = std.ascii.lowerString(&buf, level_str);
+        const level = std.meta.stringToEnum(IntrospectionLevel, lower) orelse return;
+        const old: IntrospectionLevel = @enumFromInt(self.introspection_level.swap(@intFromEnum(level), .acq_rel));
+        if (old == level) return;
+        if (self.verbose) std.debug.print("Introspection: Level changed to {s}\n", .{@tagName(level)});
+        var evt_buf: [128]u8 = undefined;
+        const evt = std.fmt.bufPrint(&evt_buf, "{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ @tagName(old), @tagName(level) }) catch return;
+        self.publish("core.system.introspection.changed", evt, .Transient, 0) catch {};
     }
 };
 
-test "EventBus QoS: Reliable blocks when full" {
-    const allocator = std.testing.allocator;
-    var bus = try EventBus.init(allocator, 2);
+// ======================================================================
+// Tests
+// ======================================================================
+
+var test_count = std.atomic.Value(u32).init(0);
+fn countCb(_: ?*anyopaque, _: *const EventMessage) void {
+    _ = test_count.fetchAdd(1, .monotonic);
+}
+
+test "EventBus: basic delivery via executor" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 16);
     defer bus.deinit();
     bus.verbose = false;
+    test_count.store(0, .monotonic);
+    try bus.subscribe("t.a", 2, countCb, null);
+    try bus.start();
+    try bus.publish("t.a", "x", .Reliable, 1);
+    try bus.publish("t.b", "x", .Reliable, 1);
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 1), test_count.load(.monotonic));
+}
 
-    try bus.publish("test", "1", .BestEffort, 1);
-    try bus.publish("test", "2", .BestEffort, 1);
+test "EventBus: one publish reaches every cell (no fan-out cap)" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 16);
+    defer bus.deinit();
+    bus.verbose = false;
+    test_count.store(0, .monotonic);
+    // 以前は宛先セルが 32 を超えると 33 個目以降に黙って届かなかった
+    var i: u32 = 0;
+    while (i < 40) : (i += 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "plugin.p{d}", .{i});
+        const cell = try bus.createCell(name, .{ .trust = .untrusted });
+        try bus.subscribeEx("t.fan", 100 + i, countCb, null, .{ .cell = cell });
+    }
+    try bus.start();
+    try bus.publish("t.fan", "x", .Reliable, 1);
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 40), test_count.load(.monotonic));
+}
 
-    const thread = try std.Thread.spawn(.{}, struct {
+test "EventBus QoS: Reliable blocks when the target cell queue is full" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 2);
+    defer bus.deinit();
+    bus.verbose = false;
+    test_count.store(0, .monotonic);
+    try bus.subscribe("t", 2, countCb, null);
+    try bus.publish("t", "1", .BestEffort, 1);
+    try bus.publish("t", "2", .BestEffort, 1);
+    const th = try std.Thread.spawn(.{}, struct {
         fn run(b: *EventBus) void {
-            b.publish("test", "3", .Reliable, 1) catch {};
+            b.publish("t", "3", .Reliable, 1) catch {};
         }
     }.run, .{&bus});
-
-    // 待機
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-
-    // まだ 2 つのはず
-    bus.queue.mutex.lock();
-    try std.testing.expectEqual(@as(usize, 2), bus.queue.count);
-    bus.queue.mutex.unlock();
-
-    // 1つ取り出す
-    const m1 = bus.queue.pop().?;
-    m1.deinit(allocator);
-
-    thread.join();
-
-    // 3つ目が追加されているはず
-    bus.queue.mutex.lock();
-    try std.testing.expectEqual(@as(usize, 2), bus.queue.count);
-    bus.queue.mutex.unlock();
+    std.Thread.sleep(50 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 2), bus.core_cell.queueDepth());
+    try bus.start(); // 消費が始まると Reliable の publisher が抜ける
+    th.join();
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 3), test_count.load(.monotonic));
 }
 
 test "EventBus QoS: BestEffort drops when full" {
-    const allocator = std.testing.allocator;
-    var bus = try EventBus.init(allocator, 1);
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 1);
     defer bus.deinit();
     bus.verbose = false;
-
-    try bus.publish("test", "1", .BestEffort, 1);
-    // これはドロップされる
-    try bus.publish("test", "2", .BestEffort, 1);
-
-    bus.queue.mutex.lock();
-    try std.testing.expectEqual(@as(usize, 1), bus.queue.count);
-    bus.queue.mutex.unlock();
+    try bus.subscribe("t", 2, countCb, null);
+    try bus.publish("t", "1", .BestEffort, 1);
+    try bus.publish("t", "2", .BestEffort, 1);
+    try std.testing.expectEqual(@as(usize, 1), bus.core_cell.queueDepth());
+    try std.testing.expectEqual(@as(u64, 1), bus.dropped_total.load(.monotonic));
 }
 
-test "EventBus QoS: Transient stores last message and dispatches to new subscriber" {
-    const allocator = std.testing.allocator;
-    var bus = try EventBus.init(allocator, 10);
+test "EventBus: messages without subscribers are not queued" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 1);
     defer bus.deinit();
     bus.verbose = false;
+    try bus.publish("nobody.listens", "x", .BestEffort, 1);
+    try std.testing.expectEqual(@as(usize, 0), bus.core_cell.queueDepth());
+}
 
+test "EventBus QoS: Transient is replayed to a new subscriber through the queue" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 8);
+    defer bus.deinit();
+    bus.verbose = false;
     try bus.publish("state", "v1", .Transient, 1);
     try bus.publish("state", "v2", .Transient, 1);
 
-    var received: bool = false;
     const S = struct {
-        fn cb(ctx: ?*anyopaque, msg: *const EventMessage) void {
-            const rec_ptr = @as(*bool, @ptrCast(@alignCast(ctx)));
-            if (std.mem.eql(u8, msg.payload, "v2")) {
-                rec_ptr.* = true;
-            }
+        var got: [8]u8 = undefined;
+        var len: usize = 0;
+        fn cb(_: ?*anyopaque, msg: *const EventMessage) void {
+            @memcpy(got[0..msg.payload.len], msg.payload);
+            len = msg.payload.len;
         }
     };
-    try bus.subscribe("state", 2, S.cb, &received);
-
-    try std.testing.expect(received);
-}
-
-test "EventBus: Wildcard Matching" {
-    const isMatch = EventBus.isMatch;
-
-    // Exact match
-    try std.testing.expect(isMatch("a.b.c", "a.b.c"));
-    try std.testing.expect(!isMatch("a.b.c", "a.b.d"));
-
-    // + : Single level
-    try std.testing.expect(isMatch("a.+.c", "a.b.c"));
-    try std.testing.expect(isMatch("a.+", "a.b"));
-    try std.testing.expect(!isMatch("a.+", "a.b.c"));
-
-    // * : Single level (WEAVE compatibility)
-    try std.testing.expect(isMatch("a.*.c", "a.b.c"));
-
-    // # : Multi level
-    try std.testing.expect(isMatch("a.#", "a.b"));
-    try std.testing.expect(isMatch("a.#", "a.b.c"));
-    try std.testing.expect(isMatch("#", "a.b.c"));
-
-    // --- Added 10 robust cases for multi-level, boundary, and negative validation ---
-    // 1. Multi-level combinations (Positive)
-    try std.testing.expect(isMatch("a.b.+.d.#", "a.b.c.d.e.f"));
-
-    // 2. Multi-level combinations (Positive - # matches zero levels)
-    try std.testing.expect(isMatch("a.b.+.d.#", "a.b.c.d"));
-
-    // 3. Multi-level combinations (Negative - missing single-level placeholder)
-    try std.testing.expect(!isMatch("a.b.+.d.#", "a.b.d.e"));
-
-    // 4. Complete wildcard with single '#' (Positive)
-    try std.testing.expect(isMatch("#", "any.depth.topic.name"));
-
-    // 5. Empty topic comparison (Negative)
-    try std.testing.expect(!isMatch("a.b.c", ""));
-
-    // 6. Empty pattern comparison (Negative)
-    try std.testing.expect(!isMatch("", "a.b.c"));
-
-    // 7. Multi-level check with * (Negative - * matches exactly one level)
-    try std.testing.expect(!isMatch("a.*.c", "a.b.x.c"));
-
-    // 8. Same prefix but different length (Negative)
-    try std.testing.expect(!isMatch("a.b", "a.b.c"));
-
-    // 9. Middle-level multi-level wildcard (Positive)
-    try std.testing.expect(isMatch("a.#.d", "a.b.c.d"));
-
-    // 10. Middle-level multi-level wildcard with unmatched end (Negative)
-    try std.testing.expect(!isMatch("a.#.d", "a.b.c.e"));
-}
-
-test "EventBus: Wildcard Dispatch" {
-    const allocator = std.testing.allocator;
-    var bus = try EventBus.init(allocator, 10);
-    defer bus.deinit();
-    bus.verbose = false;
-
-    var count: u32 = 0;
-    const S = struct {
-        fn cb(ctx: ?*anyopaque, _: *const EventMessage) void {
-            const c_ptr = @as(*u32, @ptrCast(@alignCast(ctx)));
-            c_ptr.* += 1;
-        }
-    };
-
-    try bus.subscribe("ext.twitch.#", 2, S.cb, &count);
-    try bus.subscribe("ext.+.chat.*", 3, S.cb, &count);
-
-    const thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
-
-    // Match 1 (Pattern 1 only)
-    try bus.publish("ext.twitch.connected", "{}", .BestEffort, 1);
-    // Match 2 (Both patterns)
-    try bus.publish("ext.twitch.chat.message", "{}", .BestEffort, 1);
-    // No match
-    try bus.publish("other.topic", "{}", .BestEffort, 1);
-
+    try bus.subscribe("state", 2, S.cb, null);
+    // 同期では呼ばれない (ロック中のコールバックはデッドロックの原因)
+    try std.testing.expectEqual(@as(usize, 0), S.len);
+    try bus.start();
     bus.waitIdle();
-    bus.stop();
-    thread.join();
-
-    try std.testing.expectEqual(@as(u32, 3), count);
+    try std.testing.expectEqualStrings("v2", S.got[0..S.len]);
 }
 
-test "EventBus: Introspection Normalization" {
-    const allocator = std.testing.allocator;
-    var bus = try EventBus.init(allocator, 10);
+test "EventBus: Transient replay to wildcard subscribers" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 8);
     defer bus.deinit();
     bus.verbose = false;
+    test_count.store(0, .monotonic);
+    try bus.publish("st.a", "1", .Transient, 1);
+    try bus.publish("st.b", "2", .Transient, 1);
+    try bus.publish("ev.c", "3", .BestEffort, 1);
+    try bus.subscribe("st.#", 2, countCb, null);
+    try bus.start();
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 2), test_count.load(.monotonic));
+}
 
-    // 1. 生の文字列 "OFF"
+test "EventBus: subscribe is idempotent per (node, pattern)" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 8);
+    defer bus.deinit();
+    bus.verbose = false;
+    test_count.store(0, .monotonic);
+    try bus.subscribe("t.x", 2, countCb, null);
+    try bus.subscribe("t.x", 2, countCb, null);
+    try bus.subscribe("t.#", 2, countCb, null);
+    try bus.subscribe("t.#", 2, countCb, null);
+    try std.testing.expectEqual(@as(usize, 2), bus.subscriptionCount(2));
+    try bus.start();
+    try bus.publish("t.x", "1", .BestEffort, 1);
+    bus.waitIdle();
+    // 完全一致と `#` で 2 回 (パターンが違うので別購読)
+    try std.testing.expectEqual(@as(u32, 2), test_count.load(.monotonic));
+    bus.unsubscribeAll(2);
+    try std.testing.expectEqual(@as(usize, 0), bus.subscriptionCount(2));
+}
+
+test "EventBus: wildcard dispatch" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 10);
+    defer bus.deinit();
+    bus.verbose = false;
+    test_count.store(0, .monotonic);
+    try bus.subscribe("ext.twitch.#", 2, countCb, null);
+    try bus.subscribe("ext.+.chat.*", 3, countCb, null);
+    try bus.start();
+    try bus.publish("ext.twitch.connected", "{}", .BestEffort, 1);
+    try bus.publish("ext.twitch.chat.message", "{}", .BestEffort, 1);
+    try bus.publish("other.topic", "{}", .BestEffort, 1);
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 3), test_count.load(.monotonic));
+}
+
+test "EventBus: invalid topics are rejected" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 4);
+    defer bus.deinit();
+    bus.verbose = false;
+    try std.testing.expectError(error.InvalidTopic, bus.publish("a.\"b", "x", .BestEffort, 1));
+    try std.testing.expectError(error.InvalidTopic, bus.publish("a.#", "x", .BestEffort, 1));
+    try std.testing.expectError(error.InvalidTopic, bus.subscribe("", 1, countCb, null));
+}
+
+test "EventBus: hop limit stops echo loops" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 4);
+    defer bus.deinit();
+    bus.verbose = false;
+    try std.testing.expectError(error.HopLimitExceeded, bus.publishEx("a.b", "x", .{ .hops = 17 }));
+    try std.testing.expectEqual(@as(u64, 1), bus.loops_detected.load(.monotonic));
+}
+
+test "EventBus: a stalled cell does not delay other cells (HOL isolation)" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 64);
+    defer bus.deinit();
+    bus.verbose = false;
+    const slow = try bus.createCell("slow", .{});
+    const fast = try bus.createCell("fast", .{});
+
+    const Slow = struct {
+        var gate = std.Thread.ResetEvent{};
+        fn cb(_: ?*anyopaque, _: *const EventMessage) void {
+            gate.wait(); // ゲートが開くまで止まり続ける (無限ループの代わり)
+        }
+    };
+    const Fast = struct {
+        var n = std.atomic.Value(u32).init(0);
+        fn cb(_: ?*anyopaque, _: *const EventMessage) void {
+            _ = n.fetchAdd(1, .monotonic);
+        }
+    };
+    Slow.gate.reset();
+    Fast.n.store(0, .monotonic);
+    try bus.subscribeEx("x", 10, Slow.cb, null, .{ .cell = slow });
+    try bus.subscribeEx("x", 11, Fast.cb, null, .{ .cell = fast });
+    try bus.start();
+    var i: usize = 0;
+    while (i < 20) : (i += 1) try bus.publish("x", "m", .BestEffort, 1);
+
+    var waited: usize = 0;
+    while (Fast.n.load(.monotonic) < 20 and waited < 200) : (waited += 1) std.Thread.sleep(std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u32, 20), Fast.n.load(.monotonic));
+    Slow.gate.set();
+    bus.waitIdle();
+}
+
+test "EventBus: bridges_in filters what a cell can receive" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 8);
+    defer bus.deinit();
+    bus.verbose = false;
+    test_count.store(0, .monotonic);
+    const c = try bus.createCell("sandbox", .{ .trust = .untrusted, .bridges_in = &.{"ext.#"} });
+    try bus.subscribeEx("#", 5, countCb, null, .{ .cell = c });
+    try bus.start();
+    try bus.publish("ext.chat.x", "1", .BestEffort, 1);
+    try bus.publish("core.obs.request.SetX", "2", .BestEffort, 1);
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 1), test_count.load(.monotonic));
+}
+
+test "EventBus: Introspection normalization" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 10);
+    defer bus.deinit();
+    bus.verbose = false;
     try bus.publish("core.system.introspection", "OFF", .BestEffort, 1);
     try std.testing.expectEqual(IntrospectionLevel.off, @as(IntrospectionLevel, @enumFromInt(bus.introspection_level.load(.monotonic))));
-
-    // 2. ダブルクォーテーション付き "\"METADATA\""
     try bus.publish("core.system.introspection", "\"METADATA\"", .BestEffort, 1);
     try std.testing.expectEqual(IntrospectionLevel.metadata, @as(IntrospectionLevel, @enumFromInt(bus.introspection_level.load(.monotonic))));
-
-    // 3. JSON 形式 "{\"level\":\"CONTENTS\"}"
     try bus.publish("core.system.introspection", "{\"level\":\"CONTENTS\"}", .BestEffort, 1);
     try std.testing.expectEqual(IntrospectionLevel.contents, @as(IntrospectionLevel, @enumFromInt(bus.introspection_level.load(.monotonic))));
-
-    // 4. 小文字 "off"
     try bus.publish("core.system.introspection", "off", .BestEffort, 1);
     try std.testing.expectEqual(IntrospectionLevel.off, @as(IntrospectionLevel, @enumFromInt(bus.introspection_level.load(.monotonic))));
 }
 
-test "EventBus: Dynamic Trace Buffer for Large Payload" {
-    const allocator = std.testing.allocator;
-    var bus = try EventBus.init(allocator, 10);
+test "EventBus: introspection change is announced" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 10);
     defer bus.deinit();
     bus.verbose = false;
-
-    // 観測レベルを CONTENTS に設定
-    bus.introspection_level.store(@intFromEnum(IntrospectionLevel.contents), .monotonic);
-
-    // 4096バイト (4KB) の巨大なダミーペイロードを生成
-    const dummy_payload = try allocator.alloc(u8, 4096);
-    defer allocator.free(dummy_payload);
-    @memset(dummy_payload, 'A');
-
-    var count: u32 = 0;
+    bus.introspection_level.store(@intFromEnum(IntrospectionLevel.metadata), .monotonic);
     const S = struct {
-        fn cb(ctx: ?*anyopaque, msg: *const EventMessage) void {
-            const c_ptr = @as(*u32, @ptrCast(@alignCast(ctx)));
-            c_ptr.* += 1;
-
-            // トレースメッセージ内に 4096バイトの payload ('A' が連続する) が含まれていることを確認
-            std.testing.expect(std.mem.indexOf(u8, msg.payload, "AAAA") != null) catch {};
+        var buf: [128]u8 = undefined;
+        var len: usize = 0;
+        fn cb(_: ?*anyopaque, msg: *const EventMessage) void {
+            @memcpy(buf[0..msg.payload.len], msg.payload);
+            len = msg.payload.len;
         }
     };
-
-    // core.system.event_traced トピックを購読して、トレースメッセージが正しく届くことを検証
-    try bus.subscribe("core.system.event_traced", 1, S.cb, &count);
-
-    const thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
-
-    // 4KB ペイロードをパブリッシュする。本来なら固定バッファ 2048 バイトだとオーバーフローしてトレースが破棄されていた
-    try bus.publish("some.user.topic", dummy_payload, .BestEffort, 1);
-
+    try bus.subscribe("core.system.introspection.changed", 1, S.cb, null);
+    try bus.start();
+    try bus.publish("core.system.introspection", "contents", .BestEffort, 1);
     bus.waitIdle();
-    bus.stop();
-    thread.join();
-
-    // トレースメッセージが確実に1回届いたことを確認
-    try std.testing.expectEqual(@as(u32, 1), count);
+    try std.testing.expectEqualStrings("{\"from\":\"metadata\",\"to\":\"contents\"}", S.buf[0..S.len]);
 }
 
-test "EventBus: Introspection level change notification" {
-    const allocator = std.testing.allocator;
-    var bus = try EventBus.init(allocator, 10);
+test "EventBus: large payload reaches a tap subscriber" {
+    const a = std.testing.allocator;
+    var bus = try EventBus.init(a, 10);
     defer bus.deinit();
     bus.verbose = false;
-
-    // 初期状態は metadata
-    bus.introspection_level.store(@intFromEnum(IntrospectionLevel.metadata), .monotonic);
-
-    var count: u32 = 0;
-    var received_payload: [256]u8 = undefined;
-    var payload_len: usize = 0;
-
-    const TestContext = struct {
-        c: *u32,
-        p: []u8,
-        l: *usize,
-    };
-
+    const big = try a.alloc(u8, 64 * 1024);
+    defer a.free(big);
+    @memset(big, 'A');
     const S = struct {
-        fn cb(ctx: ?*anyopaque, msg: *const EventMessage) void {
-            const context = @as(*TestContext, @ptrCast(@alignCast(ctx)));
-            context.c.* += 1;
-            @memcpy(context.p[0..msg.payload.len], msg.payload);
-            context.l.* = msg.payload.len;
+        var n: usize = 0;
+        fn cb(_: ?*anyopaque, msg: *const EventMessage) void {
+            n = msg.payload.len;
         }
     };
-
-    var context_struct = TestContext{ .c = &count, .p = &received_payload, .l = &payload_len };
-    try bus.subscribe("core.system.introspection.changed", 1, S.cb, &context_struct);
-
-    const thread = try std.Thread.spawn(.{}, EventBus.runDispatcher, .{&bus});
-
-    // レベルを contents に変更する
-    try bus.publish("core.system.introspection", "contents", .BestEffort, 1);
-
+    try bus.subscribeEx("#", 1, S.cb, null, .{ .receive_own = true });
+    try bus.start();
+    try bus.publish("some.user.topic", big, .BestEffort, 1);
     bus.waitIdle();
-    bus.stop();
-    thread.join();
-
-    // 通知イベントが届いたことを確認
-    try std.testing.expectEqual(@as(u32, 1), count);
-    const expected_json = "{\"from\":\"metadata\",\"to\":\"contents\"}";
-    try std.testing.expectEqualStrings(expected_json, received_payload[0..payload_len]);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), S.n);
 }

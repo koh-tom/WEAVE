@@ -34,6 +34,32 @@ pub const Config = struct {
     signature_mode: []const u8 = "off",
     trust_keys_path: []const u8 = ".weave/trusted_keys",
     audit_log_path: []const u8 = "audit.log",
+    /// 待ち受けアドレス。既定はループバックのみ (外に開くのは --bind 0.0.0.0 で明示)
+    bind: []const u8 = "127.0.0.1",
+    /// Inspector (Dashboard WebSocket) のトークン。未設定なら起動時に生成して表示
+    dashboard_token: ?[]const u8 = null,
+    /// 起動時の観測レベル: off | metadata | contents
+    introspection: []const u8 = "metadata",
+    /// mock Twitch のシナリオを 1 回だけ再生する (e2e テスト用)
+    mock_twitch_once: bool = false,
+    dashboard_dist: []const u8 = "dashboard/dist",
+    /// 状態 (スナップショット等) の置き場
+    state_dir: []const u8 = ".weave/state",
+    /// 状態のスナップショットを保存する (R7)
+    snapshot: bool = true,
+    /// 起動時にスナップショットから復元する。Supervisor がクラッシュ後に再起動したとき
+    /// (WEAVE_RESTART_COUNT >= 1) か、--restore-snapshot を指定したときだけ。
+    /// 普通に起動したときに何日も前の表示状態が戻ってくる、という驚きを避けるため。
+    restore_snapshot: bool = false,
+    /// StreamElements Astro (互換 A)。チャンネル ID と JWT の両方があるときだけ接続する。
+    /// JWT は環境変数 STREAMELEMENTS_JWT からのみ受け取る (引数は ps で見えるため)
+    streamelements_channel: ?[]const u8 = null,
+    streamelements_url: ?[]const u8 = null,
+    streamelements_jwt: ?[]const u8 = null,
+    /// Streamlabs Socket API (互換 A)。--streamlabs で有効化。トークンは環境変数 STREAMLABS_SOCKET_TOKEN のみ
+    streamlabs: bool = false,
+    streamlabs_url: ?[]const u8 = null,
+    streamlabs_token: ?[]const u8 = null,
 
     pub fn parse(allocator: std.mem.Allocator) !Config {
         var self = Config{
@@ -48,6 +74,7 @@ pub const Config = struct {
         };
 
         errdefer self.deinit(allocator);
+        var signature_mode_set = false;
 
         // デフォルト文字列を dupe して動的アロケーションに統一 (リテラルとの混在・リーク防止)
         self.twitch_channel = try allocator.dupe(u8, self.twitch_channel);
@@ -57,6 +84,10 @@ pub const Config = struct {
         self.signature_mode = try allocator.dupe(u8, self.signature_mode);
         self.trust_keys_path = try allocator.dupe(u8, self.trust_keys_path);
         self.audit_log_path = try allocator.dupe(u8, self.audit_log_path);
+        self.bind = try allocator.dupe(u8, self.bind);
+        self.introspection = try allocator.dupe(u8, self.introspection);
+        self.dashboard_dist = try allocator.dupe(u8, self.dashboard_dist);
+        self.state_dir = try allocator.dupe(u8, self.state_dir);
 
         // 1. 設定ファイルの読み込み (weave.json) - 任意
         if (std.fs.cwd().openFile("weave.json", .{})) |file| {
@@ -107,6 +138,7 @@ pub const Config = struct {
                 if (obj.get("wasm_stack_size")) |v| self.wasm_stack_size = @intCast(v.integer);
                 if (obj.get("wasm_heap_size")) |v| self.wasm_heap_size = @intCast(v.integer);
                 if (obj.get("signature_mode")) |v| {
+                    signature_mode_set = true;
                     allocator.free(self.signature_mode);
                     self.signature_mode = try allocator.dupe(u8, v.string);
                 }
@@ -117,6 +149,18 @@ pub const Config = struct {
                 if (obj.get("audit_log_path")) |v| {
                     allocator.free(self.audit_log_path);
                     self.audit_log_path = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("bind")) |v| {
+                    allocator.free(self.bind);
+                    self.bind = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("dashboard_token")) |v| {
+                    if (self.dashboard_token) |t| allocator.free(t);
+                    self.dashboard_token = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("introspection")) |v| {
+                    allocator.free(self.introspection);
+                    self.introspection = try allocator.dupe(u8, v.string);
                 }
                 if (obj.get("plugins")) |v| {
                     if (v == .array) {
@@ -139,12 +183,39 @@ pub const Config = struct {
             self.node_ws_token = val;
         } else |_| {}
 
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_DASHBOARD_TOKEN")) |val| {
+            if (self.dashboard_token) |t| allocator.free(t);
+            self.dashboard_token = val;
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "STREAMELEMENTS_JWT")) |val| {
+            if (self.streamelements_jwt) |t| {
+                std.crypto.secureZero(u8, @constCast(t));
+                allocator.free(t);
+            }
+            self.streamelements_jwt = val;
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "STREAMLABS_SOCKET_TOKEN")) |val| {
+            if (self.streamlabs_token) |t| {
+                std.crypto.secureZero(u8, @constCast(t));
+                allocator.free(t);
+            }
+            self.streamlabs_token = val;
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_RESTART_COUNT")) |val| {
+            defer allocator.free(val);
+            if ((std.fmt.parseInt(u32, val, 10) catch 0) > 0) self.restore_snapshot = true;
+        } else |_| {}
+
         if (std.process.getEnvVarOwned(allocator, "WEAVE_ENV")) |val| {
             defer allocator.free(val);
             self.weave_env = WeaveEnv.fromString(val);
         } else |_| {}
 
         if (std.process.getEnvVarOwned(allocator, "WEAVE_SIGNATURE_MODE")) |val| {
+            signature_mode_set = true;
             allocator.free(self.signature_mode);
             self.signature_mode = val;
         } else |_| {}
@@ -166,14 +237,7 @@ pub const Config = struct {
                 try self.plugins.append(allocator, try allocator.dupe(u8, "wasm-apps/chat_node.wasm"));
             }
 
-            // Production モードのバリデーションチェック
-            if (self.weave_env == .production) {
-                const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
-                if (!has_token) {
-                    std.debug.print("Error: Production mode requires WEAVE_NODE_WS_TOKEN to be set.\n", .{});
-                    return error.TokenRequiredInProduction;
-                }
-            }
+            try self.applyProductionDefaults(allocator, signature_mode_set);
             return self;
         }
 
@@ -187,6 +251,58 @@ pub const Config = struct {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
                 self.ws_gateway_port = try std.fmt.parseInt(u16, args[i], 10);
+                std.debug.print("Warning: --ws-port is deprecated (the gateway is now served at /ws on the dashboard port)\n", .{});
+            } else if (std.mem.eql(u8, arg, "--bind")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.bind);
+                self.bind = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--dashboard-token")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                if (self.dashboard_token) |t| allocator.free(t);
+                self.dashboard_token = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--introspection")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.introspection);
+                self.introspection = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--dashboard-dist")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.dashboard_dist);
+                self.dashboard_dist = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--streamelements-channel")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                if (self.streamelements_channel) |c| allocator.free(c);
+                self.streamelements_channel = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--streamelements-url")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                if (self.streamelements_url) |u| allocator.free(u);
+                self.streamelements_url = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--streamlabs")) {
+                self.streamlabs = true;
+            } else if (std.mem.eql(u8, arg, "--streamlabs-url")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                if (self.streamlabs_url) |u| allocator.free(u);
+                self.streamlabs_url = try allocator.dupe(u8, args[i]);
+                self.streamlabs = true;
+            } else if (std.mem.eql(u8, arg, "--mock-twitch-once")) {
+                self.mock_twitch_once = true;
+            } else if (std.mem.eql(u8, arg, "--state-dir")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.state_dir);
+                self.state_dir = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--no-snapshot")) {
+                self.snapshot = false;
+            } else if (std.mem.eql(u8, arg, "--restore-snapshot")) {
+                self.restore_snapshot = true;
+            } else if (std.mem.eql(u8, arg, "--supervise")) {
+                // main で処理済み (Supervisor が子プロセスには渡さない)
             } else if (std.mem.eql(u8, arg, "--node-port")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -239,6 +355,7 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 self.graph_full_interval_secs = try std.fmt.parseInt(u32, args[i], 10);
             } else if (std.mem.eql(u8, arg, "--signature-mode")) {
+                signature_mode_set = true;
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
                 allocator.free(self.signature_mode);
@@ -269,16 +386,24 @@ pub const Config = struct {
             try self.plugins.append(allocator, try allocator.dupe(u8, "wasm-apps/chat_node.wasm"));
         }
 
-        // Production モードのバリデーションチェック
-        if (self.weave_env == .production) {
-            const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
-            if (!has_token) {
-                std.debug.print("Error: Production mode requires WEAVE_NODE_WS_TOKEN to be set.\n", .{});
-                return error.TokenRequiredInProduction;
-            }
-        }
-
+        try self.applyProductionDefaults(allocator, signature_mode_set);
         return self;
+    }
+
+    /// production では安全側の既定値を強制する (P1-9)。
+    /// - ノード接続トークン必須
+    /// - 署名モードを明示していなければ strict
+    fn applyProductionDefaults(self: *Config, allocator: std.mem.Allocator, signature_mode_set: bool) !void {
+        if (self.weave_env != .production) return;
+        const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
+        if (!has_token) {
+            std.debug.print("Error: Production mode requires WEAVE_NODE_WS_TOKEN to be set.\n", .{});
+            return error.TokenRequiredInProduction;
+        }
+        if (!signature_mode_set) {
+            allocator.free(self.signature_mode);
+            self.signature_mode = try allocator.dupe(u8, "strict");
+        }
     }
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
@@ -289,6 +414,22 @@ pub const Config = struct {
         allocator.free(self.signature_mode);
         allocator.free(self.trust_keys_path);
         allocator.free(self.audit_log_path);
+        allocator.free(self.bind);
+        allocator.free(self.introspection);
+        allocator.free(self.dashboard_dist);
+        allocator.free(self.state_dir);
+        if (self.dashboard_token) |t| allocator.free(t);
+        if (self.streamelements_channel) |c| allocator.free(c);
+        if (self.streamelements_url) |u| allocator.free(u);
+        if (self.streamelements_jwt) |t| {
+            std.crypto.secureZero(u8, @constCast(t));
+            allocator.free(t);
+        }
+        if (self.streamlabs_url) |u| allocator.free(u);
+        if (self.streamlabs_token) |t| {
+            std.crypto.secureZero(u8, @constCast(t));
+            allocator.free(t);
+        }
         if (self.mock_twitch_scenario) |s| allocator.free(s);
         if (self.node_ws_token) |t| allocator.free(t);
         for (self.plugins.items) |p| {
@@ -302,7 +443,7 @@ fn printHelp() void {
     std.debug.print(
         \\Usage: WEAVE [options] [plugin.wasm ...]
         \\Options:
-        \\  --ws-port <port>     Port for WebSocket Gateway (default: 8080)
+        \\  --ws-port <port>     (deprecated) the gateway is served at /ws on the dashboard port
         \\  --node-port <port>   Port for Node WebSocket Transport (default: 8081)
         \\  --dash-port <port>   Port for Dashboard HTTP Server (default: 3030)
         \\  --twitch <channel>   Twitch channel to join (default: SqLA)
@@ -318,6 +459,19 @@ fn printHelp() void {
         \\  --signature-mode <m> Plugin signature enforcement: off|warn|strict (default: off)
         \\  --trust-keys <path>  Trusted public keys file (default: .weave/trusted_keys)
         \\  --audit-log <path>   Security audit log (JSON Lines, default: audit.log)
+        \\  --bind <addr>        Listen address for dashboard / node servers (default: 127.0.0.1)
+        \\  --dashboard-token <t> Token for the Inspector WebSocket (default: generated)
+        \\  --streamelements-channel <id>  StreamElements channel id (JWT via env STREAMELEMENTS_JWT)
+        \\  --streamelements-url <url>     Astro endpoint (default: wss://astro.streamelements.com/)
+        \\  --streamlabs                   Connect to the Streamlabs Socket API (token via env STREAMLABS_SOCKET_TOKEN)
+        \\  --streamlabs-url <url>         Socket API endpoint (implies --streamlabs)
+        \\  --introspection <l> off|metadata|contents (default: metadata)
+        \\  --mock-twitch-once   Play the mock Twitch scenario once (no loop)
+        \\  --dashboard-dist <d> Directory of the built dashboard (default: dashboard/dist)
+        \\  --state-dir <dir>    Where snapshots are kept (default: .weave/state)
+        \\  --no-snapshot        Do not save state snapshots
+        \\  --restore-snapshot   Restore the last snapshot at startup (automatic after a supervised crash restart)
+        \\  --supervise          Run the core under a supervisor that restarts it on crash
         \\  --help               Show this help
         \\
     , .{});
@@ -376,6 +530,8 @@ test "Config: Production mode requirements" {
 
     try std.testing.expectEqual(WeaveEnv.production, conf.weave_env);
     try std.testing.expectEqualStrings("prod-secret-token", conf.node_ws_token.?);
+    // production では署名モードを明示しなければ strict (P1-9)
+    try std.testing.expectEqualStrings("strict", conf.signature_mode);
 }
 
 test "Config: Wasm stack and heap sizes overrides" {
@@ -393,4 +549,24 @@ test "Config: Wasm stack and heap sizes overrides" {
 
     try std.testing.expectEqual(@as(u32, 65536), conf.wasm_stack_size);
     try std.testing.expectEqual(@as(u32, 32768), conf.wasm_heap_size);
+}
+
+test "Config: snapshot is restored only after a supervised crash restart" {
+    const allocator = std.testing.allocator;
+    {
+        var conf = try Config.parse(allocator);
+        defer conf.deinit(allocator);
+        try std.testing.expect(!conf.restore_snapshot); // 普通の起動では古い状態を戻さない
+    }
+    try setEnv("WEAVE_RESTART_COUNT", "0");
+    {
+        var conf = try Config.parse(allocator);
+        defer conf.deinit(allocator);
+        try std.testing.expect(!conf.restore_snapshot); // Supervisor 配下の初回起動も戻さない
+    }
+    try setEnv("WEAVE_RESTART_COUNT", "1");
+    defer deleteEnv("WEAVE_RESTART_COUNT");
+    var conf = try Config.parse(allocator);
+    defer conf.deinit(allocator);
+    try std.testing.expect(conf.restore_snapshot); // クラッシュからの再起動では戻す
 }

@@ -41,8 +41,19 @@ extern void os_api_log(
     int32_t level, const char* msg_ptr, uint32_t msg_len
 );
 
+WASM_IMPORT("env", os_api_unsubscribe)
+extern int32_t os_api_unsubscribe(const char* topic_ptr, uint32_t topic_len);
+
+/* 処理中メッセージのタイムスタンプ (再生しても同じ値)。current_timestamp は旧名 */
+WASM_IMPORT("env", os_api_message_timestamp)
+extern int64_t os_api_message_timestamp(void);
+
 WASM_IMPORT("env", os_api_current_timestamp)
 extern int64_t os_api_current_timestamp(void);
+
+/* 壁時計 (UNIX ミリ秒) */
+WASM_IMPORT("env", os_api_now)
+extern int64_t os_api_now(void);
 
 /* =========================================================
  * OBS互換マクロ (OBSのboilerplateをスタブ化)

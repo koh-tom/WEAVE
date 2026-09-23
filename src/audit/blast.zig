@@ -9,6 +9,7 @@
 //! 難読化に影響されず健全 (sound) に計算できる。
 
 const std = @import("std");
+const pattern = @import("../core/pattern.zig");
 
 // ============================================================
 // トピックパターンの交差判定 (patterns × patterns)
@@ -21,55 +22,11 @@ const std = @import("std");
 //   #     : 0 個以上の階層にマッチ (末尾でなくてもよい)
 // ============================================================
 
-/// パターン segs が「空トピック (階層 0 個)」にマッチしうるか。
-/// 先頭から `#` が続く限り 0 階層として消費できる。
-fn matchesEmpty(segs: []const []const u8) bool {
-    if (segs.len == 0) return true;
-    if (std.mem.eql(u8, segs[0], "#")) return matchesEmpty(segs[1..]);
-    return false;
-}
-
-fn isWildcardSingle(seg: []const u8) bool {
-    return std.mem.eql(u8, seg, "+") or std.mem.eql(u8, seg, "*");
-}
-
-/// 2 つのパターン (セグメント列) が共通の具体トピックを持つか。
-fn interSegs(a: []const []const u8, b: []const []const u8) bool {
-    if (a.len == 0) return matchesEmpty(b);
-    if (b.len == 0) return matchesEmpty(a);
-
-    const ha = a[0];
-    const hb = b[0];
-
-    // `#` は 0 個以上の階層を吸収する。どちら側にあっても両分岐を試す。
-    if (std.mem.eql(u8, ha, "#")) {
-        // 0 階層消費 (a[1..] へ) or 1 階層消費 (b の先頭 1 階層を任意の具体値とみなす)
-        return interSegs(a[1..], b) or interSegs(a, b[1..]);
-    }
-    if (std.mem.eql(u8, hb, "#")) {
-        return interSegs(a, b[1..]) or interSegs(a[1..], b);
-    }
-
-    // どちらも単一階層。共通の具体値を取れるのは、
-    // いずれかがワイルドカード、または両者が同一リテラルのとき。
-    const agree = isWildcardSingle(ha) or isWildcardSingle(hb) or std.mem.eql(u8, ha, hb);
-    if (!agree) return false;
-    return interSegs(a[1..], b[1..]);
-}
-
 /// パターン a と b の表すトピック集合が交差するか。
+/// 実装はバス・ACL と共通の pattern.intersect (判定器を一つにして、監査と実行時の食い違いを防ぐ)。
 pub fn patternsIntersect(allocator: std.mem.Allocator, a: []const u8, b: []const u8) bool {
-    var a_list = std.ArrayListUnmanaged([]const u8){};
-    defer a_list.deinit(allocator);
-    var b_list = std.ArrayListUnmanaged([]const u8){};
-    defer b_list.deinit(allocator);
-
-    var a_it = std.mem.splitScalar(u8, a, '.');
-    while (a_it.next()) |seg| a_list.append(allocator, seg) catch return false;
-    var b_it = std.mem.splitScalar(u8, b, '.');
-    while (b_it.next()) |seg| b_list.append(allocator, seg) catch return false;
-
-    return interSegs(a_list.items, b_list.items);
+    _ = allocator;
+    return pattern.intersect(a, b);
 }
 
 // ============================================================
@@ -125,11 +82,35 @@ pub const Node = struct {
 pub fn builtinNodes(allocator: std.mem.Allocator) ![]Node {
     var list = std.ArrayListUnmanaged(Node){};
 
+    // Core 自身: 時刻 (tick) を全ノードに供給する
+    try list.append(allocator, .{
+        .name = "Core",
+        .kind = "native",
+        .pub_patterns = try allocator.dupe([]const u8, &.{"core.system.tick"}),
+        .sub_patterns = try allocator.dupe([]const u8, &.{}),
+    });
+
     const twitch_pub = try allocator.dupe([]const u8, &.{"ext.twitch.chat.message"});
     try list.append(allocator, .{
         .name = "TwitchAdapter",
         .kind = "native",
         .pub_patterns = twitch_pub,
+        .sub_patterns = try allocator.dupe([]const u8, &.{}),
+    });
+
+    // StreamElements Astro (互換 A): フォロー・投げ銭・サブスクなどを外から持ち込む入口
+    try list.append(allocator, .{
+        .name = "StreamElements",
+        .kind = "native",
+        .pub_patterns = try allocator.dupe([]const u8, &.{"ext.streamelements.activity.*"}),
+        .sub_patterns = try allocator.dupe([]const u8, &.{}),
+    });
+
+    // Streamlabs Socket API (互換 A): 投げ銭・フォロー・サブスクなど
+    try list.append(allocator, .{
+        .name = "Streamlabs",
+        .kind = "native",
+        .pub_patterns = try allocator.dupe([]const u8, &.{"ext.streamlabs.event.*"}),
         .sub_patterns = try allocator.dupe([]const u8, &.{}),
     });
 
@@ -281,6 +262,134 @@ fn findNode(nodes: []const Node, name: []const u8) ?Node {
 }
 
 // ============================================================
+// 障害の影響範囲 (R9): 「このノードが落ちたら、どこまで止まるか」
+// ------------------------------------------------------------
+// セキュリティの blast radius と同じグラフ (宣言された pub/sub) で計算する。
+//   - 縮退 (degraded): 購読の一部について、提供者が全員落ちている
+//   - 沈黙 (stalled) : 提供者のいる購読が全て途絶えた → 以後の出力も止まるとみなし、
+//                      落ちたノードの集合に加えて推移的に辿る
+// ============================================================
+
+pub const FailureReport = struct {
+    target: []const u8,
+    degraded: []Affected,
+    stalled: [][]const u8,
+    unaffected: [][]const u8,
+    /// 止まる実世界シンク (OBS など)
+    sinks_stopped: [][]const u8,
+
+    pub const Affected = struct {
+        node: []const u8,
+        lost: [][]const u8,
+    };
+};
+
+fn providers(nodes: []const Node, sub: []const u8, exclude_self: []const u8) usize {
+    var n: usize = 0;
+    for (nodes) |p| {
+        if (std.mem.eql(u8, p.name, exclude_self)) continue;
+        for (p.pub_patterns) |pp| {
+            if (pattern.intersect(pp, sub)) {
+                n += 1;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
+fn providedOnlyByFailed(nodes: []const Node, failed: *const std.StringHashMapUnmanaged(void), sub: []const u8, self_name: []const u8) bool {
+    var any = false;
+    for (nodes) |p| {
+        if (std.mem.eql(u8, p.name, self_name)) continue;
+        for (p.pub_patterns) |pp| {
+            if (pattern.intersect(pp, sub)) {
+                any = true;
+                if (!failed.contains(p.name)) return false;
+                break;
+            }
+        }
+    }
+    return any;
+}
+
+pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name: []const u8) !FailureReport {
+    if (findNode(nodes, target_name) == null) return error.NodeNotFound;
+    var failed = std.StringHashMapUnmanaged(void){};
+    try failed.put(arena, target_name, {});
+
+    // 沈黙が連鎖しなくなるまで繰り返す
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (nodes) |n| {
+            if (failed.contains(n.name)) continue;
+            var fed: usize = 0;
+            var lost: usize = 0;
+            for (n.sub_patterns) |sp| {
+                if (providers(nodes, sp, n.name) == 0) continue; // 元々外部入力 (tick など) 扱い
+                fed += 1;
+                if (providedOnlyByFailed(nodes, &failed, sp, n.name)) lost += 1;
+            }
+            if (fed > 0 and lost == fed) {
+                try failed.put(arena, n.name, {});
+                changed = true;
+            }
+        }
+    }
+
+    var degraded = std.ArrayListUnmanaged(FailureReport.Affected){};
+    var stalled = std.ArrayListUnmanaged([]const u8){};
+    var unaffected = std.ArrayListUnmanaged([]const u8){};
+    var sinks = std.ArrayListUnmanaged([]const u8){};
+    for (nodes) |n| {
+        if (std.mem.eql(u8, n.name, target_name)) continue;
+        if (failed.contains(n.name)) {
+            try stalled.append(arena, n.name);
+            if (n.is_sink) try sinks.append(arena, n.name);
+            continue;
+        }
+        var lost = std.ArrayListUnmanaged([]const u8){};
+        for (n.sub_patterns) |sp| {
+            if (providedOnlyByFailed(nodes, &failed, sp, n.name)) try lost.append(arena, sp);
+        }
+        if (lost.items.len > 0) {
+            try degraded.append(arena, .{ .node = n.name, .lost = try lost.toOwnedSlice(arena) });
+        } else {
+            try unaffected.append(arena, n.name);
+        }
+    }
+    return .{
+        .target = target_name,
+        .degraded = try degraded.toOwnedSlice(arena),
+        .stalled = try stalled.toOwnedSlice(arena),
+        .unaffected = try unaffected.toOwnedSlice(arena),
+        .sinks_stopped = try sinks.toOwnedSlice(arena),
+    };
+}
+
+pub fn printFailure(writer: anytype, r: FailureReport) !void {
+    try writer.print("\n=== Failure Radius: {s} ===\n", .{r.target});
+    try writer.print("(このノードが落ちた場合に、どこまで止まるかの上限。宣言された pub/sub から計算)\n\n", .{});
+    try writer.print("[入力の一部を失う (縮退)]\n", .{});
+    if (r.degraded.len == 0) try writer.print("  (なし)\n", .{});
+    for (r.degraded) |d| {
+        try writer.print("  - {s}  失う入力:", .{d.node});
+        for (d.lost) |l| try writer.print(" {s}", .{l});
+        try writer.print("\n", .{});
+    }
+    try writer.print("\n[入力が全て途絶えて沈黙する]\n", .{});
+    if (r.stalled.len == 0) try writer.print("  (なし)\n", .{});
+    for (r.stalled) |s| try writer.print("  - {s}\n", .{s});
+    try writer.print("\n[止まる実世界シンク]\n", .{});
+    if (r.sinks_stopped.len == 0) try writer.print("  (なし — 配信画面の操作は止まらない)\n", .{});
+    for (r.sinks_stopped) |s| try writer.print("  - {s}\n", .{s});
+    try writer.print("\n[影響なし]\n", .{});
+    for (r.unaffected) |u| try writer.print("  - {s}\n", .{u});
+    try writer.print("\n", .{});
+}
+
+// ============================================================
 // レポート出力
 // ============================================================
 
@@ -428,4 +537,35 @@ test "computeBlast: isolated node reaches no sink" {
 
     const report = try computeBlast(arena, nodes.items, "logger");
     try std.testing.expectEqual(@as(usize, 0), report.reachable_sinks.len);
+}
+
+test "computeFailure: only the plugin's own downstream degrades" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var nodes = std.ArrayListUnmanaged(Node){};
+    try nodes.append(arena, .{ .name = "Core", .kind = "native", .pub_patterns = try arena.dupe([]const u8, &.{"core.system.tick"}), .sub_patterns = try arena.dupe([]const u8, &.{}) });
+    try nodes.append(arena, .{ .name = "TwitchAdapter", .kind = "native", .pub_patterns = try arena.dupe([]const u8, &.{"ext.twitch.chat.message"}), .sub_patterns = try arena.dupe([]const u8, &.{}) });
+    try nodes.append(arena, .{ .name = "ObsEgress", .kind = "native", .is_sink = true, .pub_patterns = try arena.dupe([]const u8, &.{"core.obs.event.*"}), .sub_patterns = try arena.dupe([]const u8, &.{"core.obs.request.*"}) });
+    try nodes.append(arena, .{ .name = "kusa_node", .kind = "wasm", .pub_patterns = try arena.dupe([]const u8, &.{"core.obs.request.SetSceneItemEnabled"}), .sub_patterns = try arena.dupe([]const u8, &.{ "ext.twitch.chat.message", "core.system.tick" }) });
+    try nodes.append(arena, .{ .name = "emote_wall", .kind = "wasm", .pub_patterns = try arena.dupe([]const u8, &.{"ext.overlay.emotes"}), .sub_patterns = try arena.dupe([]const u8, &.{"ext.twitch.chat.message"}) });
+    try nodes.append(arena, .{ .name = "emote_overlay", .kind = "remote", .pub_patterns = try arena.dupe([]const u8, &.{}), .sub_patterns = try arena.dupe([]const u8, &.{"ext.overlay.emotes"}) });
+
+    // emote_wall が落ちても、止まるのはその下流 (emote_overlay) だけ。OBS 操作は止まらない
+    const r = try computeFailure(arena, nodes.items, "emote_wall");
+    try std.testing.expectEqual(@as(usize, 1), r.stalled.len);
+    try std.testing.expectEqualStrings("emote_overlay", r.stalled[0]);
+    try std.testing.expectEqual(@as(usize, 0), r.sinks_stopped.len);
+
+    // チャットの入口 (TwitchAdapter) が落ちると、チャットだけに依存する emote 系は沈黙し、
+    // kusa は tick があるので「縮退」に留まる
+    const r2 = try computeFailure(arena, nodes.items, "TwitchAdapter");
+    var kusa_degraded = false;
+    for (r2.degraded) |d| {
+        if (std.mem.eql(u8, d.node, "kusa_node")) kusa_degraded = true;
+    }
+    try std.testing.expect(kusa_degraded);
+    // emote_wall と emote_overlay はチャットにしか依存しないので沈黙する
+    try std.testing.expectEqual(@as(usize, 2), r2.stalled.len);
+    try std.testing.expectEqual(@as(usize, 0), r2.sinks_stopped.len);
 }

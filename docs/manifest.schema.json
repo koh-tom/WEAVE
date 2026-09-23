@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://weave.local/schemas/manifest-v1.json",
+  "title": "WEAVE plugin manifest v1",
+  "type": "object",
+  "required": ["name", "version", "permissions"],
+  "properties": {
+    "abi_version": { "const": 1 },
+    "name": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+    "version": { "type": "string", "minLength": 1 },
+    "author": { "type": "string" },
+    "description": { "type": "string" },
+    "cell": { "type": "string" },
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "publish": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(\\+|\\*|#|[A-Za-z0-9_-]+)(\\.(\\+|\\*|#|[A-Za-z0-9_-]+))*$",
+            "not": { "enum": ["#"] }
+          },
+          "description": "core.node.* / core.system.* / core.security.* / core.cell.* are reserved for the Core and rejected"
+        },
+        "subscribe": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^(\\+|\\*|#|[A-Za-z0-9_-]+)(\\.(\\+|\\*|#|[A-Za-z0-9_-]+))*$" }
+        },
+        "data_access": {
+          "type": "array",
+          "items": { "enum": ["pii"] },
+          "description": "required to subscribe to ext.twitch.chat.* / ext.chat.*"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rate_limit_eps": { "type": "number", "minimum": 0 },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_instructions": { "type": "integer", "minimum": 1 },
+        "max_init_instructions": { "type": "integer", "minimum": 1 },
+        "memory_pages": { "type": "integer", "minimum": 1 },
+        "state_bytes": { "type": "integer", "minimum": 0 },
+        "max_topics": { "type": "integer", "minimum": 1 },
+        "mailbox": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "restart": {
+      "type": "object",
+      "properties": {
+        "policy": { "enum": ["always", "on_failure", "never"] },
+        "window_secs": { "type": "integer", "minimum": 1 },
+        "max_faults": { "type": "integer", "minimum": 1 },
+        "quarantine_secs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "config": {}
+  }
+}

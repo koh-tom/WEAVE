@@ -87,19 +87,15 @@ test "WasmSubscriber: OOM auto restart" {
     const exc_str = std.mem.span(@as([*c]const u8, @ptrCast(&received_exception)));
     try std.testing.expectEqualStrings("out_of_memory", exc_str);
 
-    // 3. Repeat OOM trigger to increment consecutive failures up to MAX_RESTART_ATTEMPTS (5)
-    // Note: Restarting bad_node will execute on_init which subscribes to allowed.topic again,
-    // resulting in a duplicate subscription. This means a single publish triggers multiple callbacks.
-
-    // Publish 2nd time: triggers 2nd and 3rd faults (fault_count becomes 3)
-    try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM", .BestEffort, 0);
-    bus.waitIdle();
-    try std.testing.expectEqual(@as(u32, 3), fault_count);
-
-    // Publish 3rd time: triggers 4th and 5th faults (fault_count becomes 5)
-    try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM", .BestEffort, 0);
-    bus.waitIdle();
-    try std.testing.expectEqual(@as(u32, 5), fault_count);
+    // 3. 連続失敗が MAX_RESTART_ATTEMPTS (5) に達するまで OOM を起こし続ける。
+    // 購読は (node, パターン) で冪等なので、1 回の publish で起きる fault はちょうど 1 回
+    // (旧実装は再起動のたびに二重購読になり、1 publish で複数 fault が起きていた)。
+    var k: u32 = 2;
+    while (k <= 5) : (k += 1) {
+        try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM", .BestEffort, 0);
+        bus.waitIdle();
+        try std.testing.expectEqual(k, fault_count);
+    }
 
     // Check consecutive_failures value is 5
     var pm_it = pm.plugins.iterator();
