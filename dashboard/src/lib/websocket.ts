@@ -1,141 +1,227 @@
-import { addEventLog, metrics, systemGraph, type EventMessage } from './stores';
+import { get } from 'svelte/store';
+import {
+  addEventLog,
+  addFault,
+  addSecurityEvent,
+  connection,
+  edges,
+  type EventMessage,
+  introspection,
+  metrics,
+  type NodeStatus,
+  type NodeView,
+  nodes,
+  obsState,
+} from './stores';
 
 let socket: WebSocket | null = null;
-let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let graphTimer: ReturnType<typeof setTimeout> | null = null;
 let epsCounter = 0;
 
-/**
- * WEAVE Core への接続を開始する
- */
-export function connect(url: string = `ws://${window.location.host}/ws`) {
-    if (socket) {
-        socket.close();
+/** トークンは URL (?token=...) で渡され、タブを閉じるまで sessionStorage に保持する */
+function token(): string | null {
+  const fromUrl = new URLSearchParams(window.location.search).get('token');
+  if (fromUrl) {
+    try {
+      sessionStorage.setItem('weave-token', fromUrl);
+    } catch {
+      /* プライベートモード等では保存できないが、URL にあるので問題ない */
     }
-
-    console.log(`Connecting to WEAVE Gateway: ${url}`);
-    socket = new WebSocket(url);
-
-    socket.onopen = () => {
-        console.log('Connected to WEAVE Gateway.');
-        if (reconnectTimeout) {
-            clearTimeout(reconnectTimeout);
-            reconnectTimeout = null;
-        }
-        // 接続時に現在のトポロジー情報をリクエストする
-        send('core.system.graph.request', {});
-    };
-
-    socket.onmessage = (event) => {
-        try {
-            const data: EventMessage = JSON.parse(event.data);
-            
-            // 1. 全てのイベントをログに追加 (Pure Projection)
-            addEventLog(data);
-            epsCounter++;
-
-            // 2. トピックに応じた特殊な状態更新
-            // デルタ（変更）が来たら、手抜き（Pure Projection）として全体の再送を要求する
-            if (data.topic === 'core.system.graph.delta') {
-                send('core.system.graph.request', {});
-            }
-
-            if (data.topic === 'core.system.graph.request' || data.topic === 'core.system.graph.full') {
-                const rawNodes = data.payload.nodes || [];
-                const rawEdges = data.payload.edges || [];
-                const sfEdges: any[] = [];
-
-                const sfNodes = rawNodes.map((n: any, index: number) => ({
-                    id: String(n.id),
-                    // 簡易的な自動整列 (間隔を少し広めに)
-                    position: { x: 50 + (index % 3) * 250, y: 100 + Math.floor(index / 3) * 150 },
-                    data: { label: n.name || `Node ${n.id}` },
-                    type: 'default',
-                    style: "border: 2px solid #0A1C56; border-radius: 4px; padding: 10px; font-weight: bold; background: white;"
-                }));
-
-                if (rawEdges && rawEdges.length > 0) {
-                    rawEdges.forEach((edge: any) => {
-                        sfEdges.push({
-                            id: `e-${edge.source}-${edge.target}-${edge.topic}`,
-                            source: String(edge.source),
-                            target: String(edge.target),
-                            animated: true,
-                            style: "stroke: #0A1C56; stroke-width: 2px;",
-                            label: edge.topic,
-                            labelBgStyle: { fill: 'white' },
-                            labelStyle: { fill: '#0A1C56', fontWeight: 700, fontSize: 10 }
-                        });
-                    });
-                } else {
-                    // Pub/Subの関係からエッジ（線）を推論 (フォールバック)
-                    rawNodes.forEach((pubNode: any) => {
-                        const pubs = pubNode.pub || [];
-                        pubs.forEach((pubTopic: string) => {
-                            rawNodes.forEach((subNode: any) => {
-                                if (pubNode.id === subNode.id) return; // 自己宛ての通信は線を省く
-                                
-                                const subs = subNode.sub || [];
-                                subs.forEach((subTopic: string) => {
-                                    let isMatch = false;
-                                    // トピックのワイルドカード判定
-                                    if (subTopic === '#' || subTopic === '>') {
-                                        isMatch = true;
-                                    } else if (subTopic.endsWith('*')) {
-                                        const prefix = subTopic.slice(0, -1);
-                                        if (pubTopic.startsWith(prefix)) isMatch = true;
-                                    } else if (pubTopic === subTopic) {
-                                        isMatch = true;
-                                    }
-
-                                    if (isMatch) {
-                                        sfEdges.push({
-                                            id: `e-${pubNode.id}-${subNode.id}-${pubTopic}`,
-                                            source: String(pubNode.id),
-                                            target: String(subNode.id),
-                                            animated: true,
-                                            style: "stroke: #0A1C56; stroke-width: 2px;",
-                                            label: pubTopic,
-                                            labelBgStyle: { fill: 'white' },
-                                            labelStyle: { fill: '#0A1C56', fontWeight: 700, fontSize: 10 }
-                                        });
-                                    }
-                                });
-                            });
-                        });
-                    });
-                }
-
-                systemGraph.set({ nodes: sfNodes, edges: sfEdges });
-            }
-            
-        } catch (err) {
-            console.error('Failed to parse WEAVE event:', err);
-        }
-    };
-
-    socket.onclose = () => {
-        console.warn('WEAVE Gateway disconnected. Reconnecting in 2s...');
-        if (!reconnectTimeout) {
-            reconnectTimeout = setTimeout(() => connect(url), 2000);
-        }
-    };
-
-    socket.onerror = (err) => {
-        console.error('WebSocket error:', err);
-    };
+    return fromUrl;
+  }
+  try {
+    return sessionStorage.getItem('weave-token');
+  } catch {
+    return null;
+  }
 }
 
-/**
- * 送信用のヘルパー関数 (必要に応じて)
- */
-export function send(topic: string, payload: any) {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ topic, payload }));
-    }
+function defaultUrl(): string {
+  // vite dev server (5173) から開いた場合は WEAVE 本体 (3030) に繋ぐ
+  const host = window.location.port === '5173' ? `${window.location.hostname}:3030` : window.location.host;
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const t = token();
+  return `${proto}://${host}/ws${t ? `?token=${encodeURIComponent(t)}` : ''}`;
 }
 
-// 1秒ごとに EPS (Events Per Second) を計算して Store を更新
+export function connect(url: string = defaultUrl()) {
+  if (socket) socket.close();
+  connection.set('connecting');
+  socket = new WebSocket(url);
+
+  socket.onopen = () => {
+    connection.set('open');
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    send('core.system.graph.request', {});
+  };
+
+  socket.onmessage = (event) => {
+    let data: EventMessage;
+    try {
+      data = JSON.parse(event.data);
+    } catch (err) {
+      console.error('WEAVE: invalid event', err);
+      return;
+    }
+    addEventLog(data);
+    epsCounter++;
+    route(data);
+  };
+
+  socket.onclose = (ev) => {
+    // 401 はハンドシェイク前に閉じられるので、code 1006 で即閉じた場合は認証エラーの可能性が高い
+    connection.set(ev.code === 1006 && get(connection) === 'connecting' ? 'unauthorized' : 'closed');
+    if (!reconnectTimer) reconnectTimer = setTimeout(() => connect(url), 2000);
+  };
+}
+
+export function send(topic: string, payload: unknown) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ topic, payload }));
+  }
+}
+
+function requestGraphSoon() {
+  if (graphTimer) return;
+  graphTimer = setTimeout(() => {
+    graphTimer = null;
+    send('core.system.graph.request', {});
+  }, 300);
+}
+
+function nodeName(id: number): string {
+  return get(nodes)[id]?.name ?? `node ${id}`;
+}
+
+function applyGraph(p: any) {
+  const prev = get(nodes);
+  const next: Record<number, NodeView> = {};
+  for (const n of p?.nodes ?? []) {
+    const old = prev[n.id];
+    next[n.id] = {
+      id: n.id,
+      name: n.name,
+      type: n.type,
+      cell: n.cell ?? 'core',
+      status: n.status as NodeStatus,
+      pub: n.pub ?? [],
+      sub: n.sub ?? [],
+      faults: old?.faults ?? 0,
+      restarts: old?.restarts ?? 0,
+      downSince: old?.downSince,
+      lastRecoveryMs: old?.lastRecoveryMs,
+    };
+  }
+  nodes.set(next);
+  edges.set(p?.edges ?? []);
+}
+
+function applyStatus(id: number, status: NodeStatus, ts: number) {
+  nodes.update((all) => {
+    const n = all[id];
+    if (!n) return all;
+    const was = n.status;
+    const updated = { ...n, status };
+    // 復帰時間は Core が測って core.node.recovered で送ってくる (R13)。ここでは状態だけ反映する
+    if (status === 'stopped' && was !== 'stopped') {
+      addFault({ ts, node: n.name, kind: 'stopped', detail: '自動復帰を停止 (再起動上限)' });
+    }
+    return { ...all, [id]: updated };
+  });
+}
+
+function sceneKey(d: any): string | null {
+  if (!d || typeof d !== 'object') return null;
+  if (d.sceneName === undefined || d.sceneItemId === undefined) return null;
+  return `${d.sceneName}#${d.sceneItemId}`;
+}
+
+function route(msg: EventMessage) {
+  const p = msg.payload;
+  const t = msg.topic;
+
+  if (t === 'core.system.graph.full') return applyGraph(p);
+
+  if (t === 'core.system.graph.delta') {
+    if (p?.type === 'node_status') return applyStatus(p.id, p.status, msg.ts);
+    return requestGraphSoon();
+  }
+
+  if (t === 'core.node.down') {
+    nodes.update((all) => {
+      const n = all[p?.node_id];
+      return n ? { ...all, [n.id]: { ...n, downSince: p?.ts ?? msg.ts } } : all;
+    });
+    // プラグインのトラップは core.node.fault で出るので、ここでは接続系の縮退・切断だけを載せる
+    if (p?.status === 'degraded' || p?.status === 'disconnected') {
+      addFault({ ts: p?.ts ?? msg.ts, node: p?.name ?? nodeName(p?.node_id), kind: 'fault', detail: `→ ${p.status}` });
+    }
+    return;
+  }
+
+  if (t === 'core.node.recovered') {
+    const restarted = ['restarting', 'quarantined', 'stopped'].includes(p?.from);
+    nodes.update((all) => {
+      const n = all[p?.node_id];
+      if (!n) return all;
+      return {
+        ...all,
+        [n.id]: { ...n, downSince: undefined, lastRecoveryMs: p?.down_ms, restarts: n.restarts + (restarted ? 1 : 0) },
+      };
+    });
+    return addFault({
+      ts: p?.ts ?? msg.ts,
+      node: p?.name ?? nodeName(p?.node_id),
+      kind: 'recovered',
+      detail: `${p?.from} → active`,
+      downtimeMs: p?.down_ms,
+    });
+  }
+
+  if (t === 'core.node.fault') {
+    nodes.update((all) => {
+      const n = all[p?.node_id];
+      return n ? { ...all, [n.id]: { ...n, faults: n.faults + 1 } } : all;
+    });
+    return addFault({ ts: msg.ts, node: nodeName(p?.node_id), kind: 'fault', detail: String(p?.exception ?? 'trap') });
+  }
+
+  if (t.startsWith('core.security.')) {
+    return addSecurityEvent({
+      ts: msg.ts,
+      kind: t.slice('core.security.'.length),
+      node: p?.name ?? nodeName(p?.node_id),
+      detail: p?.topic ?? p?.detail ?? p?.reason ?? '',
+    });
+  }
+
+  if (t === 'core.obs.link') {
+    return obsState.update((s) => ({ ...s, link: !!p?.connected, reconnects: p?.reconnects ?? s.reconnects }));
+  }
+
+  if (t === 'core.obs.request.SetSceneItemEnabled') {
+    const k = sceneKey(p);
+    if (k) obsState.update((s) => ({ ...s, requested: { ...s.requested, [k]: !!p.sceneItemEnabled }, lastChange: msg.ts }));
+    return;
+  }
+
+  if (t === 'core.obs.event.SceneItemEnableStateChanged') {
+    const d = p?.d?.eventData ?? p?.eventData;
+    const k = sceneKey(d);
+    if (k) obsState.update((s) => ({ ...s, actual: { ...s.actual, [k]: !!d.sceneItemEnabled }, lastChange: msg.ts }));
+    return;
+  }
+
+  if (t === 'core.system.introspection.changed' && p?.to) {
+    introspection.set(p.to);
+  }
+}
+
 setInterval(() => {
-    metrics.update((m) => ({ ...m, eps: epsCounter }));
-    epsCounter = 0;
+  metrics.update((m) => ({ ...m, eps: epsCounter }));
+  epsCounter = 0;
 }, 1000);

@@ -15,7 +15,7 @@
         minZoom={0.2}
         maxZoom={2}
     >
-        <Background variant={BackgroundVariant.Dots} color="#cbd5e1" gap={20} size={1} />
+        <Background variant={BackgroundVariant.Dots} patternColor="#cbd5e1" gap={20} size={1} />
         <Controls />
     </SvelteFlow>
     
