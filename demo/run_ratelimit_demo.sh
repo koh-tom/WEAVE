@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 BIN=./zig-out/bin
 AUDIT=audit.log
 RUN_SECS=6
-PORTS="--dash-port 3055 --ws-port 8095 --node-port 8096"
+PORTS="--dash-port 3055 --node-port 8096"
 blue(){ printf "\033[34;1m%s\033[0m\n" "$*"; }
 green(){ printf "\033[32;1m%s\033[0m\n" "$*"; }
 

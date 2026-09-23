@@ -17,11 +17,8 @@ env:
   ZIG_VERSION: "0.15.2"
 
 jobs:
-  # ──────────────────────────────────────────────
-  # Stage 1: ビルド検証 + Wasm プラグインのアーティファクト化
-  # ──────────────────────────────────────────────
-  build:
-    name: "🔨 Build (Host + Wasm)"
+  test:
+    name: "Build + unit/stress tests + E2E"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (with submodules)
@@ -34,46 +31,47 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Build All (Host + Wasm plugins)
+      - name: Build (host binaries + Wasm plugins)
         run: zig build
 
-      - name: Verify build artifacts
+      - name: Verify artifacts
         run: |
-          test -f zig-out/bin/WEAVE
-          test -f wasm-apps/chat_node.wasm
+          test -x zig-out/bin/WEAVE
+          test -x zig-out/bin/weave-audit
+          test -x zig-out/bin/weave-key
+          test -x zig-out/bin/weave-obs-sim
+          test -x zig-out/bin/weave-bridge
+          test -x zig-out/bin/weave
+          test -f wasm-apps/kusa_node.wasm
           test -f wasm-apps/bad_node.wasm
+          test -f wasm-apps/scene_switcher.wasm
 
-      - name: Upload Wasm artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-plugins
-          path: wasm-apps/*.wasm
-          retention-days: 1
-
-  # ──────────────────────────────────────────────
-  # Stage 2: テスト (build の完了後に実行)
-  # ──────────────────────────────────────────────
-  test:
-    name: "🧪 All Tests (zig build test_all)"
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Checkout (with submodules)
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Download Wasm artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: wasm-plugins
-          path: wasm-apps/
-
-      - name: Run all tests
+      - name: Unit, EventBus and stress tests
         run: zig build test_all
 
+      - name: E2E — kusa pipeline (mock Twitch -> Wasm -> mock OBS)
+        run: ./tests/e2e/kusa_pipeline.sh
+
+      - name: E2E — OBS-compatible C plugins (built from source) in the sandbox
+        run: ./tests/e2e/obs_compat_pipeline.sh
+
+      - name: E2E — OBS restart re-applies desired state
+        run: ./tests/e2e/obs_reconnect.sh
+
+      - name: E2E — core kill -9 is back in < 1s with state restored
+        run: ./tests/e2e/core_restart.sh
+
+      - name: E2E — Streamer.bot bridge (existing tool joins as a remote node)
+        run: ./tests/e2e/streamerbot_bridge.sh
+
+      - name: E2E — howling (echo loop) is stopped by the hop limit
+        run: ./tests/e2e/howling.sh
+
+      - name: E2E — StreamElements Astro adapter (mock; JWT via env only)
+        run: ./tests/e2e/streamelements.sh
+
+      - name: E2E — Streamlabs Socket API adapter (mock; Engine.IO v3 ping, token via env only)
+        run: ./tests/e2e/streamlabs.sh
+
+      - name: Impact audit (security + failure radius)
+        run: ./zig-out/bin/weave-audit

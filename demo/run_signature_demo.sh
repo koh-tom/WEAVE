@@ -18,7 +18,7 @@ KEYDIR=.weave
 TRUST=$KEYDIR/trusted_keys
 RUN_SECS=3
 # ポートは既定と衝突しないようずらす（ブースPCで他が動いていても安全）
-PORTS="--dash-port 3055 --ws-port 8095 --node-port 8096"
+PORTS="--dash-port 3055 --node-port 8096"
 BASEARGS="--no-twitch --mock-obs $PORTS --signature-mode strict --trust-keys $TRUST"
 
 blue(){ printf "\033[34;1m%s\033[0m\n" "$*"; }

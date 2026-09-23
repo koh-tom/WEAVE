@@ -14,6 +14,8 @@ weave-test
 
 # Logs / Temp
 *.log
+audit.log
+mock_obs_received.jsonl
 build_err.log
 build_error.txt
 build_out*.txt
@@ -34,5 +36,9 @@ wasm-apps/*.wasm
 .vscode/
 .idea/
 .DS_Store
-.history/.weave/
+.history/
+
+# 鍵・状態・DLQ (秘密鍵を含むので絶対にコミットしない。trusted_keys だけ例外)
+.weave/*
+!.weave/trusted_keys
 wasm-apps/*.sig
