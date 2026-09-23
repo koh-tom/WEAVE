@@ -41,10 +41,10 @@ done
 
 echo "[1/3] WEAVE Core, Wasm プラグイン, ダッシュボードをビルド中..."
 zig build
-zig build wasm
-
 if [ -d "dashboard" ]; then
-    (cd dashboard && npm run build)
+    if command -v bun >/dev/null 2>&1; then (cd dashboard && bun install --silent && bun run build)
+    elif [ -x "$HOME/.bun/bin/bun" ]; then (cd dashboard && "$HOME/.bun/bin/bun" install --silent && "$HOME/.bun/bin/bun" run build)
+    else (cd dashboard && npm install --silent && npm run build); fi
 fi
 
 OBS_PASS_OPT=""
@@ -58,7 +58,7 @@ echo " 🟢 WEAVE Core Daemon (Host)"
 echo " 🟢 Wasm Guest Plugin: kusa_node.wasm"
 echo " 🟢 Real OBS WebSocket: ${OBS_HOST}:${OBS_PORT}"
 echo " 🟣 Twitch: 無効化 (button-only mode)"
-echo " 🌐 Dashboard UI: http://localhost:3030"
+echo " 🌐 Inspector: 起動ログの [INSPECTOR] の URL を開く"
 echo "--------------------------------------------------------"
 echo ""
 echo "🚀 実OBS接続モードで起動します..."
@@ -66,7 +66,7 @@ echo "   Dashboard 左サイドバーの「🌱 草ラッシュ (10連発)」ボ
 echo "   (Ctrl+C でいつでも停止できます)"
 echo ""
 
-./zig-out/bin/WEAVE \
+./zig-out/bin/WEAVE --supervise --introspection contents \
   --real-obs \
   --obs-host "${OBS_HOST}" \
   --obs-port "${OBS_PORT}" \

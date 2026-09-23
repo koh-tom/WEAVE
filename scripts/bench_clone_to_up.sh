@@ -47,7 +47,7 @@ b "[3/3] 起動 → Running 計測 ..."
 LOG=$(mktemp)
 s=$(now)
 ./zig-out/bin/WEAVE --no-twitch --mock-obs \
-  --dash-port 3099 --ws-port 8099 --node-port 8100 \
+  --dash-port 3099 --node-port 8100 \
   wasm-apps/kusa_node.wasm > "$LOG" 2>&1 &
 WPID=$!
 START_T="timeout(>10s)"
@@ -61,7 +61,7 @@ kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null
 echo
 b "================ WEAVE clone → 起動 実測 ================"
 printf "  1. clone + submodule : %s\n" "$CLONE_T"
-printf "  2. cold build        : %s  (WAMR C 32ファイル + Zig + zap を静的リンク)\n" "$BUILD_T"
+printf "  2. cold build        : %s  (WAMR C 32ファイル + Zig を静的リンク。zap/facil.io 依存は廃止)\n" "$BUILD_T"
 printf "  3. 起動 → Running     : %s\n" "$START_T"
 printf "  ─ 生成バイナリ        : %s MB (単一実行ファイル / Docker 不要 / 実行に Node 不要)\n" "$BIN_MB"
 echo "========================================================"

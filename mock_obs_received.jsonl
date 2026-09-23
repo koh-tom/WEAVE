@@ -1,3 +1,0 @@
-{"ts":1784871092724,"topic":"core.obs.request.SetSceneItemEnabled","payload":{"sceneName":"Overlay","sceneItemId":1,"sceneItemEnabled":true}}
-{"ts":1784871115795,"topic":"core.obs.request.SetSceneItemEnabled","payload":{"sceneName":"Overlay","sceneItemId":1,"sceneItemEnabled":false}}
-{"ts":1784871116518,"topic":"core.obs.request.SetSceneItemEnabled","payload":{"sceneName":"Overlay","sceneItemId":1,"sceneItemEnabled":true}}

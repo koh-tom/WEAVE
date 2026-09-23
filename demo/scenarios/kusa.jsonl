@@ -1,30 +1,31 @@
-{"delta_ms":0,    "user":"viewer1","message":"草"}
-{"delta_ms":100,  "user":"viewer2","message":"草"}
-{"delta_ms":100,  "user":"viewer3","message":"w"}
-{"delta_ms":100,  "user":"viewer4","message":"草"}
-{"delta_ms":100,  "user":"viewer5","message":"ww"}
-{"delta_ms":100,  "user":"viewer6","message":"草"}
-{"delta_ms":100,  "user":"viewer7","message":"w"}
-{"delta_ms":100,  "user":"viewer8","message":"草"}
-{"delta_ms":100,  "user":"viewer9","message":"草"}
-{"delta_ms":100,  "user":"viewer10","message":"草"}
-{"delta_ms":11100,"user":"viewer1","message":"草"}
-{"delta_ms":100,  "user":"viewer2","message":"w"}
-{"delta_ms":100,  "user":"viewer3","message":"草"}
-{"delta_ms":100,  "user":"viewer4","message":"草"}
-{"delta_ms":100,  "user":"viewer5","message":"ww"}
-{"delta_ms":100,  "user":"viewer6","message":"w"}
-{"delta_ms":100,  "user":"viewer7","message":"草"}
-{"delta_ms":100,  "user":"viewer8","message":"草"}
-{"delta_ms":100,  "user":"viewer9","message":"草"}
-{"delta_ms":100,  "user":"viewer10","message":"草"}
-{"delta_ms":4100, "user":"viewer1","message":"草"}
-{"delta_ms":100,  "user":"viewer2","message":"草"}
-{"delta_ms":100,  "user":"viewer3","message":"w"}
-{"delta_ms":100,  "user":"viewer4","message":"草"}
-{"delta_ms":100,  "user":"viewer5","message":"草"}
-{"delta_ms":100,  "user":"viewer6","message":"草"}
-{"delta_ms":100,  "user":"viewer7","message":"草"}
-{"delta_ms":100,  "user":"viewer8","message":"草"}
-{"delta_ms":100,  "user":"viewer9","message":"草"}
-{"delta_ms":100,  "user":"viewer10","message":"草"}
+{"delta_ms": 0, "user": "viewer1", "message": "草"}
+{"delta_ms": 100, "user": "viewer2", "message": "草"}
+{"delta_ms": 100, "user": "viewer3", "message": "w"}
+{"delta_ms": 100, "user": "viewer4", "message": "草"}
+{"delta_ms": 100, "user": "viewer5", "message": "ww"}
+{"delta_ms": 100, "user": "viewer6", "message": "草"}
+{"delta_ms": 100, "user": "viewer7", "message": "w"}
+{"delta_ms": 100, "user": "viewer8", "message": "草"}
+{"delta_ms": 100, "user": "viewer9", "message": "草"}
+{"delta_ms": 100, "user": "viewer10", "message": "草"}
+{"delta_ms": 5300, "user": "viewer1", "message": "草"}
+{"delta_ms": 100, "user": "viewer2", "message": "草"}
+{"delta_ms": 100, "user": "viewer3", "message": "w"}
+{"delta_ms": 100, "user": "viewer4", "message": "草"}
+{"delta_ms": 100, "user": "viewer5", "message": "ww"}
+{"delta_ms": 100, "user": "viewer6", "message": "草"}
+{"delta_ms": 100, "user": "viewer7", "message": "w"}
+{"delta_ms": 100, "user": "viewer8", "message": "草"}
+{"delta_ms": 100, "user": "viewer9", "message": "草"}
+{"delta_ms": 100, "user": "viewer10", "message": "草"}
+{"delta_ms": 1100, "user": "viewer1", "message": "草"}
+{"delta_ms": 100, "user": "viewer2", "message": "草"}
+{"delta_ms": 100, "user": "viewer3", "message": "w"}
+{"delta_ms": 100, "user": "viewer4", "message": "草"}
+{"delta_ms": 100, "user": "viewer5", "message": "ww"}
+{"delta_ms": 100, "user": "viewer6", "message": "草"}
+{"delta_ms": 100, "user": "viewer7", "message": "w"}
+{"delta_ms": 100, "user": "viewer8", "message": "草"}
+{"delta_ms": 100, "user": "viewer9", "message": "草"}
+{"delta_ms": 100, "user": "viewer10", "message": "草"}
+{"delta_ms": 6000, "user": "viewer1", "message": "おつかれ"}
