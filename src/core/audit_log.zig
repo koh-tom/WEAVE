@@ -15,7 +15,9 @@ pub const AuditLog = struct {
 
     /// core.security.# を購読して以後のセキュリティイベントを記録する。
     pub fn subscribeBus(self: *AuditLog, bus: *event_bus.EventBus) !void {
-        try bus.subscribe("core.security.#", 97, callback, self);
+        // ファイル書き込みが他の配送を待たせないよう observe セルのタップとして受ける
+        const observe = bus.getCell("observe") orelse try bus.createCell("observe", .{ .trust = .core });
+        try bus.subscribeEx("core.security.#", 97, callback, self, .{ .cell = observe, .record_graph = false });
     }
 
     fn callback(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const event_bus = @import("../core/event_bus.zig");
 const log = @import("../common/log.zig");
+const DesiredState = @import("obs.zig").DesiredState;
 
 pub const MockObsEgressNode = struct {
     allocator: std.mem.Allocator,
@@ -10,6 +11,8 @@ pub const MockObsEgressNode = struct {
     filepath: []const u8,
     running: bool,
     mutex: std.Thread.Mutex,
+    /// WEAVE が意図した OBS の状態 (スナップショットの対象, R7)
+    desired: DesiredState,
 
     pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, node_id: u32, password: ?[]const u8, filepath: []const u8) !*MockObsEgressNode {
         const self = try allocator.create(MockObsEgressNode);
@@ -21,6 +24,7 @@ pub const MockObsEgressNode = struct {
             .filepath = try allocator.dupe(u8, filepath),
             .running = false,
             .mutex = .{},
+            .desired = DesiredState.init(allocator),
         };
         return self;
     }
@@ -33,6 +37,7 @@ pub const MockObsEgressNode = struct {
         self.stop();
         if (self.password) |p| self.allocator.free(p);
         self.allocator.free(self.filepath);
+        self.desired.deinit();
         self.allocator.destroy(self);
     }
 
@@ -46,13 +51,15 @@ pub const MockObsEgressNode = struct {
         const file = try std.fs.cwd().createFile(self.filepath, .{});
         file.close();
 
-        // 購読開始
-        try self.bus.subscribe("core.obs.request.*", self.node_id, MockObsEgressNode.onMessage, self);
+        // OBS への送信は専用セル "egress" で行う (OBS が遅くても他の配送を待たせない)
+        const cell = self.bus.getCell("egress") orelse try self.bus.createCell("egress", .{ .trust = .core });
 
-        // グラフ登録
+        // グラフ登録を購読より先に行う (逆順だと購読が記録されず、トポロジから OBS への辺が消える)
         if (self.bus.graph) |g| {
-            try g.registerNode(self.node_id, "ObsEgress", .native);
+            try g.registerNodeIn(self.node_id, "ObsEgress", .native, cell.name);
         }
+
+        try self.bus.subscribeEx("core.obs.request.*", self.node_id, MockObsEgressNode.onMessage, self, .{ .cell = cell });
     }
 
     fn onMessage(context: ?*anyopaque, msg: *const event_bus.EventMessage) void {
@@ -66,6 +73,8 @@ pub const MockObsEgressNode = struct {
 
     fn handleMessage(self: *MockObsEgressNode, msg: *const event_bus.EventMessage) !void {
         const ts = std.time.milliTimestamp();
+        const prefix = "core.obs.request.";
+        if (std.mem.startsWith(u8, msg.topic, prefix)) _ = self.desired.record(msg.topic[prefix.len..], msg.payload) catch false;
 
         // Try to parse payload as JSON
         var parsed_payload = std.json.parseFromSlice(std.json.Value, self.allocator, msg.payload, .{}) catch null;
@@ -119,6 +128,7 @@ pub const MockObsEgressNode = struct {
         if (std.mem.endsWith(u8, msg.topic, "SetSceneItemEnabled")) {
             var scene_item_id: i64 = 1;
             var scene_item_enabled: bool = true;
+            var scene_name: []const u8 = "Overlay";
 
             if (parsed_payload) |p| {
                 if (p.value == .object) {
@@ -132,36 +142,20 @@ pub const MockObsEgressNode = struct {
                             scene_item_enabled = v.bool;
                         }
                     }
+                    if (p.value.object.get("sceneName")) |v| {
+                        if (v == .string) scene_name = v.string;
+                    }
                 }
             }
 
-            const StubContext = struct {
-                bus: *event_bus.EventBus,
-                node_id: u32,
-                scene_item_id: i64,
-                scene_item_enabled: bool,
-
-                fn run(ctx: @This()) void {
-                    std.Thread.sleep(100 * std.time.ns_per_ms);
-
-                    var buf: [512]u8 = undefined;
-                    // Format matching ObsEgress event structure: {"op":5,"d":{"eventType":"...","eventData":{...}}}
-                    const event_payload = std.fmt.bufPrint(&buf, "{{\"op\":5,\"d\":{{\"eventType\":\"SceneItemEnableStateChanged\",\"eventData\":{{\"sceneName\":\"Scene\",\"sceneItemId\":{},\"sceneItemEnabled\":{}}}}}}}", .{ ctx.scene_item_id, ctx.scene_item_enabled }) catch return;
-
-                    ctx.bus.publish("core.obs.event.SceneItemEnableStateChanged", event_payload, .Transient, ctx.node_id) catch |err| {
-                        std.debug.print("MockObsEgress: failed to publish stub event: {any}\n", .{err});
-                    };
-                }
+            // OBS が返すのと同じ形の状態変更イベントを発行する。
+            // (以前は 100ms 待つスレッドを detach しており、終了後にバスへ触れる危険があった: P1-10)
+            var buf: [512]u8 = undefined;
+            var w = std.io.Writer.fixed(&buf);
+            w.print("{f}", .{std.json.fmt(.{ .op = 5, .d = .{ .eventType = "SceneItemEnableStateChanged", .eventData = .{ .sceneName = scene_name, .sceneItemId = scene_item_id, .sceneItemEnabled = scene_item_enabled } } }, .{})}) catch return;
+            self.bus.publish("core.obs.event.SceneItemEnableStateChanged", w.buffered(), .Transient, self.node_id) catch |err| {
+                std.debug.print("MockObsEgress: failed to publish stub event: {any}\n", .{err});
             };
-
-            const ctx = StubContext{
-                .bus = self.bus,
-                .node_id = self.node_id,
-                .scene_item_id = scene_item_id,
-                .scene_item_enabled = scene_item_enabled,
-            };
-            const t = try std.Thread.spawn(.{}, StubContext.run, .{ctx});
-            t.detach();
         }
     }
 };

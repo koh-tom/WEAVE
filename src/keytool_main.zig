@@ -58,7 +58,7 @@ fn cmdGenerate(allocator: std.mem.Allocator, name: []const u8) !void {
     const pub_path = try std.fmt.allocPrint(allocator, "{s}.pub", .{name});
     defer allocator.free(pub_path);
 
-    try writeFile(key_path, sk_hex);
+    try writeFileMode(key_path, sk_hex, 0o600); // 秘密鍵は所有者のみ読める
     try writeFile(pub_path, pk_hex);
 
     std.debug.print("生成しました:\n  秘密鍵: {s}  (絶対に配布しないこと)\n  公開鍵: {s}\n\n公開鍵 (trust store に登録する値):\n{s}\n", .{ key_path, pub_path, pk_hex });
@@ -126,6 +126,14 @@ fn cmdVerify(allocator: std.mem.Allocator, pub_path: []const u8, wasm_path: []co
 fn writeFile(path: []const u8, content: []const u8) !void {
     const file = try std.fs.cwd().createFile(path, .{});
     defer file.close();
+    try file.writeAll(content);
+}
+
+fn writeFileMode(path: []const u8, content: []const u8, mode: std.fs.File.Mode) !void {
+    const file = try std.fs.cwd().createFile(path, .{ .mode = mode });
+    defer file.close();
+    // 既存ファイルを上書きした場合 createFile は mode を変えないので明示する
+    try file.chmod(mode);
     try file.writeAll(content);
 }
 

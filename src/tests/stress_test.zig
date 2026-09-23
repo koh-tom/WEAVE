@@ -51,6 +51,8 @@ pub fn main() !void {
 
     // マニフェストの登録 (登録時にマニフェストに基づいた購読登録が自動で行われます)
     _ = try pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &bus);
+    // manifest の購読 (ext.twitch.#) を適用し、実際に Wasm がチャットを処理する負荷にする
+    try pm.applyManifestSubscriptions(module_inst, &bus);
 
     const iterations = 100000;
     std.debug.print("Running {} iterations with Async Queue (Capacity: 1000)...\n", .{iterations});
@@ -58,8 +60,8 @@ pub fn main() !void {
     const start_time = std.time.milliTimestamp();
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
-        try bus.publish("test.stress", "STRESS_TEST_PAYLOAD", .Reliable, 0);
-        if (i % 10000 == 0) std.debug.print("Progress: {}/100000 (Queue: {})\n", .{ i, bus.queue.count });
+        try bus.publish("ext.twitch.chat.message", "{\"user\":\"stress\",\"message\":\"hello\"}", .Reliable, 0);
+        if (i % 10000 == 0) std.debug.print("Progress: {}/100000 (Queue: {})\n", .{ i, bus.core_cell.queueDepth() });
     }
 
     bus.waitIdle();

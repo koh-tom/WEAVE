@@ -1,26 +1,22 @@
-# WEAVE End-to-End (E2E) Testing
+# WEAVE E2E テスト
 
-This directory contains E2E tests for the WEAVE streaming event OS.
+どれもリポジトリのルートから実行する。事前に `zig build` (Wasm プラグインも一緒にビルドされる) が必要。
+外部サービスには接続しない。OBS・Twitch・Streamer.bot・StreamElements はすべてローカルのモックかシミュレータ。
 
-## Tests
+| スクリプト | 確かめること |
+|---|---|
+| `kusa_pipeline.sh` | 草コメント 10 件 / 3 秒で OBS のオーバーレイが出る。5 秒後に自動で消え、7 秒のクールダウン中は再発火しない |
+| `obs_compat_pipeline.sh` | 既存の OBS プラグイン (C) を Wasm に再コンパイルして動かす。manifest にない操作は拒否される |
+| `obs_reconnect.sh` | OBS (シミュレータ) を kill -9 して新品で戻しても、意図した表示状態が再適用される |
+| `core_restart.sh` | Core を kill -9 しても Supervisor が 1 秒以内に戻し、表示状態と自動非表示が続く |
+| `streamerbot_bridge.sh` | Streamer.bot (モック) のチャットがブリッジ経由で kusa に届き、WEAVE から DoAction を呼べる |
+| `howling.sh` | 反響し合う 2 プラグインを因果の深さ 16 で止め、`loop_detected` を記録する。他のプラグインは巻き込まれない |
+| `streamlabs.sh` | Streamlabs Socket API (モック, socket.io 2.x) のアラートが届く。サーバー指定の間隔で ping を送る。不正なトークンは拒否され、トークンはログに出ない |
+| `streamelements.sh` | StreamElements Astro (モック) の channel.activities が届く。PING に PONG を返す。不正な JWT は拒否され、JWT はログに出ない |
 
-### 1. Kusa Pipeline E2E Test (`kusa_pipeline.sh`)
-
-This script validates the "Kusa" trigger pipeline, including comments monitoring, triggering the OBS overlay effect, auto-hide timer, and the 15-second cooldown safety constraint.
-
-#### What it tests:
-1. **Trigger Condition**: When 10 comments matching the "Kusa" pattern ("草", "w", etc.) arrive within a 3-second window, WEAVE triggers the OBS scene item visible state to `true` (`"sceneItemEnabled":true`).
-2. **Auto-hide**: After exactly 10 seconds, the effect is automatically disabled (`"sceneItemEnabled":false`).
-3. **15-second Cooldown**: Any comments arriving within a 15-second window from the initial trigger do not cause a re-trigger, even if the threshold of 10 comments is reached.
-4. **Cooldown Reset**: Once the 15-second cooldown period has expired, a subsequent burst of 10 comments triggers the effect again.
-
-#### How to run:
-First, ensure that the project is built (both the native binary and the WebAssembly plugins):
 ```bash
-# Build the project
 zig build
-zig build wasm
-
-# Run the E2E script
-./tests/e2e/kusa_pipeline.sh
+for t in tests/e2e/*.sh; do "$t" || break; done
 ```
+
+CI (`.github/workflows/ci.yml`) でも同じものを順に実行している。

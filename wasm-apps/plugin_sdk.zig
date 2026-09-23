@@ -10,7 +10,9 @@ pub const QoS = common.QoS;
 extern fn os_api_publish(topic_ptr: [*]const u8, topic_len: u32, payload_ptr: [*]const u8, payload_len: u32, qos: u32) i32;
 extern fn os_api_subscribe(topic_ptr: [*]const u8, topic_len: u32) i32;
 extern fn os_api_log(level: i32, msg_ptr: [*]const u8, msg_len: u32) void;
-extern fn os_api_current_timestamp() i64;
+extern fn os_api_unsubscribe(topic_ptr: [*]const u8, topic_len: u32) i32;
+extern fn os_api_message_timestamp() i64;
+extern fn os_api_now() i64;
 
 // --- バンプアロケータ ---
 // Wasm linear memory の末尾を管理するシンプルなアロケータ。
@@ -126,10 +128,21 @@ pub fn log(level: i32, msg: []const u8) void {
     _ = os_api_log(level, msg.ptr, msg.len);
 }
 
-/// 現在のメッセージタイムスタンプを取得する
-pub fn getCurrentTimestamp() i64 {
+/// 処理中のメッセージのタイムスタンプ (UNIX ミリ秒)。再生しても同じ値になる
+pub fn messageTimestamp() i64 {
     if (comptime !is_wasm) return 0;
-    return os_api_current_timestamp();
+    return os_api_message_timestamp();
+}
+
+/// 旧名 (互換)
+pub fn getCurrentTimestamp() i64 {
+    return messageTimestamp();
+}
+
+/// 壁時計 (UNIX ミリ秒)
+pub fn now() i64 {
+    if (comptime !is_wasm) return 0;
+    return os_api_now();
 }
 
 /// 指定したトピックにイベントを発行する
@@ -141,6 +154,12 @@ pub fn publish(topic: []const u8, payload: []const u8, qos: QoS) Result {
 /// 指定したトピックを動的に購読する
 pub fn subscribe(topic: []const u8) Result {
     const res = os_api_subscribe(topic.ptr, @intCast(topic.len));
+    return @enumFromInt(res);
+}
+
+/// 購読を解除する
+pub fn unsubscribe(topic: []const u8) Result {
+    const res = os_api_unsubscribe(topic.ptr, @intCast(topic.len));
     return @enumFromInt(res);
 }
 
@@ -171,22 +190,22 @@ pub const WindowCounter = struct {
     head: u8 = 0,
     count_val: u8 = 0,
 
-    pub fn record(self: *WindowCounter, now: i64) void {
-        self.timestamps[self.head] = now;
+    pub fn record(self: *WindowCounter, ts: i64) void {
+        self.timestamps[self.head] = ts;
         self.head = (self.head + 1) % 128;
         if (self.count_val < 128) {
             self.count_val += 1;
         }
     }
 
-    pub fn count(self: *WindowCounter, now: i64) u8 {
+    pub fn count(self: *WindowCounter, ts: i64) u8 {
         var valid_count: u8 = 0;
         var i: u8 = 0;
-        const threshold = now - @as(i64, self.window_ms);
+        const threshold = ts - @as(i64, self.window_ms);
         while (i < self.count_val) : (i += 1) {
             const idx = (self.head + 128 - self.count_val + i) % 128;
-            const ts = self.timestamps[idx];
-            if (ts >= threshold and ts <= now) {
+            const t = self.timestamps[idx];
+            if (t >= threshold and t <= ts) {
                 valid_count += 1;
             }
         }

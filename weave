@@ -1,90 +1,10 @@
-#!/bin/bash
-
-# WEAVE CLI Wrapper
-# ROS2-like command interface for WEAVE Event OS
-
-case "$1" in
-    "build")
-        echo "Building WEAVE..."
-        zig build
-        ;;
-    "run")
-        echo "Starting WEAVE Core..."
-        zig build run
-        ;;
-    "test-node")
-        echo "Starting Remote Node (Node.js)..."
-        node test_node.js
-        ;;
-    "monitor")
-        echo "Connecting to WsGateway Monitor..."
-        if ! command -v wscat &> /dev/null; then
-            echo "Error: 'wscat' not found. Please install it with 'npm install -g wscat'."
-            exit 1
-        fi
-        wscat -c ws://localhost:8080
-        ;;
-    "stress")
-        echo "Running memory stress test..."
-        zig build stress
-        ;;
-    "bus-test")
-        echo "Running EventBus logic test..."
-        zig build bus_test
-        ;;
-    "topic")
-        if [ "$2" = "pub" ]; then
-            topic="$3"
-            payload="$4"
-            if [ -z "$topic" ] || [ -z "$payload" ]; then
-                echo "Usage: weave topic pub <topic> <payload>"
-                exit 1
-            fi
-            port=3030
-            if [ -f "weave.json" ]; then
-                config_port=$(grep -o '"dashboard_port"[[:space:]]*:[[:space:]]*[0-9]\+' weave.json | grep -o '[0-9]\+')
-                if [ ! -z "$config_port" ]; then
-                    port=$config_port
-                fi
-            fi
-            /home/koh/.bun/bin/bun -e "
-                const topic = process.argv[1];
-                const rawPayload = process.argv[2];
-                const port = process.argv[3];
-                let payload;
-                try {
-                    payload = JSON.parse(rawPayload);
-                } catch (e) {
-                    payload = rawPayload;
-                }
-                const ws = new WebSocket('ws://localhost:' + port + '/ws');
-                ws.onopen = () => {
-                    ws.send(JSON.stringify({ topic, payload }));
-                    setTimeout(() => {
-                        ws.close();
-                        process.exit(0);
-                    }, 150);
-                };
-                ws.onerror = (err) => {
-                    console.error('WebSocket error:', err);
-                    process.exit(1);
-                };
-            " "$topic" "$payload" "$port"
-        else
-            echo "Usage: weave topic pub <topic> <payload>"
-            exit 1
-        fi
-        ;;
-    *)
-        echo "Usage: weave <command>"
-        echo ""
-        echo "Commands:"
-        echo "  build       Build the WEAVE core"
-        echo "  run         Run the WEAVE core"
-        echo "  test-node   Run a sample remote node (JavaScript)"
-        echo "  monitor     Monitor all events via WsGateway (requires wscat)"
-        echo "  stress      Run memory stress test"
-        echo "  bus-test    Run internal EventBus tests"
-        echo "  topic pub   Publish an event to the EventBus"
-        ;;
-esac
+#!/usr/bin/env bash
+# リポジトリ直下から `./weave <command>` で使うための薄いラッパー。
+# 実体は Zig 製の統合 CLI (zig-out/bin/weave)。未ビルドならビルドしてから実行する。
+set -euo pipefail
+cd "$(dirname "$0")"
+if [ ! -x zig-out/bin/weave ]; then
+  echo "weave: building (zig build)..." >&2
+  zig build
+fi
+exec ./zig-out/bin/weave "$@"

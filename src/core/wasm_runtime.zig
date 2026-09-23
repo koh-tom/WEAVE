@@ -37,6 +37,24 @@ pub const WasmRuntime = struct {
         return module.?;
     }
 
+    /// 線形メモリの上限 (64KiB ページ数) を付けてインスタンス化する (P1-5)。
+    /// `heap_size` は WAMR の app heap であって memory.grow の上限ではないため、manifest の
+    /// `limits.memory_pages` はこちらで強制する。max_pages = 0 は上限なし (モジュールの宣言どおり)。
+    pub fn instantiateLimited(self: *WasmRuntime, module: wamr.wasm_module_t, stack_size: u32, heap_size: u32, max_pages: u32) !wamr.wasm_module_inst_t {
+        _ = self;
+        var error_buf: [128]u8 = undefined;
+        var args = std.mem.zeroes(wamr.InstantiationArgs);
+        args.default_stack_size = stack_size;
+        args.host_managed_heap_size = heap_size;
+        args.max_memory_pages = max_pages;
+        const inst = wamr.wasm_runtime_instantiate_ex(module, &args, &error_buf, @intCast(error_buf.len));
+        if (inst == null) {
+            std.debug.print("Wasm instantiation error: {s}\n", .{std.mem.sliceTo(&error_buf, 0)});
+            return error.ModuleInstantiationFailed;
+        }
+        return inst.?;
+    }
+
     pub fn instantiate(self: *WasmRuntime, module: wamr.wasm_module_t, stack_size: u32, heap_size: u32) !wamr.wasm_module_inst_t {
         _ = self;
         var error_buf: [128]u8 = undefined;

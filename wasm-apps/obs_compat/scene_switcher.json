@@ -1,12 +1,15 @@
 {
-  "name": "scene_switcher",
-  "version": "0.1.0",
-  "permissions": {
-    "publish": [
-      "core.obs.request.SetSceneItemEnabled"
-    ],
-    "subscribe": [
-      "ext.twitch.chat.message"
-    ]
-  }
+    "name": "scene_switcher",
+    "version": "0.1.0",
+    "permissions": {
+        "publish": [
+            "core.obs.request.SetSceneItemEnabled"
+        ],
+        "subscribe": [
+            "ext.twitch.chat.message"
+        ],
+        "data_access": [
+            "pii"
+        ]
+    }
 }

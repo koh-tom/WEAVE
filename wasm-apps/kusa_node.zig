@@ -51,13 +51,31 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
     const topic = @as([*]const u8, @ptrFromInt(topic_ptr))[0..topic_len];
     const payload = @as([*]const u8, @ptrFromInt(payload_ptr))[0..payload_len];
 
-    const now = sdk.getCurrentTimestamp();
+    const now = sdk.messageTimestamp();
 
     // 全 topic 共通: 5秒経過チェック (tick でも chat でも回る)
     maybeAutoHide(now);
 
     // tick topic はここで終わり (payload をパースする必要なし)
     if (std.mem.eql(u8, topic, "core.system.tick")) return;
+
+    // OBS の実際の表示状態 (保持されたイベント)。基盤の再起動などで自分の記憶が消えても、
+    // 購読した瞬間に届く「今の状態」から表示中かどうかを取り戻す。
+    if (std.mem.eql(u8, topic, "core.obs.event.SceneItemEnableStateChanged")) {
+        const Ev = struct { d: struct { eventData: struct { sceneName: []const u8 = "", sceneItemId: i64 = 0, sceneItemEnabled: bool = false } } };
+        const ev = sdk.parseJson(Ev, payload) catch return;
+        defer ev.deinit();
+        const e = ev.value.d.eventData;
+        if (!std.mem.eql(u8, e.sceneName, "Overlay") or e.sceneItemId != 1) return;
+        if (e.sceneItemEnabled and !visible) {
+            visible = true;
+            last_trigger_ts = now; // イベントの時刻から自動非表示までを数える
+            sdk.log(1, "[kusa_node] resynced from OBS state: visible=true");
+        } else if (!e.sceneItemEnabled) {
+            visible = false;
+        }
+        return;
+    }
 
     // chat message: 発火判定
     if (std.mem.eql(u8, topic, "ext.twitch.chat.message")) {

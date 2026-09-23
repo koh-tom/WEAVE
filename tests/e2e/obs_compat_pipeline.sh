@@ -12,14 +12,14 @@ trap "kill -9 \$(jobs -p) 2>/dev/null || true; rm -rf $LOG_DIR_GOOD" EXIT INT TE
 
 echo "=== Running Good Plugin Test (scene_switcher) ==="
 ./zig-out/bin/WEAVE \
-  --mock-twitch demo/scenarios/obs_compat.jsonl \
-  --mock-obs \
+  --mock-twitch demo/scenarios/obs_compat.jsonl --mock-twitch-once \
+  --mock-obs --dash-port 3073 --node-port 8073 \
   --mock-obs-file "$LOG_DIR_GOOD/obs.jsonl" \
   wasm-apps/scene_switcher.wasm \
   > "$LOG_DIR_GOOD/weave.log" 2>&1 &
 
-echo "Waiting 15 seconds for scenario events..."
-sleep 15
+echo "Waiting 12 seconds for scenario events..."
+sleep 12
 
 echo "--- obs.jsonl contents ---"
 if [ -f "$LOG_DIR_GOOD/obs.jsonl" ]; then
@@ -61,14 +61,14 @@ trap "kill -9 \$(jobs -p) 2>/dev/null || true; rm -rf $LOG_DIR_GOOD $LOG_DIR_BAD
 
 echo "=== Running Malicious Plugin Test (malicious_plugin) ==="
 ./zig-out/bin/WEAVE \
-  --mock-twitch demo/scenarios/obs_compat.jsonl \
-  --mock-obs \
+  --mock-twitch demo/scenarios/obs_compat.jsonl --mock-twitch-once \
+  --mock-obs --dash-port 3074 --node-port 8074 \
   --mock-obs-file "$LOG_DIR_BAD/obs.jsonl" \
   wasm-apps/malicious_plugin.wasm \
   > "$LOG_DIR_BAD/weave.log" 2>&1 &
 
-echo "Waiting 15 seconds for scenario events..."
-sleep 15
+echo "Waiting 12 seconds for scenario events..."
+sleep 12
 
 echo "--- weave.log contents ---"
 if [ -f "$LOG_DIR_BAD/weave.log" ]; then

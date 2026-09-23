@@ -10,7 +10,7 @@ export fn on_init() i32 {
     sdk.log(1, "Hello WEAVE! Twitch Monitor Node active.");
 
     // Test Transient QoS: このノードの起動ステータスを保持
-    _ = sdk.publish("core.node.status", "{\"status\": \"active\"}", .Transient);
+    _ = sdk.publish("ext.chat_node.status", "{\"status\": \"active\"}", .Transient);
 
     return 0;
 }

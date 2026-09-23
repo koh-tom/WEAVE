@@ -58,6 +58,8 @@ pub fn build(b: *std.Build) void {
         "-DWASM_ENABLE_LIBC_BUILTIN=0",
         "-DWASM_ENABLE_LIBC_WASI=0",
         "-DWASM_ENABLE_FAST_INTERP=1",
+        // 命令数上限 (P0-1): 無限ループするプラグインを trap させ、既存の fault/再起動経路に乗せる
+        "-DWASM_ENABLE_INSTRUCTION_METERING=1",
         "-DBH_MALLOC=wasm_runtime_malloc",
         "-DBH_FREE=wasm_runtime_free",
         "-DWASM_HAVE_MREMAP=1",
@@ -122,11 +124,7 @@ pub fn build(b: *std.Build) void {
     }.apply;
 
     // --- Main Executable ---
-    const zap = b.dependency("zap", .{
-        .target = target,
-        .optimize = optimize,
-        .openssl = false,
-    });
+    // (zap / facil.io への依存は廃止。Dashboard は自前の HTTP + WebSocket 実装)
 
     const exe = b.addExecutable(.{
         .name = "WEAVE",
@@ -136,7 +134,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    exe.root_module.addImport("zap", zap.module("zap"));
     exe.root_module.addImport("common", common_module);
     // Workaround: omarchyOS (GCC 16 / glibc 2.43+) の .sframe セクションに
     // Zig のセルフホストリンカーが未対応のため、LLVM/LLD を使用する
@@ -192,7 +189,7 @@ pub fn build(b: *std.Build) void {
 
     const audit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/audit/blast.zig"),
+            .root_source_file = b.path("src/audit_main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -226,6 +223,55 @@ pub fn build(b: *std.Build) void {
     });
     const run_signing_tests = b.addRunArtifact(signing_tests);
 
+    // --- 統合 CLI (weave run / up / audit / key / topic / node / doctor / init) ---
+    const cli_exe = b.addExecutable(.{
+        .name = "weave",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    cli_exe.root_module.addImport("common", common_module);
+    cli_exe.use_llvm = true;
+    cli_exe.use_lld = true;
+    b.installArtifact(cli_exe);
+
+    // --- 既存ツール (Streamer.bot) とのブリッジ (互換戦略 C) ---
+    const bridge_exe = b.addExecutable(.{
+        .name = "weave-bridge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bridge_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    bridge_exe.root_module.addImport("common", common_module);
+    bridge_exe.use_llvm = true;
+    bridge_exe.use_lld = true;
+    b.installArtifact(bridge_exe);
+    const bridge_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/bridge_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    bridge_tests.root_module.addImport("common", common_module);
+    const run_bridge_tests = b.addRunArtifact(bridge_tests);
+
+    // --- OBS WebSocket v5 シミュレータ (実物の OBS が無い環境でのデモ・e2e 用) ---
+    const obs_sim_exe = b.addExecutable(.{
+        .name = "weave-obs-sim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/obs_sim_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    obs_sim_exe.root_module.addImport("common", common_module);
+    obs_sim_exe.use_llvm = true;
+    obs_sim_exe.use_lld = true;
+    b.installArtifact(obs_sim_exe);
+
     // --- 中央バス オーバーヘッド ベンチ (ADR-006, WAMR 非依存) ---
     const bench_exe = b.addExecutable(.{
         .name = "bus_bench",
@@ -258,82 +304,63 @@ pub fn build(b: *std.Build) void {
     const bus_test_step = b.step("bus_test", "Run pure Zig EventBus test");
     bus_test_step.dependOn(&run_bus_test.step);
 
-    // --- Wasm Plugin Build ---
-    const chat_node = b.addExecutable(.{
-        .name = "chat_node",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("wasm-apps/chat_node.zig"),
-            .target = wasm_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    chat_node.root_module.addImport("plugin_sdk", sdk_module);
-    chat_node.root_module.addImport("common", common_module);
-    chat_node.rdynamic = true;
-    chat_node.entry = .disabled;
+    // --- Wasm Plugin Build (wasm-apps/*.zig を自動で拾う。`weave init` で作ったものもそのまま乗る) ---
+    // bad_node だけは OOM 自動復旧テストで「メモリ枯渇まで alloc」するため Debug 維持
+    // (ReleaseSmall だとループが最適化で終端せずテストがハングする)。
+    var zig_plugin_steps: std.ArrayListUnmanaged(*std.Build.Step) = .{};
+    {
+        var dir = b.build_root.handle.openDir("wasm-apps", .{ .iterate = true }) catch @panic("wasm-apps/ not found");
+        defer dir.close();
+        var it = dir.iterate();
+        while (it.next() catch null) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
+            if (std.mem.eql(u8, entry.name, "plugin_sdk.zig")) continue;
+            const name = b.dupe(entry.name[0 .. entry.name.len - 4]);
+            const plugin = b.addExecutable(.{
+                .name = name,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt("wasm-apps/{s}", .{entry.name})),
+                    .target = wasm_target,
+                    .optimize = if (std.mem.eql(u8, name, "bad_node")) optimize else .ReleaseSmall,
+                }),
+            });
+            plugin.root_module.addImport("plugin_sdk", sdk_module);
+            plugin.root_module.addImport("common", common_module);
+            plugin.rdynamic = true;
+            plugin.entry = .disabled;
+            const inst = b.addInstallArtifact(plugin, .{ .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } } });
+            zig_plugin_steps.append(b.allocator, &inst.step) catch @panic("OOM");
+        }
+    }
 
-    const install_chat = b.addInstallArtifact(chat_node, .{
-        .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
-    });
-
-    const bad_node = b.addExecutable(.{
-        .name = "bad_node",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("wasm-apps/bad_node.zig"),
-            .target = wasm_target,
-            // bad_node は OOM 自動復旧テストで「メモリ枯渇まで alloc」する。
-            // ReleaseSmall だとこのループが最適化で終端せずテストがハングするため Debug 維持。
-            .optimize = optimize,
-        }),
-    });
-    bad_node.root_module.addImport("plugin_sdk", sdk_module);
-    bad_node.root_module.addImport("common", common_module);
-    bad_node.rdynamic = true;
-    bad_node.entry = .disabled;
-
-    const install_bad = b.addInstallArtifact(bad_node, .{
-        .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
-    });
-
-    const kusa_node = b.addExecutable(.{
-        .name = "kusa_node",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("wasm-apps/kusa_node.zig"),
-            .target = wasm_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    kusa_node.root_module.addImport("plugin_sdk", sdk_module);
-    kusa_node.root_module.addImport("common", common_module);
-    kusa_node.rdynamic = true;
-    kusa_node.entry = .disabled;
-
-    const install_kusa = b.addInstallArtifact(kusa_node, .{
-        .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
-    });
-
-    const spam_node = b.addExecutable(.{
-        .name = "spam_node",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("wasm-apps/spam_node.zig"),
-            .target = wasm_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    spam_node.root_module.addImport("plugin_sdk", sdk_module);
-    spam_node.root_module.addImport("common", common_module);
-    spam_node.rdynamic = true;
-    spam_node.entry = .disabled;
-
-    const install_spam = b.addInstallArtifact(spam_node, .{
-        .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } },
-    });
+    // --- OBS 互換 C プラグイン (obs_shim.h 経由で wasm32 にビルド) ---
+    // 既存の OBS プラグインの C ソースを、ソースをほぼ変えずに Wasm サンドボックスへ載せる経路 (互換戦略 B)。
+    // 以前はコミット済みの .wasm に頼っていたが、ソースからビルドして再現可能にする。
+    const c_plugins = [_][]const u8{ "scene_switcher", "malicious_plugin" };
+    var c_installs: [c_plugins.len]*std.Build.Step = undefined;
+    for (c_plugins, 0..) |name, idx| {
+        const c_exe = b.addExecutable(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .target = wasm_target,
+                .optimize = .ReleaseSmall,
+            }),
+        });
+        c_exe.root_module.addCSourceFiles(.{
+            .root = b.path("wasm-apps/obs_compat"),
+            .files = &.{ b.fmt("{s}.c", .{name}), "wasm_runtime.c" },
+            .flags = &.{ "-std=c11", "-Wall", "-Wno-unused-function" },
+        });
+        c_exe.root_module.addIncludePath(b.path("wasm-apps/obs_compat"));
+        c_exe.rdynamic = true;
+        c_exe.entry = .disabled;
+        const inst = b.addInstallArtifact(c_exe, .{ .dest_dir = .{ .override = .{ .custom = "../wasm-apps" } } });
+        c_installs[idx] = &inst.step;
+    }
 
     const wasm_step = b.step("wasm", "Build Wasm plugins");
-    wasm_step.dependOn(&install_chat.step);
-    wasm_step.dependOn(&install_bad.step);
-    wasm_step.dependOn(&install_kusa.step);
-    wasm_step.dependOn(&install_spam.step);
+    for (c_installs) |st| wasm_step.dependOn(st);
+    for (zig_plugin_steps.items) |st| wasm_step.dependOn(st);
 
     // デフォルトの install ステップが Wasm ビルドにも依存するようにする
     b.getInstallStep().dependOn(wasm_step);
@@ -347,7 +374,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     addWamrDeps(b, unit_tests, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
-    unit_tests.root_module.addImport("zap", zap.module("zap"));
     unit_tests.root_module.addImport("common", common_module);
     unit_tests.use_llvm = true;
     unit_tests.use_lld = true;
@@ -370,6 +396,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sdk_tests.step);
     test_step.dependOn(&run_audit_tests.step);
     test_step.dependOn(&run_signing_tests.step);
+    test_step.dependOn(&run_bridge_tests.step);
 
     // --- Test All Step ---
     const test_all_step = b.step("test_all", "Run all tests (unit, EventBus, and stress tests)");
@@ -377,13 +404,14 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_sdk_tests.step);
     test_all_step.dependOn(&run_audit_tests.step);
     test_all_step.dependOn(&run_signing_tests.step);
+    test_all_step.dependOn(&run_bridge_tests.step);
     test_all_step.dependOn(&run_bus_test.step);
     test_all_step.dependOn(&run_stress_cmd.step);
 
     // --- Clean Step ---
     const clean_step = b.step("clean", "Remove build artifacts and Wasm plugins");
     const clean_cmd = b.addSystemCommand(&[_][]const u8{
-        "rm", "-rf", "zig-cache", "zig-out", ".zig-cache", "wasm-apps/chat_node.wasm", "wasm-apps/bad_node.wasm", "wasm-apps/kusa_node.wasm", "wasm-apps/spam_node.wasm", "build_err.log", "test_err.log", "src/bus_test_wrapper.zig", "src/stress_test_wrapper.zig",
+        "sh", "-c", "rm -rf zig-cache zig-out .zig-cache build_err.log test_err.log src/bus_test_wrapper.zig src/stress_test_wrapper.zig && find wasm-apps -maxdepth 1 -name '*.wasm' -delete",
     });
     clean_step.dependOn(&clean_cmd.step);
 }

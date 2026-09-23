@@ -1,452 +1,529 @@
+//! リモートノード (別プロセス・別言語のノード) を WebSocket で接続するトランスポート。
+//!
+//! プロトコル v1 (docs/v1_plan_2026-09.md §5.6):
+//!   client → {"type":"hello","manifest":{...}}              (最初の 1 通。5 秒以内)
+//!   server → {"type":"welcome","node_id":N,"cell":"remote"}  または {"type":"error","reason":...}
+//!   client → {"type":"subscribe","topic":P} / {"type":"unsubscribe","topic":P}
+//!   client → {"type":"publish","topic":T,"payload":...,"qos":"BestEffort|Reliable|Transient"?}
+//!   server → {"type":"event","id":..,"topic":T,"payload":..,"qos":..}
+//!
+//! P0-3 の修正: 以前はトークンさえ知っていれば任意のトピック (OBS 操作や core.node.fault の
+//! 偽造を含む) を publish でき、全イベントを受け取れた。今は Wasm プラグインと同じ
+//! Manifest 検査・レート制限・セルの bridge 制約を通る。予約名前空間は発行できない。
+
 const std = @import("std");
 const log = @import("../common/log.zig");
-const transport_if = @import("interface.zig");
 const event_bus = @import("../core/event_bus.zig");
+const topics = @import("../core/topics.zig");
+const pattern = @import("../core/pattern.zig");
+const manifest_mod = @import("../core/manifest.zig");
+const RateLimiter = @import("../core/rate_limiter.zig").RateLimiter;
+const ws = @import("ws_proto.zig");
+const QoS = event_bus.QoS;
 
-/// 別プロセスのNodeをWebSocket経由で接続するためのトランスポート。
-/// Core ⇔ Node 間の双方向イベントブリッジとして機能します。
+pub const Options = struct {
+    bind: []const u8 = "127.0.0.1",
+    port: u16 = 8081,
+    token: []const u8,
+    max_clients: usize = 64,
+    max_frame: usize = 1024 * 1024,
+    /// manifest が rate_limit_eps を宣言しない場合の既定値
+    default_rate_eps: f64 = 100,
+    hello_timeout_ms: u32 = 5000,
+};
+
+/// リモートノードが入るセルの既定制約。OBS 操作 (core.obs.request.*) は既定では出せない。
+pub const REMOTE_BRIDGES_IN = [_][]const u8{ "ext.#", "core.system.tick", "core.node.status.#", "core.obs.event.#" };
+pub const REMOTE_BRIDGES_OUT = [_][]const u8{"ext.#"};
+
+const Client = struct {
+    server: *NodeWsTransport,
+    stream: std.net.Stream,
+    node_id: u32,
+    manifest: ?std.json.Parsed(manifest_mod.Manifest) = null,
+    name_buf: [80]u8 = undefined,
+    name_len: usize = 0,
+    rate: RateLimiter = .{},
+    send_mutex: std.Thread.Mutex = .{},
+    alive: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    finished: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    closed: bool = false,
+
+    fn name(self: *const Client) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+
+    /// ソケットを閉じる。stop() の shutdown と競合しないよう send_mutex の下で行う
+    /// (閉じた fd は別の接続に再利用されうるので、閉じた後に shutdown してはいけない)
+    fn closeStream(self: *Client) void {
+        self.send_mutex.lock();
+        defer self.send_mutex.unlock();
+        if (self.closed) return;
+        self.alive.store(false, .release);
+        self.closed = true;
+        self.stream.close();
+    }
+
+    /// 別スレッドから接続を切る (読み込み中のスレッドを起こす)
+    fn interrupt(self: *Client) void {
+        self.send_mutex.lock();
+        defer self.send_mutex.unlock();
+        if (self.closed) return;
+        self.alive.store(false, .release);
+        std.posix.shutdown(self.stream.handle, .both) catch {};
+    }
+
+    fn send(self: *Client, data: []const u8) void {
+        if (!self.alive.load(.acquire)) return;
+        self.send_mutex.lock();
+        defer self.send_mutex.unlock();
+        if (self.closed) return;
+        ws.writeFrame(self.stream, .text, data, false) catch {
+            self.alive.store(false, .release);
+            std.posix.shutdown(self.stream.handle, .both) catch {};
+        };
+    }
+};
+
 pub const NodeWsTransport = struct {
     allocator: std.mem.Allocator,
     bus: *event_bus.EventBus,
-    clients: std.ArrayListUnmanaged(*Client),
-    mutex: std.Thread.Mutex,
-    port: u16,
-    running: bool,
-    secret_token: ?[]const u8, // 追加: 認証用トークン
+    opts: Options,
+    token: []u8,
+    bind: []u8,
+    cell: *event_bus.Cell,
     server: ?std.net.Server = null,
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    ready: std.Thread.ResetEvent = .{},
+    next_node_id: std.atomic.Value(u32) = std.atomic.Value(u32).init(200),
 
-    const Client = struct {
-        node_id: u32,
-        stream: std.net.Stream,
-        subscriptions: std.StringHashMapUnmanaged(void),
-        allocator: std.mem.Allocator,
-        mutex: std.Thread.Mutex,
-        registered: bool,
+    mutex: std.Thread.Mutex = .{},
+    /// 接続中と切断済みのクライアント。切断済みも、セルのキューに残った配送が
+    /// 参照しうるので停止まで解放しない (上限を超えたら古いものから解放)
+    clients: std.ArrayListUnmanaged(*Client) = .{},
 
-        fn init(allocator: std.mem.Allocator, stream: std.net.Stream, node_id: u32) *Client {
-            const self = allocator.create(Client) catch unreachable;
-            self.* = .{
-                .node_id = node_id,
-                .stream = stream,
-                .subscriptions = .{},
-                .allocator = allocator,
-                .mutex = .{},
-                .registered = false,
-            };
-            return self;
-        }
-
-        fn deinit(self: *Client) void {
-            self.stream.close();
-            var it = self.subscriptions.iterator();
-            while (it.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
-            }
-            self.subscriptions.deinit(self.allocator);
-            self.allocator.destroy(self);
-        }
-
-        fn isSubscribed(self: *Client, topic: []const u8) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            var it = self.subscriptions.keyIterator();
-            while (it.next()) |sub| {
-                if (event_bus.EventBus.isMatch(sub.*, topic)) return true;
-            }
-            return false;
-        }
-
-        fn addSubscription(self: *Client, topic: []const u8) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            if (self.subscriptions.contains(topic)) return;
-            const copy = try self.allocator.dupe(u8, topic);
-            try self.subscriptions.put(self.allocator, copy, {});
-        }
-
-        fn ensureRegistered(self: *Client, bus: *event_bus.EventBus) !void {
-            if (self.registered) return;
-            if (bus.graph) |g| {
-                var name_buf: [32]u8 = undefined;
-                const node_name = std.fmt.bufPrint(&name_buf, "RemoteNode_{}", .{self.node_id}) catch "RemoteNode";
-                try g.registerNode(self.node_id, node_name, .remote);
-                var buf: [128]u8 = undefined;
-                const payload = try std.fmt.bufPrint(&buf, "{{\"node_id\":{},\"name\":\"{s}\",\"type\":\"remote\"}}", .{ self.node_id, node_name });
-                try bus.publish("core.node.registered", payload, .Transient, 0);
-            }
-            self.registered = true;
-        }
-    };
-
-    pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, port: u16, secret_token: ?[]const u8) !*NodeWsTransport {
+    pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, opts: Options) !*NodeWsTransport {
         const self = try allocator.create(NodeWsTransport);
+        errdefer allocator.destroy(self);
+        const cell = bus.getCell("remote") orelse try bus.createCell("remote", .{
+            .trust = .remote,
+            .bridges_in = &REMOTE_BRIDGES_IN,
+            .bridges_out = &REMOTE_BRIDGES_OUT,
+        });
         self.* = .{
             .allocator = allocator,
             .bus = bus,
-            .clients = .{},
-            .mutex = .{},
-            .port = port,
-            .running = false,
-            .secret_token = if (secret_token) |t| try allocator.dupe(u8, t) else null,
-            .server = null,
+            .opts = opts,
+            .token = try allocator.dupe(u8, opts.token),
+            .bind = try allocator.dupe(u8, opts.bind),
+            .cell = cell,
         };
         return self;
     }
 
     pub fn deinit(self: *NodeWsTransport) void {
         self.stop();
-        // run() スレッド join 後に安全にサーバ fd を閉じる。
-        if (self.server) |*s| {
-            s.deinit();
-            self.server = null;
+        // 接続スレッドの終了を待つ
+        var waited: usize = 0;
+        while (waited < 300) : (waited += 1) {
+            self.mutex.lock();
+            var all_done = true;
+            for (self.clients.items) |c| {
+                if (!c.finished.load(.acquire)) all_done = false;
+            }
+            self.mutex.unlock();
+            if (all_done) break;
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
+        if (self.server) |*s| s.deinit();
+        self.server = null;
         self.mutex.lock();
+        for (self.clients.items) |c| self.freeClient(c);
         self.clients.deinit(self.allocator);
         self.mutex.unlock();
-        if (self.secret_token) |t| self.allocator.free(t);
+        self.allocator.free(self.token);
+        self.allocator.free(self.bind);
         self.allocator.destroy(self);
     }
 
+    fn freeClient(self: *NodeWsTransport, c: *Client) void {
+        if (c.manifest) |m| m.deinit();
+        self.allocator.destroy(c);
+    }
+
     pub fn stop(self: *NodeWsTransport) void {
-        self.running = false;
-        // accept() でブロック中の run() スレッドを起こす (Linux では close() では起きない)。
-        // サーバ fd 自体の close は join 後に deinit() で行う。
-        self.wakeupAccept();
-
+        if (!self.running.swap(false, .acq_rel)) return;
+        if (self.server) |s| {
+            const addr = s.listen_address;
+            var wake = addr;
+            if (addr.any.family == std.posix.AF.INET and addr.in.sa.addr == 0) {
+                wake = std.net.Address.parseIp("127.0.0.1", addr.getPort()) catch addr;
+            }
+            if (std.net.tcpConnectToAddress(wake)) |c| c.close() else |_| {}
+        }
         self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.clients.items) |client| {
-            client.deinit();
-        }
-        self.clients.clearRetainingCapacity();
+        for (self.clients.items) |c| c.interrupt();
+        self.mutex.unlock();
     }
 
-    fn wakeupAccept(self: *NodeWsTransport) void {
-        if (self.server == null) return;
-        const addr = std.net.Address.parseIp("127.0.0.1", self.port) catch return;
-        if (std.net.tcpConnectToAddress(addr)) |conn| {
-            conn.close();
-        } else |_| {}
+    /// 実際に待ち受けているポート (テストで port=0 を使う場合用)
+    pub fn listenPort(self: *NodeWsTransport) u16 {
+        return if (self.server) |s| s.listen_address.getPort() else self.opts.port;
     }
 
+    /// 接続待ち受けループ (別スレッドで実行)
     pub fn run(self: *NodeWsTransport) !void {
-        const address = try std.net.Address.parseIp("0.0.0.0", self.port);
+        const address = try std.net.Address.parseIp(self.bind, self.opts.port);
         self.server = try address.listen(.{ .reuse_address = true });
+        self.running.store(true, .release);
+        self.ready.set();
+        log.info("NodeWsTransport: Listening on ws://{s}:{d} (remote nodes, cell 'remote')", .{ self.bind, self.listenPort() });
 
-        self.running = true;
-        log.info("NodeWsTransport: Listening on ws://0.0.0.0:{}", .{self.port});
-
-        var node_id_counter: u32 = 200;
-        while (self.running) {
-            if (self.server == null) break;
+        while (self.running.load(.acquire)) {
             const conn = self.server.?.accept() catch |err| {
-                if (!self.running) break;
-                log.err("NodeWsTransport: Accept error: {any}", .{err});
+                if (!self.running.load(.acquire)) break;
+                log.err("NodeWsTransport: accept error: {any}", .{err});
                 continue;
             };
-
-            const node_id = node_id_counter;
-            node_id_counter += 1;
-
-            const client = Client.init(self.allocator, conn.stream, node_id);
-
-            // ハンドシェイク
-            self.handleHandshake(client.stream) catch |err| {
-                log.warn("NodeWsTransport: Handshake failed: {any}", .{err});
-                client.deinit();
-                continue;
-            };
-
-            {
-                self.mutex.lock();
-                defer self.mutex.unlock();
-                try self.clients.append(self.allocator, client);
-            }
-
-            // Graphに登録
-            if (self.bus.graph) |g| {
-                var name_buf: [32]u8 = undefined;
-                const node_name = std.fmt.bufPrint(&name_buf, "RemoteNode_{}", .{node_id}) catch "RemoteNode";
-                try g.registerNode(node_id, node_name, .remote);
-            }
-
-            _ = try std.Thread.spawn(.{}, clientLoop, .{ self, client });
-        }
-    }
-
-    fn handleHandshake(self: *NodeWsTransport, stream: std.net.Stream) !void {
-        var buf: [2048]u8 = undefined;
-        const n = try stream.read(&buf);
-        if (n == 0) return error.EmptyRequest;
-        const request = buf[0..n];
-
-        const key_header = "Sec-WebSocket-Key: ";
-        const key_idx = std.mem.indexOf(u8, request, key_header) orelse return error.NoWebSocketKey;
-        const key_start = key_idx + key_header.len;
-        const key_end = std.mem.indexOfPos(u8, request, key_start, "\r\n") orelse return error.InvalidRequest;
-        const key = request[key_start..key_end];
-
-        // 認証チェック
-        if (self.secret_token) |token| {
-            const auth_header = "X-WEAVE-Token: ";
-            if (std.mem.indexOf(u8, request, auth_header)) |idx| {
-                const start = idx + auth_header.len;
-                const end = std.mem.indexOfPos(u8, request, start, "\r\n") orelse request.len;
-                const received = std.mem.trim(u8, request[start..end], " \t\r");
-                if (!std.mem.eql(u8, received, token)) {
-                    try stream.writeAll("HTTP/1.1 401 Unauthorized\r\n\r\n");
-                    return error.Unauthorized;
-                }
-            } else {
-                try stream.writeAll("HTTP/1.1 401 Unauthorized\r\n\r\n");
-                return error.AuthenticationRequired;
-            }
-        }
-
-        const magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-        var combined: [128]u8 = undefined;
-        const combined_str = try std.fmt.bufPrint(&combined, "{s}{s}", .{ key, magic });
-
-        var sha1_buf: [20]u8 = undefined;
-        std.crypto.hash.Sha1.hash(combined_str, &sha1_buf, .{});
-
-        var accept_buf: [32]u8 = undefined;
-        const accept_key = std.base64.standard.Encoder.encode(&accept_buf, &sha1_buf);
-
-        var response_buf: [1024]u8 = undefined;
-        const response = try std.fmt.bufPrint(&response_buf, "HTTP/1.1 101 Switching Protocols\r\n" ++
-            "Upgrade: websocket\r\n" ++
-            "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Accept: {s}\r\n\r\n", .{accept_key});
-        try stream.writeAll(response);
-    }
-
-    fn clientLoop(self: *NodeWsTransport, client: *Client) void {
-        std.debug.print("NodeWsTransport: Client thread started (ID: {})\n", .{client.node_id});
-        defer {
-            std.debug.print("NodeWsTransport: Client thread exiting (ID: {})\n", .{client.node_id});
-            if (self.bus.graph) |g| {
-                g.updateNodeStatus(client.node_id, .disconnected);
-                // ライフサイクルイベントのブロードキャスト
-                var buf: [128]u8 = undefined;
-                const payload = std.fmt.bufPrint(&buf, "{{\"node_id\":{},\"status\":\"disconnected\"}}", .{client.node_id}) catch "";
-                _ = self.bus.publish("core.node.status_changed", payload, .Transient, 0) catch {};
-            }
-            self.removeClient(client);
-            client.deinit();
-        }
-
-        while (self.running) {
-            const frame = self.readFrame(client.stream, self.allocator) catch |err| {
-                if (err != error.EndOfStream) {
-                    std.debug.print("NodeWsTransport: Read error: {any}\n", .{err});
-                }
+            if (!self.running.load(.acquire)) {
+                conn.stream.close();
                 break;
-            };
-            defer self.allocator.free(frame.payload);
+            }
+            self.mutex.lock();
+            var live: usize = 0;
+            for (self.clients.items) |c| {
+                if (!c.finished.load(.acquire)) live += 1;
+            }
+            // 切断済みを溜めすぎない
+            if (self.clients.items.len > self.opts.max_clients * 4) {
+                var i: usize = 0;
+                while (i < self.clients.items.len and self.clients.items.len > self.opts.max_clients * 2) {
+                    const c = self.clients.items[i];
+                    if (c.finished.load(.acquire)) {
+                        _ = self.clients.orderedRemove(i);
+                        self.freeClient(c);
+                    } else i += 1;
+                }
+            }
+            self.mutex.unlock();
+            if (live >= self.opts.max_clients) {
+                ws.writeStatus(conn.stream, 503, "Service Unavailable", "too many nodes") catch {};
+                conn.stream.close();
+                continue;
+            }
 
+            const client = self.allocator.create(Client) catch {
+                conn.stream.close();
+                continue;
+            };
+            client.* = .{ .server = self, .stream = conn.stream, .node_id = self.next_node_id.fetchAdd(1, .monotonic) };
+            self.mutex.lock();
+            self.clients.append(self.allocator, client) catch {
+                self.mutex.unlock();
+                conn.stream.close();
+                self.allocator.destroy(client);
+                continue;
+            };
+            self.mutex.unlock();
+            const t = std.Thread.spawn(.{}, clientMain, .{ self, client }) catch {
+                client.closeStream();
+                client.finished.store(true, .release);
+                continue;
+            };
+            t.detach();
+        }
+    }
+
+    fn sendJson(client: *Client, value: anytype) void {
+        var buf: [1024]u8 = undefined;
+        var w = std.io.Writer.fixed(&buf);
+        w.print("{f}", .{std.json.fmt(value, .{})}) catch return;
+        client.send(w.buffered());
+    }
+
+    fn clientMain(self: *NodeWsTransport, client: *Client) void {
+        defer client.finished.store(true, .release);
+        defer client.closeStream();
+
+        // 1. ハンドシェイク + 認証
+        var head_buf: [ws.MAX_HEADER_BYTES]u8 = undefined;
+        const head = ws.readHead(client.stream, &head_buf) catch return;
+        const req = ws.parseRequest(head) catch return;
+        const presented = req.token_header orelse req.queryParam("token");
+        if (presented == null or !ws.constantTimeEql(presented.?, self.token)) {
+            ws.writeStatus(client.stream, 401, "Unauthorized", "token required") catch {};
+            self.emitSecurity(client.node_id, "unknown", "auth_failed", "node websocket");
+            return;
+        }
+        ws.writeUpgrade(client.stream, req.ws_key orelse "") catch return;
+        ws.setSendTimeout(client.stream, 500);
+
+        // 2. hello (manifest) を待つ
+        const tv = std.posix.timeval{ .sec = @intCast(self.opts.hello_timeout_ms / 1000), .usec = @intCast((self.opts.hello_timeout_ms % 1000) * 1000) };
+        std.posix.setsockopt(client.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+        const hello = ws.readMessage(client.stream, self.allocator, self.opts.max_frame) catch return;
+        defer self.allocator.free(hello.payload);
+        if (!self.acceptHello(client, hello.payload)) return;
+        const none = std.posix.timeval{ .sec = 0, .usec = 0 };
+        std.posix.setsockopt(client.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&none)) catch {};
+
+        // 3. メッセージループ
+        while (self.running.load(.acquire) and client.alive.load(.acquire)) {
+            const frame = ws.readMessage(client.stream, self.allocator, self.opts.max_frame) catch break;
+            defer self.allocator.free(frame.payload);
             switch (frame.opcode) {
-                .text => self.handleTextMessage(client, frame.payload) catch |err| {
-                    std.debug.print("NodeWsTransport: Message handle error: {any}\n", .{err});
+                .text => self.handleText(client, frame.payload),
+                .ping => {
+                    client.send_mutex.lock();
+                    ws.writeFrame(client.stream, .pong, frame.payload, false) catch {};
+                    client.send_mutex.unlock();
                 },
                 .close => break,
-                .ping => self.sendControlFrame(client.stream, .pong, frame.payload) catch break,
                 else => {},
             }
         }
+
+        // 4. 切断: 購読を外し、状態を disconnected に
+        client.alive.store(false, .release);
+        self.bus.unsubscribeAll(client.node_id);
+        if (self.bus.graph) |g| g.updateNodeStatus(client.node_id, .disconnected);
+        var buf: [256]u8 = undefined;
+        var w = std.io.Writer.fixed(&buf);
+        w.print("{f}", .{std.json.fmt(.{ .node_id = client.node_id, .name = client.name(), .status = "disconnected" }, .{})}) catch {};
+        var tbuf: [128]u8 = undefined;
+        if (std.fmt.bufPrint(&tbuf, "core.node.status.{s}", .{client.name()})) |t| {
+            self.bus.publish(t, w.buffered(), .Transient, 0) catch {};
+        } else |_| {}
+        log.info("NodeWsTransport: remote node '{s}' (id {d}) disconnected", .{ client.name(), client.node_id });
     }
 
-    fn handleTextMessage(self: *NodeWsTransport, client: *Client, json_text: []const u8) !void {
-        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, json_text, .{});
-        defer parsed.deinit();
-
-        const root = parsed.value.object;
-        const msg_type = root.get("type") orelse return;
-        const type_str = msg_type.string;
-
-        if (std.mem.eql(u8, type_str, "subscribe")) {
-            if (root.get("topic")) |topic| {
-                try client.addSubscription(topic.string);
-                std.debug.print("NodeWsTransport: Client {} subscribed to '{s}'\n", .{ client.node_id, topic.string });
-
-                try client.ensureRegistered(self.bus);
-                if (self.bus.graph) |g| {
-                    try g.updateSubscription(client.node_id, topic.string);
-                }
-            }
-        } else if (std.mem.eql(u8, type_str, "publish")) {
-            const topic = root.get("topic") orelse return;
-            const payload = root.get("payload") orelse return;
-
-            try client.ensureRegistered(self.bus);
-
-            // ペイロードがオブジェクトや配列なら文字列化して転送
-            var payload_str: []const u8 = undefined;
-            if (payload == .string) {
-                payload_str = payload.string;
-            } else {
-                var out_buf = std.ArrayListUnmanaged(u8){};
-                defer out_buf.deinit(self.allocator);
-                try out_buf.writer(self.allocator).print("{f}", .{std.json.fmt(payload, .{})});
-                payload_str = try self.allocator.dupe(u8, out_buf.items);
-            }
-            defer if (payload != .string) self.allocator.free(payload_str);
-
-            // グラフの更新
-            if (self.bus.graph) |g| {
-                try g.recordPublish(client.node_id, topic.string);
-            }
-
-            // 外部ノードからの発行として指定
-            try self.bus.publish(topic.string, payload_str, .Transient, client.node_id);
-        }
-    }
-
-    fn removeClient(self: *NodeWsTransport, client: *Client) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.clients.items, 0..) |c, i| {
-            if (c == client) {
-                _ = self.clients.swapRemove(i);
-                break;
-            }
-        }
-    }
-
-    const Opcode = enum(u4) {
-        continuation = 0x0,
-        text = 0x1,
-        binary = 0x2,
-        close = 0x8,
-        ping = 0x9,
-        pong = 0xA,
-        _,
-    };
-
-    const Frame = struct {
-        opcode: Opcode,
-        payload: []u8,
-    };
-
-    fn readNoEof(stream: std.net.Stream, buf: []u8) !void {
-        var total: usize = 0;
-        while (total < buf.len) {
-            const n = try stream.read(buf[total..]);
-            if (n == 0) return error.EndOfStream;
-            total += n;
-        }
-    }
-
-    fn readFrame(self: *NodeWsTransport, stream: std.net.Stream, allocator: std.mem.Allocator) !Frame {
-        _ = self;
-        var head: [2]u8 = undefined;
-        try readNoEof(stream, &head);
-
-        const opcode: Opcode = @enumFromInt(head[0] & 0x0F);
-        const masked = (head[1] & 0x80) != 0;
-        var len: u64 = head[1] & 0x7F;
-
-        if (len == 126) {
-            var ext: [2]u8 = undefined;
-            try readNoEof(stream, &ext);
-            len = std.mem.readInt(u16, &ext, .big);
-        } else if (len == 127) {
-            var ext: [8]u8 = undefined;
-            try readNoEof(stream, &ext);
-            len = std.mem.readInt(u64, &ext, .big);
-        }
-
-        var mask: [4]u8 = undefined;
-        if (masked) {
-            try readNoEof(stream, &mask);
-        }
-
-        const payload = try allocator.alloc(u8, @intCast(len));
-        errdefer allocator.free(payload);
-        try readNoEof(stream, payload);
-
-        if (masked) {
-            for (payload, 0..) |*b, i| {
-                b.* ^= mask[i % 4];
-            }
-        }
-
-        return Frame{ .opcode = opcode, .payload = payload };
-    }
-
-    fn sendControlFrame(self: *NodeWsTransport, stream: std.net.Stream, opcode: Opcode, payload: []const u8) !void {
-        _ = self;
-        var head: [2]u8 = undefined;
-        head[0] = 0x80 | @as(u8, @intFromEnum(opcode));
-        head[1] = @as(u8, @intCast(payload.len)); // Control frames are small
-        try stream.writeAll(&head);
-        try stream.writeAll(payload);
-    }
-
-    pub fn transport(self: *NodeWsTransport) transport_if.Transport {
-        return .{
-            .ptr = self,
-            .vtable = &.{
-                .send = send,
-                .name = name,
-                .deinit = deinitTransport,
-            },
+    fn acceptHello(self: *NodeWsTransport, client: *Client, text: []const u8) bool {
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, text, .{}) catch {
+            sendJson(client, .{ .type = "error", .reason = "hello must be JSON" });
+            return false;
         };
+        defer parsed.deinit();
+        const root = if (parsed.value == .object) parsed.value.object else {
+            sendJson(client, .{ .type = "error", .reason = "hello must be an object" });
+            return false;
+        };
+        const t = root.get("type") orelse .null;
+        if (t != .string or !std.mem.eql(u8, t.string, "hello")) {
+            sendJson(client, .{ .type = "error", .reason = "first message must be hello" });
+            return false;
+        }
+        const mv = root.get("manifest") orelse {
+            sendJson(client, .{ .type = "error", .reason = "hello requires manifest" });
+            return false;
+        };
+        var mbuf: std.ArrayListUnmanaged(u8) = .{};
+        defer mbuf.deinit(self.allocator);
+        mbuf.writer(self.allocator).print("{f}", .{std.json.fmt(mv, .{})}) catch return false;
+        const m = manifest_mod.Manifest.parse(self.allocator, mbuf.items) catch |err| {
+            var ebuf: [128]u8 = undefined;
+            const reason = std.fmt.bufPrint(&ebuf, "invalid manifest: {s}", .{@errorName(err)}) catch "invalid manifest";
+            sendJson(client, .{ .type = "error", .reason = reason });
+            self.emitSecurity(client.node_id, "unknown", "manifest_rejected", @errorName(err));
+            return false;
+        };
+        client.manifest = m;
+        const n = std.fmt.bufPrint(&client.name_buf, "remote.{s}", .{m.value.name}) catch return false;
+        client.name_len = n.len;
+        const eps = if (m.value.rate_limit_eps > 0) m.value.rate_limit_eps else self.opts.default_rate_eps;
+        client.rate = RateLimiter.init(eps);
+
+        if (self.bus.graph) |g| g.registerNodeIn(client.node_id, client.name(), .remote, self.cell.name) catch {};
+        // manifest の購読宣言を適用 (bridge で入れないものは黙って外す)
+        for (m.value.permissions.subscribe) |p| {
+            if (!self.cell.intersectsIn(p)) continue;
+            self.bus.subscribeEx(p, client.node_id, onEvent, client, .{ .cell = self.cell }) catch {};
+        }
+        sendJson(client, .{ .type = "welcome", .node_id = client.node_id, .name = client.name(), .cell = self.cell.name });
+        log.info("NodeWsTransport: remote node '{s}' joined (id {d})", .{ client.name(), client.node_id });
+        return true;
     }
 
-    fn send(ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: event_bus.QoS) anyerror!void {
-        const self: *NodeWsTransport = @ptrCast(@alignCast(ctx));
+    fn parseQos(v: ?std.json.Value, topic: []const u8) QoS {
+        const val = v orelse return topics.defaultQos(topic);
+        switch (val) {
+            .string => |s| {
+                if (std.mem.eql(u8, s, "Reliable")) return .Reliable;
+                if (std.mem.eql(u8, s, "BestEffort")) return .BestEffort;
+                // Transient (保持) は state 種別のトピックにだけ許す
+                if (std.mem.eql(u8, s, "Transient") and topics.classify(topic) == .state) return .Transient;
+            },
+            .integer => |i| {
+                if (i == 1) return .Reliable;
+                if (i == 0) return .BestEffort;
+            },
+            else => {},
+        }
+        return topics.defaultQos(topic);
+    }
 
-        var json_buf = std.ArrayListUnmanaged(u8){};
-        defer json_buf.deinit(self.allocator);
+    fn handleText(self: *NodeWsTransport, client: *Client, text: []const u8) void {
+        const m = (client.manifest orelse return).value;
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, text, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        const root = parsed.value.object;
+        const tv = root.get("type") orelse return;
+        if (tv != .string) return;
+        const kind = tv.string;
+        const topic_v = root.get("topic") orelse return;
+        if (topic_v != .string) return;
+        const topic = topic_v.string;
 
-        // 外部ノードへの通知用JSON
-        try json_buf.writer(self.allocator).print("{f}", .{std.json.fmt(.{
-            .type = "event",
-            .topic = topic,
-            .payload = payload, // 既にJSONであることを想定
-            .qos = @intFromEnum(qos),
-        }, .{})});
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        for (self.clients.items) |client| {
-            if (client.isSubscribed(topic)) {
-                self.sendWsFrame(client.stream, json_buf.items) catch continue;
+        if (std.mem.eql(u8, kind, "subscribe")) {
+            if (!pattern.validPattern(topic) or !m.canSubscribe(topic) or !self.cell.intersectsIn(topic)) {
+                self.emitSecurity(client.node_id, client.name(), "acl_denied", topic);
+                sendJson(client, .{ .type = "error", .reason = "subscribe denied", .topic = topic });
+                return;
             }
+            self.bus.subscribeEx(topic, client.node_id, onEvent, client, .{ .cell = self.cell }) catch {};
+        } else if (std.mem.eql(u8, kind, "unsubscribe")) {
+            self.bus.unsubscribe(client.node_id, topic);
+            if (self.bus.graph) |g| g.removeSubscription(client.node_id, topic);
+        } else if (std.mem.eql(u8, kind, "publish")) {
+            if (!pattern.validTopic(topic) or !m.canPublish(topic) or !self.cell.allowsOut(topic) or topics.touchesReserved(topic)) {
+                self.emitSecurity(client.node_id, client.name(), "acl_denied", topic);
+                sendJson(client, .{ .type = "error", .reason = "publish denied", .topic = topic });
+                return;
+            }
+            if (!client.rate.tryConsume(std.time.milliTimestamp())) {
+                self.emitSecurity(client.node_id, client.name(), "rate_limited", topic);
+                return;
+            }
+            var pbuf: std.ArrayListUnmanaged(u8) = .{};
+            defer pbuf.deinit(self.allocator);
+            const payload: []const u8 = switch (root.get("payload") orelse .null) {
+                .string => |s| s,
+                else => |v| blk: {
+                    pbuf.writer(self.allocator).print("{f}", .{std.json.fmt(v, .{})}) catch return;
+                    break :blk pbuf.items;
+                },
+            };
+            self.bus.publish(topic, payload, parseQos(root.get("qos"), topic), client.node_id) catch {};
         }
     }
 
-    fn sendWsFrame(self: *NodeWsTransport, stream: std.net.Stream, data: []const u8) !void {
-        _ = self;
-        var header: [10]u8 = undefined;
-        header[0] = 0x81;
-
-        var header_len: usize = 2;
-        if (data.len <= 125) {
-            header[1] = @as(u8, @intCast(data.len));
-        } else if (data.len <= 65535) {
-            header[1] = 126;
-            std.mem.writeInt(u16, header[2..4], @as(u16, @intCast(data.len)), .big);
-            header_len = 4;
+    /// バスからの配送 (remote セルの executor 上)
+    fn onEvent(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+        const client: *Client = @ptrCast(@alignCast(ctx orelse return));
+        if (!client.alive.load(.acquire)) return;
+        const a = client.server.allocator;
+        var out: std.ArrayListUnmanaged(u8) = .{};
+        defer out.deinit(a);
+        const w = out.writer(a);
+        w.print("{{\"type\":\"event\",\"id\":{d},\"topic\":\"{s}\",\"qos\":{d},\"payload\":", .{ msg.id, msg.topic, @intFromEnum(msg.qos) }) catch return;
+        if (std.json.validate(a, msg.payload) catch false) {
+            w.writeAll(msg.payload) catch return;
         } else {
-            header[1] = 127;
-            std.mem.writeInt(u64, header[2..10], data.len, .big);
-            header_len = 10;
+            w.print("{f}", .{std.json.fmt(msg.payload, .{})}) catch return;
         }
-
-        try stream.writeAll(header[0..header_len]);
-        try stream.writeAll(data);
+        w.writeAll("}") catch return;
+        client.send(out.items);
     }
 
-    fn name(ctx: *anyopaque) []const u8 {
-        _ = ctx;
-        return "NodeWsTransport";
-    }
-
-    fn deinitTransport(ctx: *anyopaque) void {
-        _ = ctx;
+    fn emitSecurity(self: *NodeWsTransport, node_id: u32, name: []const u8, kind: []const u8, detail: []const u8) void {
+        var tbuf: [64]u8 = undefined;
+        const t = std.fmt.bufPrint(&tbuf, "core.security.{s}", .{kind}) catch return;
+        var buf: [512]u8 = undefined;
+        var w = std.io.Writer.fixed(&buf);
+        w.print("{f}", .{std.json.fmt(.{ .node_id = node_id, .name = name, .detail = detail }, .{})}) catch return;
+        self.bus.publish(t, w.buffered(), .Transient, 0) catch {};
     }
 };
+
+// ======================================================================
+// Integration test: 実ソケットでリモートノードの ACL を確認する
+// ======================================================================
+
+fn connectClient(port: u16, token: []const u8) !std.net.Stream {
+    const addr = try std.net.Address.parseIp("127.0.0.1", port);
+    const s = try std.net.tcpConnectToAddress(addr);
+    errdefer s.close();
+    var hdr: [128]u8 = undefined;
+    const extra = try std.fmt.bufPrint(&hdr, "X-WEAVE-Token: {s}\r\n", .{token});
+    try ws.clientHandshake(s, "127.0.0.1", port, "/", extra);
+    return s;
+}
+
+fn recvText(s: std.net.Stream, a: std.mem.Allocator) ![]u8 {
+    const f = try ws.readMessage(s, a, 1 << 20);
+    return f.payload;
+}
+
+test "NodeWs: hello manifest gates publish/subscribe (P0-3)" {
+    const a = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(a, 64);
+    defer bus.deinit();
+    bus.verbose = false;
+
+    const Sink = struct {
+        var obs_requests = std.atomic.Value(u32).init(0);
+        var ext_msgs = std.atomic.Value(u32).init(0);
+        fn obs(_: ?*anyopaque, _: *const event_bus.EventMessage) void {
+            _ = obs_requests.fetchAdd(1, .monotonic);
+        }
+        fn ext(_: ?*anyopaque, _: *const event_bus.EventMessage) void {
+            _ = ext_msgs.fetchAdd(1, .monotonic);
+        }
+    };
+    Sink.obs_requests.store(0, .monotonic);
+    Sink.ext_msgs.store(0, .monotonic);
+    try bus.subscribe("core.obs.request.*", 2, Sink.obs, null);
+    try bus.subscribe("ext.remote.out", 3, Sink.ext, null);
+    try bus.start();
+
+    var t = try NodeWsTransport.init(a, &bus, .{ .port = 0, .token = "secret" });
+    defer t.deinit();
+    const th = try std.Thread.spawn(.{}, NodeWsTransport.run, .{t});
+    defer th.join();
+    defer t.stop();
+    t.ready.wait();
+    const port = t.listenPort();
+
+    // トークン無しは拒否
+    {
+        const addr = try std.net.Address.parseIp("127.0.0.1", port);
+        const s = try std.net.tcpConnectToAddress(addr);
+        defer s.close();
+        try std.testing.expectError(error.HandshakeRejected, ws.clientHandshake(s, "127.0.0.1", port, "/", ""));
+    }
+
+    // 予約名前空間を宣言した manifest は拒否
+    {
+        const s = try connectClient(port, "secret");
+        defer s.close();
+        try ws.writeFrame(s, .text, "{\"type\":\"hello\",\"manifest\":{\"name\":\"forger\",\"version\":\"1\",\"permissions\":{\"publish\":[\"core.node.fault\"]}}}", true);
+        const r = try recvText(s, a);
+        defer a.free(r);
+        try std.testing.expect(std.mem.indexOf(u8, r, "ReservedTopicForbidden") != null);
+    }
+
+    // 正規の manifest: ext.remote.out は出せる / OBS 操作は宣言していても bridge で拒否
+    const s = try connectClient(port, "secret");
+    defer s.close();
+    try ws.writeFrame(s, .text, "{\"type\":\"hello\",\"manifest\":{\"name\":\"tool\",\"version\":\"1\",\"permissions\":{\"publish\":[\"ext.remote.out\",\"core.obs.request.SetSceneItemEnabled\"],\"subscribe\":[\"ext.remote.in\"]}}}", true);
+    const welcome = try recvText(s, a);
+    defer a.free(welcome);
+    try std.testing.expect(std.mem.indexOf(u8, welcome, "\"welcome\"") != null);
+
+    try ws.writeFrame(s, .text, "{\"type\":\"publish\",\"topic\":\"ext.remote.out\",\"payload\":{\"x\":1}}", true);
+    try ws.writeFrame(s, .text, "{\"type\":\"publish\",\"topic\":\"core.obs.request.SetSceneItemEnabled\",\"payload\":{}}", true);
+    const denied = try recvText(s, a);
+    defer a.free(denied);
+    try std.testing.expect(std.mem.indexOf(u8, denied, "publish denied") != null);
+
+    // manifest で宣言した購読には配送される
+    std.Thread.sleep(50 * std.time.ns_per_ms);
+    try bus.publish("ext.remote.in", "{\"hello\":true}", .BestEffort, 0);
+    const ev = try recvText(s, a);
+    defer a.free(ev);
+    try std.testing.expect(std.mem.indexOf(u8, ev, "\"ext.remote.in\"") != null);
+
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 1), Sink.ext_msgs.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), Sink.obs_requests.load(.monotonic));
+}

@@ -1,0 +1,14 @@
+{
+    "abi_version": 1,
+    "name": "loop_node",
+    "version": "1.0.0",
+    "description": "infinite loop demo: hangs on a chat containing !freeze (stopped by instruction metering)",
+    "permissions": {
+        "publish": ["ext.loop.alive"],
+        "subscribe": ["ext.twitch.chat.message"],
+        "data_access": ["pii"]
+    },
+    "limits": {
+        "max_instructions": 5000000
+    }
+}

@@ -10,14 +10,14 @@ trap "kill -9 \$(jobs -p) 2>/dev/null || true; echo \"LOG_DIR is at $LOG_DIR\"" 
 echo "Starting WEAVE core with kusa scenario in background..."
 # Start WEAVE in the background
 ./zig-out/bin/WEAVE \
-  --mock-twitch demo/scenarios/kusa.jsonl \
-  --mock-obs \
+  --mock-twitch demo/scenarios/kusa.jsonl --mock-twitch-once \
+  --mock-obs --dash-port 3071 --node-port 8071 \
   --mock-obs-file "$LOG_DIR/obs.jsonl" \
   wasm-apps/kusa_node.wasm \
   > "$LOG_DIR/weave.log" 2>&1 &
 
-echo "Waiting 35 seconds for the scenario events to compile and settle..."
-sleep 35
+echo "Waiting 17 seconds for the scenario (ends at ~15s) to settle..."
+sleep 17
 
 echo "--- obs.jsonl contents ---"
 if [ -f "$LOG_DIR/obs.jsonl" ]; then
