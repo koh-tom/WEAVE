@@ -305,8 +305,8 @@ pub fn build(b: *std.Build) void {
     bus_test_step.dependOn(&run_bus_test.step);
 
     // --- Wasm Plugin Build (wasm-apps/*.zig を自動で拾う。`weave init` で作ったものもそのまま乗る) ---
-    // bad_node だけは OOM 自動復旧テストで「メモリ枯渇まで alloc」するため Debug 維持
-    // (ReleaseSmall だとループが最適化で終端せずテストがハングする)。
+    // 全プラグインを ReleaseSmall でビルドする (起動が速い)。以前は bad_node だけ Debug にしていたが、
+    // OOM テストのハングの原因 (SDK os_alloc の u32 折り返し + メモリ上限なし) を直したので不要。
     var zig_plugin_steps: std.ArrayListUnmanaged(*std.Build.Step) = .{};
     {
         var dir = b.build_root.handle.openDir("wasm-apps", .{ .iterate = true }) catch @panic("wasm-apps/ not found");
@@ -321,7 +321,7 @@ pub fn build(b: *std.Build) void {
                 .root_module = b.createModule(.{
                     .root_source_file = b.path(b.fmt("wasm-apps/{s}", .{entry.name})),
                     .target = wasm_target,
-                    .optimize = if (std.mem.eql(u8, name, "bad_node")) optimize else .ReleaseSmall,
+                    .optimize = .ReleaseSmall,
                 }),
             });
             plugin.root_module.addImport("plugin_sdk", sdk_module);
