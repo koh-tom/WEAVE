@@ -45,9 +45,11 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
     _ = topic_len;
 
     const payload = @as([*]const u8, @ptrFromInt(payload_ptr))[0..payload_len];
-    if (std.mem.eql(u8, payload, "ALLOC_UNTIL_OOM")) {
+    if (std.mem.startsWith(u8, payload, "ALLOC_UNTIL_OOM")) {
         while (true) {
-            const ptr = sdk.allocator.alloc(u8, 1024) catch {
+            // 1 MiB ずつ確保する: limits.memory_pages (既定 256 = 16 MiB) に数回で届き、
+            // ビルドモードに関係なく命令数上限より先に必ず OOM になる
+            const ptr = sdk.allocator.alloc(u8, 1024 * 1024) catch {
                 @panic("out_of_memory");
             };
             if (ptr.len == 0) break;
