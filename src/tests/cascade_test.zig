@@ -194,3 +194,286 @@ test "metering: an infinite loop traps, other cells keep delivering, the plugin 
     try std.testing.expectEqual(@as(u32, 1), Alive.n.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 0), meta.subscriber.?.consecutive_failures);
 }
+
+test "memory limit: limits.memory_pages caps memory.grow (P1-5)" {
+    const allocator = std.testing.allocator;
+    var runtime = try @import("../core/wasm_runtime.zig").WasmRuntime.init();
+    defer runtime.deinit();
+    const host_api = @import("../api/host_api.zig");
+    var symbols = host_api.getNativeSymbols();
+    try runtime.registerNatives("env", &symbols);
+
+    const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, "wasm-apps/loop_node.wasm", 1024 * 1024);
+    defer allocator.free(wasm_buffer);
+    const module = try runtime.loadModule(wasm_buffer);
+    defer wamr.wasm_runtime_unload(module);
+
+    // 上限なしで初期ページ数を知る
+    const probe = try runtime.instantiateLimited(module, 64 * 1024, 0, 0);
+    const init_pages = wamr.wasm_memory_get_cur_page_count(wamr.wasm_runtime_get_default_memory(probe));
+    wamr.wasm_runtime_deinstantiate(probe);
+
+    // 初期 + 2 ページに制限: 2 ページは伸ばせるが、それ以上は拒否される
+    const limit = init_pages + 2;
+    const inst = try runtime.instantiateLimited(module, 64 * 1024, 0, @intCast(limit));
+    defer wamr.wasm_runtime_deinstantiate(inst);
+    const mem = wamr.wasm_runtime_get_default_memory(inst);
+    try std.testing.expectEqual(limit, wamr.wasm_memory_get_max_page_count(mem));
+    try std.testing.expect(wamr.wasm_runtime_enlarge_memory(inst, 2));
+    try std.testing.expect(!wamr.wasm_runtime_enlarge_memory(inst, 1));
+    try std.testing.expectEqual(limit, wamr.wasm_memory_get_cur_page_count(mem));
+}
+
+/// counter_node を PluginManager 経由で立ち上げる (Core.loadPlugin と同じ順序: 登録 → セル → initPlugin → 購読)
+const CounterHarness = struct {
+    bus: event_bus.EventBus,
+    runtime: @import("../core/wasm_runtime.zig").WasmRuntime,
+    pm: plugin_manager.PluginManager,
+    meta: *plugin_manager.PluginMetadata = undefined,
+
+    var last_value = std.atomic.Value(i64).init(-1);
+    var values_seen = std.atomic.Value(u32).init(0);
+    var faults = std.atomic.Value(u32).init(0);
+    var poisons = std.atomic.Value(u32).init(0);
+
+    fn onValue(_: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+        const P = struct { count: i64 };
+        const parsed = std.json.parseFromSlice(P, std.heap.page_allocator, msg.payload, .{}) catch return;
+        defer parsed.deinit();
+        last_value.store(parsed.value.count, .monotonic);
+        _ = values_seen.fetchAdd(1, .monotonic);
+    }
+    fn onFault(_: ?*anyopaque, _: *const event_bus.EventMessage) void {
+        _ = faults.fetchAdd(1, .monotonic);
+    }
+    fn onPoison(_: ?*anyopaque, _: *const event_bus.EventMessage) void {
+        _ = poisons.fetchAdd(1, .monotonic);
+    }
+
+    fn setUp(self: *CounterHarness, allocator: std.mem.Allocator) !void {
+        last_value.store(-1, .monotonic);
+        values_seen.store(0, .monotonic);
+        faults.store(0, .monotonic);
+        poisons.store(0, .monotonic);
+
+        self.bus = try event_bus.EventBus.init(allocator, 64);
+        self.bus.verbose = false;
+        self.runtime = try @import("../core/wasm_runtime.zig").WasmRuntime.init();
+        self.pm = plugin_manager.PluginManager.init(allocator);
+        self.pm.runtime = &self.runtime;
+
+        const host_api = @import("../api/host_api.zig");
+        host_api.global_bus = &self.bus;
+        host_api.global_plugin_manager = &self.pm;
+        host_api.enable_log = false;
+        var symbols = host_api.getNativeSymbols();
+        try self.runtime.registerNatives("env", &symbols);
+
+        try self.bus.subscribe("ext.counter.value", 90, onValue, null);
+        try self.bus.subscribe("core.node.fault", 91, onFault, null);
+        try self.bus.subscribe("core.node.poison", 92, onPoison, null);
+
+        const wasm_path = "wasm-apps/counter_node.wasm";
+        const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
+        const module = try self.runtime.loadModule(wasm_buffer);
+        const inst = try self.runtime.instantiate(module, 128 * 1024, 64 * 1024);
+        self.meta = try self.pm.registerPlugin(module, inst, wasm_path, "wasm-apps/counter_node.json", wasm_buffer, &self.bus);
+        self.meta.subscriber.?.cell = try self.bus.createCell("plugin.counter_node", .{ .trust = .untrusted });
+        self.pm.initPlugin(self.meta);
+        try self.pm.applyManifestSubscriptions(self.meta.instance, &self.bus);
+        try self.bus.start();
+    }
+
+    fn tearDown(self: *CounterHarness) void {
+        const host_api = @import("../api/host_api.zig");
+        self.bus.stop();
+        self.pm.deinit();
+        self.bus.deinit();
+        self.runtime.deinit();
+        host_api.global_bus = null;
+        host_api.global_plugin_manager = null;
+        host_api.enable_log = true;
+    }
+
+    fn send(self: *CounterHarness, payload: []const u8) !void {
+        try self.bus.publish("ext.counter.inc", payload, .Reliable, 0);
+        self.bus.waitIdle();
+    }
+};
+
+test "R2/R4/R5: poisoned message is quarantined, restart uses the spare, committed state survives" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dlq_dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dlq_dir);
+
+    var h: CounterHarness = .{ .bus = undefined, .runtime = undefined, .pm = undefined };
+    try h.setUp(allocator);
+    defer h.tearDown();
+    h.pm.dlq_dir = dlq_dir;
+
+    // 状態領域が見つかり、予備インスタンスが用意されている
+    const sub = &h.meta.subscriber.?;
+    try std.testing.expectEqual(@as(u32, 4), sub.state_len);
+    try std.testing.expect(h.meta.spare != null);
+
+    try h.send("{}");
+    try h.send("{}");
+    try h.send("{}");
+    try std.testing.expectEqual(@as(i64, 3), CounterHarness.last_value.load(.monotonic));
+
+    // +1 した後で落ちる毒メッセージ → 再起動 (予備と差し替え)
+    const spare_before = h.meta.spare.?;
+    try h.send("{\"cmd\":\"TRAP\"}");
+    try std.testing.expectEqual(@as(u32, 1), CounterHarness.faults.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), CounterHarness.poisons.load(.monotonic));
+    try std.testing.expectEqual(spare_before, h.meta.instance); // R4: 予備がそのまま使われた
+    try std.testing.expect(h.meta.spare != null); // 次の予備も用意済み
+    try std.testing.expectEqual(@as(u64, 1), sub.restarts_total);
+    std.debug.print("\n[R4] restart (spare swap + on_init + state restore): {d} us\n", .{sub.last_restart_us});
+
+    // R5: 落ちる直前にコミットされた 3 から続く (途中の +1 は捨てられ、初期値 0 にも戻らない)
+    try h.send("{}");
+    try std.testing.expectEqual(@as(i64, 4), CounterHarness.last_value.load(.monotonic));
+
+    // R2: 同じ毒をもう一度送っても配送されず、落ちない
+    try h.send("{\"cmd\":\"TRAP\"}");
+    try std.testing.expectEqual(@as(u32, 1), CounterHarness.faults.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), sub.poison_skipped);
+
+    // DLQ に 1 行記録されている (payload は hex)
+    const dlq = try tmp.dir.readFileAlloc(allocator, "100.jsonl", 64 * 1024);
+    defer allocator.free(dlq);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dlq, "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, dlq, "\"payload_hex\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dlq, "ext.counter.inc") != null);
+}
+
+test "R3/R8: repeated faults open the breaker, messages wait in the mailbox, half-open recovers" {
+    const allocator = std.testing.allocator;
+    var h: CounterHarness = .{ .bus = undefined, .runtime = undefined, .pm = undefined };
+    try h.setUp(allocator);
+    defer h.tearDown();
+    const sub = &h.meta.subscriber.?;
+    const Breaker = @import("../core/wasm_subscriber.zig").Breaker;
+
+    // 変種の毒で 3 回 (manifest の max_faults) 落ちる → 隔離
+    try h.send("TRAP-1");
+    try h.send("TRAP-2");
+    try std.testing.expectEqual(Breaker.closed, sub.breaker);
+    try h.send("TRAP-3");
+    try std.testing.expectEqual(Breaker.open, sub.breaker);
+    try std.testing.expectEqual(@as(u32, 3), CounterHarness.faults.load(.monotonic));
+
+    // 隔離中のメッセージは配送されずメールボックスで待つ
+    try h.send("{}");
+    try std.testing.expectEqual(@as(usize, 1), sub.mailbox.items.len);
+    try std.testing.expectEqual(@as(u32, 0), CounterHarness.values_seen.load(.monotonic));
+
+    // quarantine_secs (1 秒) 経過後の次のメッセージで half-open → 復帰し、溜まった分も配送される
+    std.Thread.sleep(1100 * std.time.ns_per_ms);
+    try h.send("{}");
+    try std.testing.expectEqual(Breaker.closed, sub.breaker);
+    try std.testing.expectEqual(@as(usize, 0), sub.mailbox.items.len);
+    try std.testing.expectEqual(@as(u32, 2), CounterHarness.values_seen.load(.monotonic));
+    // 毒の +1 は 3 回とも捨てられているので 2
+    try std.testing.expectEqual(@as(i64, 2), CounterHarness.last_value.load(.monotonic));
+}
+
+test "R5+R7: plugin state is saved in the snapshot and restored after a Core restart" {
+    const allocator = std.testing.allocator;
+    const Snapshot = @import("../core/snapshot.zig").Snapshot;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+    const path = try std.fmt.allocPrint(allocator, "{s}/snapshot.json", .{dir});
+    defer allocator.free(path);
+
+    // 1 回目の Core: 3 まで数えてスナップショットを書く
+    {
+        var h: CounterHarness = .{ .bus = undefined, .runtime = undefined, .pm = undefined };
+        try h.setUp(allocator);
+        defer h.tearDown();
+        try h.send("{}");
+        try h.send("{}");
+        try h.send("{}");
+        try std.testing.expectEqual(@as(i64, 3), CounterHarness.last_value.load(.monotonic));
+        var snap = Snapshot.init(allocator, path, &h.bus, null);
+        snap.pm = &h.pm;
+        try std.testing.expect(try snap.saveIfChanged());
+    }
+
+    // 2 回目の Core (kill -9 の後の起動に相当): 復元すると 3 から続く
+    var h: CounterHarness = .{ .bus = undefined, .runtime = undefined, .pm = undefined };
+    try h.setUp(allocator);
+    defer h.tearDown();
+    var snap = Snapshot.init(allocator, path, &h.bus, null);
+    snap.pm = &h.pm;
+    const r = try snap.restore(false);
+    try std.testing.expectEqual(@as(usize, 1), r.plugin_states);
+    try h.send("{}");
+    try std.testing.expectEqual(@as(i64, 4), CounterHarness.last_value.load(.monotonic));
+}
+
+test "R4 bench: restart time distribution (spare swap + on_init + state restore + next spare)" {
+    const allocator = std.testing.allocator;
+    var h: CounterHarness = .{ .bus = undefined, .runtime = undefined, .pm = undefined };
+    try h.setUp(allocator);
+    defer h.tearDown();
+    try h.send("{}");
+
+    const N = 500;
+    var samples: [N]u64 = undefined;
+    const sub = &h.meta.subscriber.?;
+    for (&samples) |*s| {
+        sub.mutex.lock();
+        const t0 = std.time.nanoTimestamp();
+        try h.pm.restartPlugin(h.meta.node_id, &h.bus);
+        s.* = @intCast(std.time.nanoTimestamp() - t0);
+        sub.mutex.unlock();
+    }
+    std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
+    std.debug.print("\n[R4 bench] {d} restarts: p50 {d} us, p99 {d} us, max {d} us\n", .{ N, samples[N / 2] / 1000, samples[N * 99 / 100] / 1000, samples[N - 1] / 1000 });
+
+    // 何度差し替えても状態は保たれ、リークしない (testing allocator)
+    try h.send("{}");
+    try std.testing.expectEqual(@as(i64, 2), CounterHarness.last_value.load(.monotonic));
+}
+
+test "lock order: snapshotting plugin state while the plugin restarts does not deadlock" {
+    // 再起動はプラグインの mutex を持ったまま plugins_mutex を取る。スナップショットが逆の順序で
+    // 両方を持っていた頃は、実デーモンで trap の直後に止まった (tests/e2e/infinite_loop.sh で発見)。
+    const allocator = std.testing.allocator;
+    var h: CounterHarness = .{ .bus = undefined, .runtime = undefined, .pm = undefined };
+    try h.setUp(allocator);
+    defer h.tearDown();
+    try h.send("{}");
+
+    const Snapper = struct {
+        fn run(pm: *plugin_manager.PluginManager, stop: *std.atomic.Value(bool), rounds: *std.atomic.Value(u32)) void {
+            while (!stop.load(.acquire)) {
+                const states = pm.copyCommittedStates(std.heap.page_allocator) catch continue;
+                plugin_manager.PluginManager.freeStateCopies(std.heap.page_allocator, states);
+                _ = rounds.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+    var stop = std.atomic.Value(bool).init(false);
+    var rounds = std.atomic.Value(u32).init(0);
+    const t = try std.Thread.spawn(.{}, Snapper.run, .{ &h.pm, &stop, &rounds });
+
+    const sub = &h.meta.subscriber.?;
+    var i: usize = 0;
+    while (i < 300) : (i += 1) {
+        sub.mutex.lock(); // WasmSubscriber.callback と同じくプラグインの mutex を持ったまま再起動する
+        defer sub.mutex.unlock();
+        try h.pm.restartPlugin(h.meta.node_id, &h.bus);
+    }
+    stop.store(true, .release);
+    t.join();
+    try std.testing.expect(rounds.load(.monotonic) > 0);
+    try h.send("{}");
+    try std.testing.expectEqual(@as(i64, 2), CounterHarness.last_value.load(.monotonic));
+}

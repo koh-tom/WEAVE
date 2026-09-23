@@ -6,9 +6,17 @@ const TwitchMessage = struct {
     message: []const u8,
 };
 
-var wc = sdk.WindowCounter{ .window_ms = 3000 };
-var visible: bool = false;
-var last_trigger_ts: i64 = -15000;
+// 状態は WEAVE に預ける (R5)。on_message が成功した時だけコミットされ、trap による再起動の後も
+// Core 自体の再起動の後も (スナップショット) 直前の値から続く。表示中に落ちても自動非表示が来る。
+const State = struct {
+    wc: sdk.WindowCounter = .{ .window_ms = 3000 },
+    visible: bool = false,
+    last_trigger_ts: i64 = -15000,
+};
+var state: State = .{};
+comptime {
+    sdk.exportState(&state);
+}
 
 export fn on_init() i32 {
     sdk.log(1, "[kusa_node] Initializing kusa_node Wasm plugin...");
@@ -29,7 +37,7 @@ fn containsKusa(message: []const u8) bool {
 
 fn maybeAutoHide(now: i64) void {
     // 5秒経過で自動非表示。chat / tick どちらの契機でも動く。
-    if (visible and now >= last_trigger_ts + 5000) {
+    if (state.visible and now >= state.last_trigger_ts + 5000) {
         const res = sdk.publishJson("core.obs.request.SetSceneItemEnabled", .{
             .sceneName = "Overlay",
             .sceneItemId = 1,
@@ -41,7 +49,7 @@ fn maybeAutoHide(now: i64) void {
             return;
         };
         if (res == .SUCCESS) {
-            visible = false;
+            state.visible = false;
             sdk.log(1, "[kusa_node] auto-hide: visible=false");
         }
     }
@@ -67,12 +75,12 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
         defer ev.deinit();
         const e = ev.value.d.eventData;
         if (!std.mem.eql(u8, e.sceneName, "Overlay") or e.sceneItemId != 1) return;
-        if (e.sceneItemEnabled and !visible) {
-            visible = true;
-            last_trigger_ts = now; // イベントの時刻から自動非表示までを数える
+        if (e.sceneItemEnabled and !state.visible) {
+            state.visible = true;
+            state.last_trigger_ts = now; // イベントの時刻から自動非表示までを数える
             sdk.log(1, "[kusa_node] resynced from OBS state: visible=true");
         } else if (!e.sceneItemEnabled) {
-            visible = false;
+            state.visible = false;
         }
         return;
     }
@@ -86,10 +94,10 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
         defer parsed.deinit();
 
         if (containsKusa(parsed.value.message)) {
-            wc.record(now);
-            const count = wc.count(now);
+            state.wc.record(now);
+            const count = state.wc.count(now);
 
-            if (count >= 10 and !visible and now >= last_trigger_ts + 7000) {
+            if (count >= 10 and !state.visible and now >= state.last_trigger_ts + 7000) {
                 const res = sdk.publishJson("core.obs.request.SetSceneItemEnabled", .{
                     .sceneName = "Overlay",
                     .sceneItemId = 1,
@@ -101,8 +109,8 @@ export fn on_message(topic_ptr: u32, topic_len: u32, payload_ptr: u32, payload_l
                     return;
                 };
                 if (res == .SUCCESS) {
-                    visible = true;
-                    last_trigger_ts = now;
+                    state.visible = true;
+                    state.last_trigger_ts = now;
                     sdk.log(1, "[kusa_node] trigger: visible=true");
                 }
             }

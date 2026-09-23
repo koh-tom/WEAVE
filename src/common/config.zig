@@ -11,6 +11,8 @@ pub const WeaveEnv = enum {
     }
 };
 
+pub const CellBudget = struct { name: []const u8, eps: f64 };
+
 pub const Config = struct {
     ws_gateway_port: u16 = 8080,
     node_ws_port: u16 = 8081,
@@ -21,6 +23,8 @@ pub const Config = struct {
     obs_password: []const u8 = "obs-password",
     log_level: LogLevel = .info,
     plugins: std.ArrayListUnmanaged([]const u8),
+    /// セルの publish 予算 (weave.json の "cell_budgets": {"plugins.bots": 50} / --cell-budget plugins.bots=50)
+    cell_budgets: std.ArrayListUnmanaged(CellBudget) = .{},
     graph_full_interval_secs: u32 = 60,
     node_ws_token: ?[]const u8 = null,
     weave_env: WeaveEnv = .development,
@@ -149,6 +153,19 @@ pub const Config = struct {
                 if (obj.get("audit_log_path")) |v| {
                     allocator.free(self.audit_log_path);
                     self.audit_log_path = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("cell_budgets")) |v| {
+                    if (v == .object) {
+                        var bit = v.object.iterator();
+                        while (bit.next()) |e| {
+                            const eps: f64 = switch (e.value_ptr.*) {
+                                .integer => |n| @floatFromInt(n),
+                                .float => |f| f,
+                                else => continue,
+                            };
+                            try self.cell_budgets.append(allocator, .{ .name = try allocator.dupe(u8, e.key_ptr.*), .eps = eps });
+                        }
+                    }
                 }
                 if (obj.get("bind")) |v| {
                     allocator.free(self.bind);
@@ -365,6 +382,12 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 allocator.free(self.trust_keys_path);
                 self.trust_keys_path = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--cell-budget")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                const eq = std.mem.indexOfScalar(u8, args[i], '=') orelse return error.InvalidCellBudget;
+                const eps = std.fmt.parseFloat(f64, args[i][eq + 1 ..]) catch return error.InvalidCellBudget;
+                try self.cell_budgets.append(allocator, .{ .name = try allocator.dupe(u8, args[i][0..eq]), .eps = eps });
             } else if (std.mem.eql(u8, arg, "--audit-log")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -414,6 +437,8 @@ pub const Config = struct {
         allocator.free(self.signature_mode);
         allocator.free(self.trust_keys_path);
         allocator.free(self.audit_log_path);
+        for (self.cell_budgets.items) |cb| allocator.free(cb.name);
+        self.cell_budgets.deinit(allocator);
         allocator.free(self.bind);
         allocator.free(self.introspection);
         allocator.free(self.dashboard_dist);
@@ -459,6 +484,8 @@ fn printHelp() void {
         \\  --signature-mode <m> Plugin signature enforcement: off|warn|strict (default: off)
         \\  --trust-keys <path>  Trusted public keys file (default: .weave/trusted_keys)
         \\  --audit-log <path>   Security audit log (JSON Lines, default: audit.log)
+        \\  --cell-budget <cell>=<eps>  Shared publish budget for a plugin cell (e.g. plugins.bots=50).
+        \\                       Plugins join such a cell with "cell" in their manifest
         \\  --bind <addr>        Listen address for dashboard / node servers (default: 127.0.0.1)
         \\  --dashboard-token <t> Token for the Inspector WebSocket (default: generated)
         \\  --streamelements-channel <id>  StreamElements channel id (JWT via env STREAMELEMENTS_JWT)

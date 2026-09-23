@@ -103,8 +103,8 @@ fn restoreSnapshot(sn: *Snapshot, republish: bool) void {
         log.warn("Snapshot: restore failed: {any}", .{err});
         return;
     };
-    if (r.desired + r.retained > 0) {
-        log.info("Snapshot: restored {d} OBS desired state(s) and {d} retained event(s) (saved {d} ms ago)", .{ r.desired, r.retained, r.age_ms });
+    if (r.desired + r.retained + r.plugin_states > 0) {
+        log.info("Snapshot: restored {d} OBS desired state(s), {d} retained event(s) and {d} plugin state(s) (saved {d} ms ago)", .{ r.desired, r.retained, r.plugin_states, r.age_ms });
     }
 }
 
@@ -243,6 +243,16 @@ pub fn main() !void {
     core.pm.runtime = &core.runtime;
     core.pm.wasm_stack_size = config.wasm_stack_size;
     core.pm.wasm_heap_size = config.wasm_heap_size;
+    for (config.cell_budgets.items) |cb| {
+        core.setCellBudget(cb.name, cb.eps) catch {
+            log.err("Config: cell budget '{s}' must be named plugin.* or plugins.*", .{cb.name});
+            std.process.exit(2);
+        };
+        log.info("Cell budget: '{s}' = {d:.0} eps (shared by its plugins)", .{ cb.name, cb.eps });
+    }
+    // 毒メッセージの記録先 (R2): <state_dir>/dlq/<node_id>.jsonl
+    var dlq_buf: [512]u8 = undefined;
+    core.pm.dlq_dir = std.fmt.bufPrint(&dlq_buf, "{s}/dlq", .{config.state_dir}) catch null;
 
     // 署名検証 (トラストアンカー Stage 1) の設定
     // 設定の誤りで検証が黙って off になる (fail-open) ことを避ける:
@@ -385,11 +395,13 @@ pub fn main() !void {
         maybe_mock_obs = try MockObsEgressNode.init(allocator, &core.bus, 2, config.obs_password, config.mock_obs_filepath);
         try maybe_mock_obs.?.connect(config.obs_host, config.obs_port);
         snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_mock_obs.?.desired);
+        snapshot.?.pm = &core.pm;
         if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, true);
     } else {
         maybe_obs = try ObsEgressNode.init(allocator, &core.bus, 2, config.obs_password);
         // 意図した状態を接続前に戻しておく → 接続 (Identified) 時に OBS へ再適用される
         snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_obs.?.desired);
+        snapshot.?.pm = &core.pm;
         if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, false);
         maybe_obs.?.connect(config.obs_host, config.obs_port) catch |err| {
             log.warn("Main: OBS connect failed (optional): {any}", .{err});

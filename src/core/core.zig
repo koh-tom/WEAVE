@@ -17,6 +17,8 @@ pub const Core = struct {
     graph: SystemGraph,
     // 署名検証 (トラストアンカー Stage 1)
     signature_mode: signing.VerifyMode = .off,
+    /// 運用者が宣言したセルの予算 (名前 → eps)。ここに無い名前のセルにプラグインは自分から入れない
+    cell_budgets: std.StringHashMapUnmanaged(f64) = .{},
     trust_store: signing.TrustStore = .{},
 
     pub fn init(allocator: std.mem.Allocator) !Core {
@@ -31,6 +33,9 @@ pub const Core = struct {
     }
 
     pub fn deinit(self: *Core) void {
+        var it = self.cell_budgets.keyIterator();
+        while (it.next()) |k| self.allocator.free(k.*);
+        self.cell_budgets.deinit(self.allocator);
         self.trust_store.deinit(self.allocator);
         self.graph.deinit();
         self.tm.deinit();
@@ -108,13 +113,35 @@ pub const Core = struct {
         log.info("Core: Gateway bridge established (EventBus -> TransportManager, cell 'observe')", .{});
     }
 
-    /// プラグイン専用セルを取得 (無ければ作る)。1 プラグイン = 1 セル = 1 executor なので、
-    /// あるプラグインが遅延・停止しても他のプラグインや Twitch/OBS の配送は待たされない。
-    fn pluginCell(self: *Core, name: []const u8) !*event_bus.Cell {
+    /// セルの予算を宣言する (main が weave.json / --cell-budget から呼ぶ)。名前は "plugin." か "plugins." で始まること
+    pub fn setCellBudget(self: *Core, name: []const u8, eps: f64) !void {
+        if (!isPluginCellName(name)) return error.InvalidCellName;
+        const gop = try self.cell_budgets.getOrPut(self.allocator, name);
+        if (!gop.found_existing) gop.key_ptr.* = try self.allocator.dupe(u8, name);
+        gop.value_ptr.* = eps;
+    }
+
+    fn isPluginCellName(name: []const u8) bool {
+        return std.mem.startsWith(u8, name, "plugin.") or std.mem.startsWith(u8, name, "plugins.");
+    }
+
+    /// プラグインの所属セルを決めて取得する (無ければ作る)。
+    /// 既定は 1 プラグイン = 1 セル (`plugin.<name>`) = 1 executor なので、あるプラグインが遅延・停止しても
+    /// 他のプラグインや Twitch/OBS の配送は待たされない。manifest の `cell` で束ねたい場合は、
+    /// 運用者が予算を宣言したセル (`plugins.*`) にだけ入れる (プラグインが自分で core / egress 等に入ったり、
+    /// 勝手に他のプラグインと executor を共有したりはできない)。
+    fn pluginCell(self: *Core, m: *const @import("manifest.zig").Manifest) !*event_bus.Cell {
         var buf: [96]u8 = undefined;
-        const cell_name = try std.fmt.bufPrint(&buf, "plugin.{s}", .{name});
+        var cell_name: []const u8 = try std.fmt.bufPrint(&buf, "plugin.{s}", .{m.name});
+        if (m.cell) |requested| {
+            if (isPluginCellName(requested) and self.cell_budgets.contains(requested)) {
+                cell_name = requested;
+            } else {
+                log.warn("Core: plugin '{s}' asked for cell '{s}', which the operator has not declared; using '{s}'", .{ m.name, requested, cell_name });
+            }
+        }
         if (self.bus.getCell(cell_name)) |c| return c;
-        return self.bus.createCell(cell_name, .{ .trust = .untrusted });
+        return self.bus.createCell(cell_name, .{ .trust = .untrusted, .budget_eps = self.cell_budgets.get(cell_name) orelse 0 });
     }
 
     /// Wasmプラグインをロードして初期化する
@@ -146,11 +173,8 @@ pub const Core = struct {
             break :blk pre.value.limits;
         };
 
-        // 検証済みのバイト列を、WAMR に渡す前に複製しておく。自動再起動はここから作り直す (ディスクを読み直さない)
-        const verified_wasm = try self.allocator.dupe(u8, wasm_buffer);
-        var meta_owns_verified = false;
-        errdefer if (!meta_owns_verified) self.allocator.free(verified_wasm);
-
+        // 検証済みのバイト列からロードしたモジュールを生涯保持し、自動再起動はそこからインスタンスを作る
+        // (ディスクを読み直さない。PluginManager.restartPlugin)
         const module = try self.runtime.loadModule(wasm_buffer);
         errdefer if (!pm_owns_buffer) @import("wasm_runtime.zig").wamr.wasm_runtime_unload(module);
 
@@ -163,12 +187,10 @@ pub const Core = struct {
 
         const meta = try self.pm.registerPluginWithManifest(module, module_inst, wasm_path, manifest_path, manifest_bytes, wasm_buffer, &self.bus);
         pm_owns_buffer = true; // 以降 wasm_buffer は PluginManager が所有・解放する
-        meta.verified_wasm = verified_wasm;
-        meta_owns_verified = true;
 
         // 所属セル (プラグイン専用の executor) を割り当てる。以降の購読はこのセル宛てになる
         const name = meta.manifest_parsed.value.name;
-        const cell = try self.pluginCell(name);
+        const cell = try self.pluginCell(&meta.manifest_parsed.value);
         if (meta.subscriber) |*sub| sub.cell = cell;
 
         // 名前の更新（マニフェストから正確な名前を取得）
@@ -179,18 +201,9 @@ pub const Core = struct {
         reg_w.print("{f}", .{std.json.fmt(.{ .node_id = node_id, .name = name, .type = "wasm", .cell = cell.name }, .{})}) catch {};
         try self.bus.publish("core.node.registered", reg_w.buffered(), .Transient, 0);
 
-        // on_init 呼び出し。購読した瞬間からセルの executor が配送を始めうるので、
-        // WasmSubscriber のロックを取ってインスタンスへの同時アクセスを防ぐ。
-        const wamr = @import("wasm_runtime.zig").wamr;
-        if (wamr.wasm_runtime_lookup_function(module_inst, "on_init")) |func| {
-            if (meta.subscriber) |*sub| sub.mutex.lock();
-            defer if (meta.subscriber) |*sub| sub.mutex.unlock();
-            const env = wamr.wasm_runtime_create_exec_env(module_inst, 16384);
-            defer wamr.wasm_runtime_destroy_exec_env(env);
-            @import("wasm_subscriber.zig").WasmSubscriber.setInstructionLimit(env, limits.max_init_instructions);
-            var argv = [_]u32{0};
-            _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
-        }
+        // on_init → 状態領域の検出 → 予備インスタンスの用意。購読の前に行う
+        // (購読した瞬間からセルの executor が配送を始めうるので、WasmSubscriber のロックを取って行う)
+        self.pm.initPlugin(meta);
 
         // マニフェストに基づいたSubscribe適用
         try self.pm.applyManifestSubscriptions(module_inst, &self.bus);
@@ -283,10 +296,86 @@ test "restart rebuilds from the verified bytes, not from the file on disk" {
     // ロード後にディスク上の wasm を壊す (差し替えの代わり)
     try std.fs.cwd().writeFile(.{ .sub_path = wasm_path, .data = "not a wasm module" });
 
-    // 再起動は検証済みのバイト列から作り直すので成功する (ディスクを読んでいたら ModuleLoadFailed)
+    // 再起動はロード済みのモジュール (検証済みのバイト列) から作るので成功する (ディスクを読んでいたら ModuleLoadFailed)
     try core.pm.restartPlugin(node_id, &core.bus);
     const meta = core.pm.findByNodeIdLocked(node_id) orelse return error.MetaNotFound;
-    try std.testing.expect(meta.verified_wasm != null);
+    try std.testing.expect(meta.spare != null); // 次の再起動用の予備も同じモジュールから作られている
     try std.testing.expect(std.mem.startsWith(u8, meta.wasm_buffer, "\x00asm"));
     core.bus.waitIdle();
+}
+
+test "cell budget: plugins in an operator-declared cell share one publish budget; undeclared cells are refused" {
+    const allocator = std.testing.allocator;
+    const host_api = @import("../api/host_api.zig");
+
+    const names = [_][]const u8{ "test_cell_a", "test_cell_b", "test_cell_c" };
+    const cells = [_][]const u8{ "plugins.shared", "plugins.shared", "plugins.undeclared" };
+    for (names, cells) |n, c| {
+        var pbuf: [64]u8 = undefined;
+        try std.fs.cwd().copyFile("wasm-apps/counter_node.wasm", std.fs.cwd(), try std.fmt.bufPrint(&pbuf, "{s}.wasm", .{n}), .{});
+        var mbuf: [512]u8 = undefined;
+        const m = try std.fmt.bufPrint(&mbuf, "{{\"name\":\"{s}\",\"version\":\"1\",\"cell\":\"{s}\",\"permissions\":{{\"publish\":[\"ext.counter.value\"],\"subscribe\":[\"ext.counter.inc\"]}}}}", .{ n, c });
+        try std.fs.cwd().writeFile(.{ .sub_path = try std.fmt.bufPrint(&pbuf, "{s}.json", .{n}), .data = m });
+    }
+    defer for (names) |n| {
+        var pbuf: [64]u8 = undefined;
+        std.fs.cwd().deleteFile(std.fmt.bufPrint(&pbuf, "{s}.wasm", .{n}) catch unreachable) catch {};
+        std.fs.cwd().deleteFile(std.fmt.bufPrint(&pbuf, "{s}.json", .{n}) catch unreachable) catch {};
+    };
+
+    var core = try Core.init(allocator);
+    defer core.deinit();
+    core.bus.verbose = false;
+    core.pm.runtime = &core.runtime;
+    host_api.global_bus = &core.bus;
+    host_api.global_plugin_manager = &core.pm;
+    host_api.enable_log = false;
+    defer {
+        host_api.global_bus = null;
+        host_api.global_plugin_manager = null;
+        host_api.enable_log = true;
+    }
+    var symbols = host_api.getNativeSymbols();
+    try core.runtime.registerNatives("env", &symbols);
+
+    try std.testing.expectError(error.InvalidCellName, core.setCellBudget("egress", 1000));
+    try core.setCellBudget("plugins.shared", 2);
+
+    const C = struct {
+        var values = std.atomic.Value(u32).init(0);
+        var limited = std.atomic.Value(u32).init(0);
+        fn onValue(_: ?*anyopaque, _: *const event_bus.EventMessage) void {
+            _ = values.fetchAdd(1, .monotonic);
+        }
+        fn onLimited(_: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+            if (std.mem.indexOf(u8, msg.payload, "plugins.shared") != null) _ = limited.fetchAdd(1, .monotonic);
+        }
+    };
+    C.values.store(0, .monotonic);
+    C.limited.store(0, .monotonic);
+    try core.bus.subscribe("ext.counter.value", 90, C.onValue, null);
+    try core.bus.subscribe("core.security.rate_limited", 91, C.onLimited, null);
+    try core.bus.start();
+
+    try core.loadPlugin("test_cell_a.wasm");
+    try core.loadPlugin("test_cell_b.wasm");
+    try core.loadPlugin("test_cell_c.wasm");
+
+    // a と b は同じセル、c は宣言されていないセルを求めたので自分専用のセル
+    const cell_a = core.pm.findByNodeIdLocked(100).?.subscriber.?.cell.?;
+    const cell_b = core.pm.findByNodeIdLocked(101).?.subscriber.?.cell.?;
+    const cell_c = core.pm.findByNodeIdLocked(102).?.subscriber.?.cell.?;
+    try std.testing.expectEqual(cell_a, cell_b);
+    try std.testing.expectEqualStrings("plugins.shared", cell_a.name);
+    try std.testing.expectEqualStrings("plugin.test_cell_c", cell_c.name);
+
+    // 5 回 inc → 3 ノードがそれぞれ publish しようとする。c は無制限で 5 件、
+    // a と b は 2 人合わせて予算 (2 eps, 最初の 2 件 + わずかな補充) しか出せない
+    var i: usize = 0;
+    while (i < 5) : (i += 1) try core.bus.publish("ext.counter.inc", "{}", .Reliable, 0);
+    core.bus.waitIdle();
+    const shared_out = C.values.load(.monotonic) - 5;
+    try std.testing.expect(shared_out >= 2 and shared_out <= 3);
+    try std.testing.expect(C.limited.load(.monotonic) >= 1);
+    try std.testing.expect(cell_a.budget_denied.load(.monotonic) >= 7);
 }
