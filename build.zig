@@ -264,7 +264,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("wasm-apps/chat_node.zig"),
             .target = wasm_target,
-            .optimize = optimize,
+            .optimize = .ReleaseSmall,
         }),
     });
     chat_node.root_module.addImport("plugin_sdk", sdk_module);
@@ -281,6 +281,8 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("wasm-apps/bad_node.zig"),
             .target = wasm_target,
+            // bad_node は OOM 自動復旧テストで「メモリ枯渇まで alloc」する。
+            // ReleaseSmall だとこのループが最適化で終端せずテストがハングするため Debug 維持。
             .optimize = optimize,
         }),
     });
@@ -298,7 +300,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("wasm-apps/kusa_node.zig"),
             .target = wasm_target,
-            .optimize = optimize,
+            .optimize = .ReleaseSmall,
         }),
     });
     kusa_node.root_module.addImport("plugin_sdk", sdk_module);
@@ -315,7 +317,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("wasm-apps/spam_node.zig"),
             .target = wasm_target,
-            .optimize = optimize,
+            .optimize = .ReleaseSmall,
         }),
     });
     spam_node.root_module.addImport("plugin_sdk", sdk_module);
