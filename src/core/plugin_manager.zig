@@ -10,12 +10,13 @@ pub const PluginMetadata = struct {
     wasm_path: []const u8, // 追加: 再起動用
     manifest_path: []const u8, // 追加: 再起動用
     wasm_buffer: []const u8, // WAMR要求によりメモリに保持
-    /// 署名検証に使ったのと同じ wasm のバイト列 (WAMR に渡す前の複製)。自動再起動はここから作り直し、
-    /// ディスクを読み直さない。ロード後にファイルを差し替えてからトラップさせても、未検証のコードは動かない。
-    verified_wasm: ?[]u8 = null,
     manifest_parsed: std.json.Parsed(manifest.Manifest),
+    /// 署名検証したバイト列からロードしたモジュール。プラグインの生涯を通じて保持し、再起動はここから
+    /// インスタンスを作る。ディスクは読み直さないので、ロード後に .wasm を差し替えても未検証のコードは動かない。
     module: wamr.wasm_module_t,
     instance: wamr.wasm_module_inst_t,
+    /// 予備インスタンス (R4)。再起動はこれとの差し替えで済ませ、使った後に次の予備を作る
+    spare: ?wamr.wasm_module_inst_t = null,
     subscriber: ?WasmSubscriber = null,
     rate_limiter: RateLimiter = .{},
     /// rate_limited セキュリティイベントの集約 (1 秒に 1 件、間引いた件数を添える)
@@ -25,12 +26,12 @@ pub const PluginMetadata = struct {
     pub fn deinit(self: *PluginMetadata, allocator: std.mem.Allocator) void {
         if (self.subscriber) |*sub| sub.deinit();
         self.manifest_parsed.deinit();
+        if (self.spare) |sp| wamr.wasm_runtime_deinstantiate(sp);
         wamr.wasm_runtime_deinstantiate(self.instance);
         wamr.wasm_runtime_unload(self.module);
         allocator.free(self.wasm_path);
         allocator.free(self.manifest_path);
         allocator.free(self.wasm_buffer);
-        if (self.verified_wasm) |v| allocator.free(v);
     }
 };
 
@@ -44,6 +45,10 @@ pub const PluginManager = struct {
     runtime: ?*@import("wasm_runtime.zig").WasmRuntime = null, // 追加
     wasm_stack_size: u32 = 128 * 1024,
     wasm_heap_size: u32 = 64 * 1024,
+    /// 毒メッセージの記録先 (R2)。null なら `core.node.poison` イベントだけ出す
+    dlq_dir: ?[]const u8 = null,
+    /// テスト用: 次の再起動でインスタンス生成を失敗させる (再起動失敗の経路を検証するため)
+    test_fail_next_instantiate: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) PluginManager {
         return PluginManager{
@@ -91,8 +96,7 @@ pub const PluginManager = struct {
             .subscriber = try WasmSubscriber.init(instance, node_id, bus, self),
             .rate_limiter = RateLimiter.init(parsed.value.rate_limit_eps),
         };
-        meta.subscriber.?.max_instructions = parsed.value.limits.max_instructions;
-        meta.subscriber.?.max_init_instructions = parsed.value.limits.max_init_instructions;
+        meta.subscriber.?.applyManifest(&parsed.value);
         self.next_node_id += 1;
 
         self.plugins_mutex.lock();
@@ -107,20 +111,54 @@ pub const PluginManager = struct {
         return self.plugins.get(instance);
     }
 
+    /// 登録直後の初期化: on_init を呼び、状態領域を見つけて初期値をコミットし、予備インスタンスを用意する。
+    /// 呼ぶ側は購読の前に呼ぶこと (Core.loadPlugin が使う)。
+    pub fn initPlugin(self: *PluginManager, meta: *PluginMetadata) void {
+        const sub = if (meta.subscriber) |*s| s else return;
+        sub.mutex.lock();
+        defer sub.mutex.unlock();
+        const env = wamr.wasm_runtime_create_exec_env(meta.instance, 16384);
+        if (env == null) return;
+        defer wamr.wasm_runtime_destroy_exec_env(env);
+        if (wamr.wasm_runtime_lookup_function(meta.instance, "on_init")) |func| {
+            WasmSubscriber.setInstructionLimit(env, meta.manifest_parsed.value.limits.max_init_instructions);
+            var argv = [_]u32{0};
+            _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
+        }
+        sub.discoverState(env);
+        self.prepareSpare(meta);
+    }
+
+    fn instantiateFor(self: *PluginManager, meta: *const PluginMetadata) !wamr.wasm_module_inst_t {
+        if (self.test_fail_next_instantiate) {
+            self.test_fail_next_instantiate = false;
+            return error.ModuleInstantiationFailed;
+        }
+        const runtime = self.runtime orelse return error.RuntimeNotSet;
+        return runtime.instantiateLimited(meta.module, self.wasm_stack_size, self.wasm_heap_size, meta.manifest_parsed.value.limits.memory_pages);
+    }
+
+    /// 予備インスタンスを用意する (R4)。失敗しても致命的ではない (次の再起動でその場で作る)
+    fn prepareSpare(self: *PluginManager, meta: *PluginMetadata) void {
+        if (meta.spare != null) return;
+        meta.spare = self.instantiateFor(meta) catch null;
+    }
+
     /// 指定したノードを再起動する (Fault復旧用)
     ///
-    /// 新しいインスタンスの生成に成功してから旧インスタンスと差し替える (P0-4)。
-    /// 途中で失敗した場合は旧インスタンスをそのまま残し、ノードを停止扱いにする。
-    /// こうしないと EventBus に残った購読が破棄済みの instance を指し (use-after-free)、
-    /// map から外れた meta もリークする。
+    /// - 予備インスタンスとの差し替えで済ませる (R4)。モジュールはロード済みのまま使い回すので、
+    ///   ファイルの読み込み・検証・ロードは起きない (署名検証済みのコードだけが動く)。
+    /// - 新しいインスタンスが用意できてから旧インスタンスと差し替える (P0-4)。用意できなければ
+    ///   旧インスタンスをそのまま残し、ノードを停止扱いにする (破棄済みメモリに触れない)。
+    /// - on_init の後、直前にコミットした状態を書き戻す (R5)。
     pub fn restartPlugin(self: *PluginManager, node_id: u32, bus: *event_bus.EventBus) !void {
         const meta = self.findByNodeId(node_id) orelse return error.NodeNotFound;
-        const runtime = self.runtime orelse return error.RuntimeNotSet;
 
-        std.debug.print("PluginManager: Restarting Node {} ({s})...\n", .{ node_id, meta.wasm_path });
-
-        // 1. 新インスタンスの作成 (旧インスタンスにはまだ触らない)
-        const created = self.createInstance(runtime, meta, meta.manifest_parsed.value.limits.memory_pages) catch |err| {
+        // 1. 新インスタンス (予備があればそれ)。旧インスタンスにはまだ触らない
+        const new_inst = if (meta.spare) |sp| blk: {
+            meta.spare = null;
+            break :blk sp;
+        } else self.instantiateFor(meta) catch |err| {
             self.quarantine(meta, bus);
             return err;
         };
@@ -130,88 +168,153 @@ pub const PluginManager = struct {
             self.plugins_mutex.lock();
             defer self.plugins_mutex.unlock();
             _ = self.plugins.remove(meta.instance);
-            self.plugins.put(created.instance, meta) catch |err| {
-                // 旧インスタンスを map に戻す (新しい方はロードを離してから捨てる)
+            self.plugins.put(new_inst, meta) catch |err| {
                 self.plugins.put(meta.instance, meta) catch {};
                 break :swap err;
             };
             break :swap null;
         };
         if (swap_err) |err| {
-            created.destroy(self.allocator);
+            wamr.wasm_runtime_deinstantiate(new_inst);
             self.quarantine(meta, bus);
             return err;
         }
         wamr.wasm_runtime_deinstantiate(meta.instance);
-        wamr.wasm_runtime_unload(meta.module);
-        self.allocator.free(meta.wasm_buffer);
+        meta.instance = new_inst;
 
-        meta.wasm_buffer = created.wasm_buffer;
-        meta.module = created.module;
-        meta.instance = created.instance;
         var needs_subscription = false;
         if (meta.subscriber) |*sub| {
-            sub.updateInstance(created.instance);
+            sub.updateInstance(new_inst);
         } else {
-            meta.subscriber = try WasmSubscriber.init(created.instance, node_id, bus, self);
-            meta.subscriber.?.max_instructions = meta.manifest_parsed.value.limits.max_instructions;
-            meta.subscriber.?.max_init_instructions = meta.manifest_parsed.value.limits.max_init_instructions;
+            meta.subscriber = try WasmSubscriber.init(new_inst, node_id, bus, self);
+            meta.subscriber.?.applyManifest(&meta.manifest_parsed.value);
             needs_subscription = true;
         }
 
-        // 3. 初期化と購読再開
-        if (wamr.wasm_runtime_lookup_function(created.instance, "on_init")) |func| {
-            const env = wamr.wasm_runtime_create_exec_env(created.instance, 16384);
-            defer wamr.wasm_runtime_destroy_exec_env(env);
-            WasmSubscriber.setInstructionLimit(env, meta.manifest_parsed.value.limits.max_init_instructions);
-            var argv = [_]u32{0};
-            _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
+        // 3. 初期化 → 状態の書き戻し
+        {
+            const env = wamr.wasm_runtime_create_exec_env(new_inst, 16384);
+            defer if (env != null) wamr.wasm_runtime_destroy_exec_env(env);
+            if (env != null) {
+                if (wamr.wasm_runtime_lookup_function(new_inst, "on_init")) |func| {
+                    WasmSubscriber.setInstructionLimit(env, meta.manifest_parsed.value.limits.max_init_instructions);
+                    var argv = [_]u32{0};
+                    _ = wamr.wasm_runtime_call_wasm(env, func, 0, &argv);
+                }
+                if (meta.subscriber) |*sub| {
+                    if (sub.state_valid) sub.restoreState(env) else sub.discoverState(env);
+                }
+            }
         }
 
         // 新規作成された場合のみ購読を適用（既存の購読はEventBusに残っているため）
         if (needs_subscription) {
-            try self.applyManifestSubscriptions(created.instance, bus);
+            try self.applyManifestSubscriptions(new_inst, bus);
         }
 
         if (bus.graph) |g| {
             g.updateNodeStatus(node_id, .active);
         }
         std.debug.print("PluginManager: Node {} restarted successfully.\n", .{node_id});
-    }
 
-    const CreatedInstance = struct {
-        wasm_buffer: []u8,
-        module: wamr.wasm_module_t,
-        instance: wamr.wasm_module_inst_t,
-
-        fn destroy(self: CreatedInstance, allocator: std.mem.Allocator) void {
-            wamr.wasm_runtime_deinstantiate(self.instance);
-            wamr.wasm_runtime_unload(self.module);
-            allocator.free(self.wasm_buffer);
-        }
-    };
-
-    fn createInstance(self: *PluginManager, runtime: *@import("wasm_runtime.zig").WasmRuntime, meta: *const PluginMetadata, max_pages: u32) !CreatedInstance {
-        // 検証済みのバイト列があればその複製から作る (WAMR は渡したバッファを使い続けるので毎回複製する)。
-        // 無いのは Core.loadPlugin を通さずに登録した場合 (テスト) だけ
-        const wasm_buffer = if (meta.verified_wasm) |v|
-            try self.allocator.dupe(u8, v)
-        else
-            try std.fs.cwd().readFileAlloc(self.allocator, meta.wasm_path, 1024 * 1024);
-        errdefer self.allocator.free(wasm_buffer);
-        const module = try runtime.loadModule(wasm_buffer);
-        errdefer wamr.wasm_runtime_unload(module);
-        const instance = try runtime.instantiateLimited(module, self.wasm_stack_size, self.wasm_heap_size, max_pages);
-        return .{ .wasm_buffer = wasm_buffer, .module = module, .instance = instance };
+        // 4. 次の予備を用意する
+        self.prepareSpare(meta);
     }
 
     /// 再起動できなかったノードを停止扱いにする。旧インスタンスは有効なまま map に残るので
     /// 以後の配送で破棄済みメモリに触れることはなく、終了時の deinit で正しく解放される。
     fn quarantine(self: *PluginManager, meta: *PluginMetadata, bus: *event_bus.EventBus) void {
         _ = self;
-        if (meta.subscriber) |*sub| sub.consecutive_failures = WasmSubscriber.MAX_RESTART_ATTEMPTS;
-        if (bus.graph) |g| g.updateNodeStatus(meta.node_id, .stopped);
+        if (meta.subscriber) |*sub| sub.stop() else if (bus.graph) |g| g.updateNodeStatus(meta.node_id, .stopped);
         std.debug.print("PluginManager: Node {} could not be restarted; stopped (old instance kept, no deliveries).\n", .{meta.node_id});
+    }
+
+    /// 毒メッセージを DLQ (`<dlq_dir>/<node_id>.jsonl`) に 1 行追記する (R2)。payload は hex で持つ
+    pub fn appendDlq(self: *PluginManager, node_id: u32, event_json: []const u8, payload: []const u8) void {
+        const dir = self.dlq_dir orelse return;
+        std.fs.cwd().makePath(dir) catch return;
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{d}.jsonl", .{ dir, node_id }) catch return;
+        const file = std.fs.cwd().createFile(path, .{ .truncate = false }) catch return;
+        defer file.close();
+        file.seekFromEnd(0) catch return;
+        const shown = payload[0..@min(payload.len, 4096)];
+        const hex = std.fmt.allocPrint(self.allocator, "{x}", .{shown}) catch return;
+        defer self.allocator.free(hex);
+        const line = std.fmt.allocPrint(self.allocator, "{{\"event\":{s},\"payload_hex\":\"{s}\",\"payload_len\":{d}}}\n", .{ event_json, hex, payload.len }) catch return;
+        defer self.allocator.free(line);
+        file.writeAll(line) catch {};
+    }
+
+    pub const StateCopy = struct { name: []u8, bytes: []u8 };
+
+    /// 全プラグインのコミット済み状態を複製する (スナップショット用, R7)
+    ///
+    /// ロックの順序: plugins_mutex の中ではメタデータへのポインタを集めるだけにし、手放してから
+    /// 各プラグインの mutex を取る。再起動はプラグインの mutex を持ったまま plugins_mutex を取るので、
+    /// 逆の順序で両方を持つとデッドロックする (スナップショットのスレッドは 200 ms ごとに走る)。
+    /// メタデータ自体は PluginManager.deinit まで解放されない。
+    pub fn copyCommittedStates(self: *PluginManager, a: std.mem.Allocator) ![]StateCopy {
+        var metas: std.ArrayListUnmanaged(*PluginMetadata) = .{};
+        defer metas.deinit(a);
+        {
+            self.plugins_mutex.lock();
+            defer self.plugins_mutex.unlock();
+            var it = self.plugins.valueIterator();
+            while (it.next()) |m| try metas.append(a, m.*);
+        }
+
+        var list: std.ArrayListUnmanaged(StateCopy) = .{};
+        errdefer {
+            for (list.items) |c| {
+                a.free(c.name);
+                a.free(c.bytes);
+            }
+            list.deinit(a);
+        }
+        for (metas.items) |m| {
+            const sub = if (m.subscriber) |*s| s else continue;
+            sub.mutex.lock();
+            defer sub.mutex.unlock();
+            const st = sub.committedState() orelse continue;
+            const name = try a.dupe(u8, m.manifest_parsed.value.name);
+            errdefer a.free(name);
+            const bytes = try a.dupe(u8, st);
+            errdefer a.free(bytes);
+            try list.append(a, .{ .name = name, .bytes = bytes });
+        }
+        const out = try list.toOwnedSlice(a);
+        std.mem.sort(StateCopy, out, {}, struct {
+            fn lt(_: void, x: StateCopy, y: StateCopy) bool {
+                return std.mem.lessThan(u8, x.name, y.name);
+            }
+        }.lt);
+        return out;
+    }
+
+    pub fn freeStateCopies(a: std.mem.Allocator, list: []StateCopy) void {
+        for (list) |c| {
+            a.free(c.name);
+            a.free(c.bytes);
+        }
+        a.free(list);
+    }
+
+    /// スナップショットの状態を名前の一致するプラグインに戻す (R7)。戻せたら true
+    pub fn restoreCommittedState(self: *PluginManager, name: []const u8, bytes: []const u8) bool {
+        const meta = blk: {
+            self.plugins_mutex.lock();
+            defer self.plugins_mutex.unlock();
+            var it = self.plugins.valueIterator();
+            while (it.next()) |m| {
+                if (std.mem.eql(u8, m.*.manifest_parsed.value.name, name)) break :blk m.*;
+            }
+            return false;
+        };
+        const sub = if (meta.subscriber) |*s| s else return false;
+        sub.mutex.lock();
+        defer sub.mutex.unlock();
+        return sub.setCommittedState(bytes);
     }
 
     /// テスト・外部から引く用 (ロックを取る)
@@ -498,9 +601,9 @@ test "PluginManager: restart failure keeps the old instance and stops the node (
     const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
     const meta = try pm.registerPlugin(module, module_inst, "wasm-apps/bad_node.wasm", "wasm-apps/bad_node.json", wasm_buffer, &bus);
 
-    // デモ中に .wasm が消えた/壊れた状況: 再起動時の読み込みが必ず失敗する
-    allocator.free(meta.wasm_path);
-    meta.wasm_path = try allocator.dupe(u8, "wasm-apps/__missing_for_test__.wasm");
+    // 再起動時のインスタンス生成が失敗する状況 (メモリ不足など) を作る。予備インスタンスは無い
+    try std.testing.expect(meta.spare == null);
+    pm.test_fail_next_instantiate = true;
 
     const thread = try std.Thread.spawn(.{}, event_bus.EventBus.runDispatcher, .{&bus});
 
@@ -517,7 +620,7 @@ test "PluginManager: restart failure keeps the old instance and stops the node (
     // 旧実装ではここで meta が map から消え、次の配送で破棄済み instance に触れていた
     try std.testing.expect(pm.findByNodeId(100) != null);
     try std.testing.expect(pm.getMetadata(module_inst) != null);
-    try std.testing.expectEqual(WasmSubscriber.MAX_RESTART_ATTEMPTS, meta.subscriber.?.consecutive_failures);
+    try std.testing.expectEqual(@import("wasm_subscriber.zig").Breaker.stopped, meta.subscriber.?.breaker);
 
     // 以後の配送は無視され、クラッシュしない
     try bus.publish("allowed.topic", "HELLO", .BestEffort, 0);

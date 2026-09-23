@@ -35,7 +35,8 @@ test "WasmSubscriber: OOM auto restart" {
     const wasm_buffer = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
 
     const module = try runtime.loadModule(wasm_buffer);
-    const module_inst = try runtime.instantiate(module, 128 * 1024, 64 * 1024);
+    // 本番 (Core.loadPlugin) と同じく manifest の既定 limits.memory_pages (256 = 16 MiB) を掛ける
+    const module_inst = try runtime.instantiateLimited(module, 128 * 1024, 64 * 1024, 256);
 
     const meta = try pm.registerPlugin(module, module_inst, wasm_path, manifest_path, wasm_buffer, &bus);
 
@@ -87,12 +88,19 @@ test "WasmSubscriber: OOM auto restart" {
     const exc_str = std.mem.span(@as([*c]const u8, @ptrCast(&received_exception)));
     try std.testing.expectEqualStrings("out_of_memory", exc_str);
 
-    // 3. 連続失敗が MAX_RESTART_ATTEMPTS (5) に達するまで OOM を起こし続ける。
+    // 同じメッセージは毒として隔離されている (R2): もう一度送っても配送されず、fault は増えない
+    try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM", .BestEffort, 0);
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 1), fault_count);
+
+    // 3. 変種で落ち続けると、manifest の restart.max_faults (既定 5) で breaker が開く (R8)。
     // 購読は (node, パターン) で冪等なので、1 回の publish で起きる fault はちょうど 1 回
     // (旧実装は再起動のたびに二重購読になり、1 publish で複数 fault が起きていた)。
     var k: u32 = 2;
     while (k <= 5) : (k += 1) {
-        try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM", .BestEffort, 0);
+        var vbuf: [32]u8 = undefined;
+        const variant = try std.fmt.bufPrint(&vbuf, "ALLOC_UNTIL_OOM#{d}", .{k});
+        try bus.publish("allowed.topic", variant, .BestEffort, 0);
         bus.waitIdle();
         try std.testing.expectEqual(k, fault_count);
     }
@@ -113,8 +121,9 @@ test "WasmSubscriber: OOM auto restart" {
         return error.SubscriberNotFound;
     }
 
-    // 4. Publish 4th time and verify it is ignored (no new fault event, fault_count remains 5)
-    try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM", .BestEffort, 0);
+    // 4. 隔離中 (breaker open) は配送されない: 新しい変種でも fault は増えない
+    try std.testing.expectEqual(@import("../core/wasm_subscriber.zig").Breaker.open, meta_after.subscriber.?.breaker);
+    try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM#6", .BestEffort, 0);
     bus.waitIdle();
     try std.testing.expectEqual(@as(u32, 5), fault_count);
 

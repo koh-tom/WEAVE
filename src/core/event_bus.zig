@@ -17,6 +17,7 @@ const std = @import("std");
 const common = @import("../common/types.zig");
 const pattern = @import("pattern.zig");
 const topics = @import("topics.zig");
+const RateLimiter = @import("rate_limiter.zig").RateLimiter;
 
 pub const QoS = common.QoS;
 pub const IntrospectionLevel = common.IntrospectionLevel;
@@ -110,6 +111,8 @@ pub const CellOptions = struct {
     bridges_in: []const []const u8 = &.{"#"},
     /// 他セルへ出してよいトピック (publish できる範囲の上限)
     bridges_out: []const []const u8 = &.{"#"},
+    /// セル全体の publish 予算 (events/sec, 0 = 無制限)。所属する全ノードで共有する
+    budget_eps: f64 = 0,
 };
 
 /// セルの保守タスク (再起動のスケジューリングなど)。executor スレッド上で呼ばれ、
@@ -185,6 +188,11 @@ pub const Cell = struct {
     delivered: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     dropped: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
+    /// セル単位の publish 予算。ノード単位の rate limit に加えて、同じセルの全ノードの合計を抑える
+    budget_mutex: std.Thread.Mutex = .{},
+    budget: RateLimiter = .{},
+    budget_denied: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
     lat_mutex: std.Thread.Mutex = .{},
     lat_ring: [512]u32 = undefined,
     lat_len: usize = 0,
@@ -204,8 +212,24 @@ pub const Cell = struct {
             .tracker = tracker,
             .items = items,
             .capacity = opts.capacity,
+            .budget = RateLimiter.init(opts.budget_eps),
         };
         return self;
+    }
+
+    /// セルの予算から 1 件分を消費する。予算切れなら false
+    pub fn tryBudget(self: *Cell, now_ms: i64) bool {
+        self.budget_mutex.lock();
+        defer self.budget_mutex.unlock();
+        if (self.budget.tryConsume(now_ms)) return true;
+        _ = self.budget_denied.fetchAdd(1, .monotonic);
+        return false;
+    }
+
+    pub fn budgetEps(self: *Cell) f64 {
+        self.budget_mutex.lock();
+        defer self.budget_mutex.unlock();
+        return self.budget.rate_eps;
     }
 
     fn dupeList(allocator: std.mem.Allocator, src: []const []const u8) ![][]const u8 {

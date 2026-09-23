@@ -1,0 +1,15 @@
+{
+    "abi_version": 1,
+    "name": "counter_node",
+    "version": "1.0.0",
+    "description": "state commit / poison quarantine demo: counts ext.counter.inc, traps on payloads containing TRAP",
+    "permissions": {
+        "publish": ["ext.counter.value"],
+        "subscribe": ["ext.counter.inc"]
+    },
+    "restart": {
+        "window_secs": 10,
+        "max_faults": 3,
+        "quarantine_secs": 1
+    }
+}

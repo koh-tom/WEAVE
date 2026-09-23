@@ -86,6 +86,23 @@ export fn os_api_publish(
         return toI32(.ERROR_RATE_LIMITED);
     }
 
+    // セル単位の予算 (同じセルに属する全ノードの合計)。運用者が weave.json / --cell-budget で決める
+    if (meta.subscriber) |*sub| if (sub.cell) |cell| {
+        const now = std.time.milliTimestamp();
+        if (!cell.tryBudget(now)) {
+            if (now - meta.rl_last_emit_ms >= 1000) {
+                var dbuf: [320]u8 = undefined;
+                const detail = std.fmt.bufPrint(&dbuf, "{s} (cell '{s}' budget {d:.0} eps exhausted, +{d} dropped in the last second)", .{ topic, cell.name, cell.budgetEps(), meta.rl_suppressed }) catch topic;
+                emitSecurity(bus, "rate_limited", meta.node_id, meta.manifest_parsed.value.name, "publish", detail);
+                meta.rl_last_emit_ms = now;
+                meta.rl_suppressed = 0;
+            } else {
+                meta.rl_suppressed += 1;
+            }
+            return toI32(.ERROR_RATE_LIMITED);
+        }
+    };
+
     var qos_val = if (qos >= 3) event_bus.QoS.BestEffort else @as(event_bus.QoS, @enumFromInt(@as(u32, @intCast(qos))));
     // 保持 (Transient) は state 種別のトピックだけ。event を保持すると古いイベントが新しい購読者に
     // 再配送され (P0-6 の型)、任意トピックを保持すれば保持表 (上限 4096) を埋めて Core の状態を押し出せる。

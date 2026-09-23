@@ -3,6 +3,7 @@
 //! 記録するもの:
 //!   - OBS に対して WEAVE が意図した状態 (表示切替・シーン切替など)
 //!   - 保持されている OBS の状態イベント (core.obs.event.*) — 元のタイムスタンプ付き
+//!   - 各プラグインのコミット済み状態 (R5, SDK の exportState) — hex
 //! 復元すると:
 //!   - 実 OBS: 意図した状態が ObsEgress に戻り、接続時に再適用される
 //!   - mock OBS: 意図した状態を要求として発行し直す
@@ -13,6 +14,7 @@
 
 const std = @import("std");
 const event_bus = @import("event_bus.zig");
+const PluginManager = @import("plugin_manager.zig").PluginManager;
 const obs = @import("../builtin/obs.zig");
 const log = @import("../common/log.zig");
 
@@ -20,11 +22,13 @@ pub const VERSION: u32 = 1;
 
 const Entry = struct { topic: []const u8, payload: []const u8, ts: i64 = 0 };
 const Desired = struct { request_type: []const u8, data: []const u8 };
+const PluginState = struct { name: []const u8, hex: []const u8 };
 const FileShape = struct {
     version: u32,
     saved_at: i64,
     obs_desired: []Desired = &.{},
     retained: []Entry = &.{},
+    plugin_state: []PluginState = &.{},
 };
 
 pub const Snapshot = struct {
@@ -32,6 +36,8 @@ pub const Snapshot = struct {
     path: []const u8,
     bus: *event_bus.EventBus,
     desired: ?*obs.DesiredState,
+    /// プラグインの状態も記録する場合に設定する (R5 + R7)
+    pm: ?*PluginManager = null,
     interval_ms: u64 = 200,
 
     thread: ?std.Thread = null,
@@ -80,6 +86,15 @@ pub const Snapshot = struct {
             if (i > 0) try w.writeAll(",");
             try w.print("{f}", .{std.json.fmt(.{ .topic = e.topic, .payload = e.payload, .ts = e.ts }, .{})});
         }
+        try w.writeAll("],\"plugin_state\":[");
+        if (self.pm) |pm| {
+            const states = try pm.copyCommittedStates(allocator);
+            defer PluginManager.freeStateCopies(allocator, states);
+            for (states, 0..) |st, i| {
+                if (i > 0) try w.writeAll(",");
+                try w.print("{{\"name\":{f},\"hex\":\"{x}\"}}", .{ std.json.fmt(st.name, .{}), st.bytes });
+            }
+        }
         try w.writeAll("]}\n");
         return out.toOwnedSlice(allocator);
     }
@@ -115,7 +130,7 @@ pub const Snapshot = struct {
         try std.fs.cwd().rename(tmp, path);
     }
 
-    pub const RestoreResult = struct { desired: usize = 0, retained: usize = 0, age_ms: i64 = 0 };
+    pub const RestoreResult = struct { desired: usize = 0, retained: usize = 0, plugin_states: usize = 0, age_ms: i64 = 0 };
 
     /// スナップショットを読み込んで状態を戻す。mock_obs=true なら意図した状態を要求として発行し直す。
     pub fn restore(self: *Snapshot, republish_requests: bool) !RestoreResult {
@@ -148,6 +163,15 @@ pub const Snapshot = struct {
                 self.bus.publish(t, d.data, .Reliable, 0) catch continue;
             }
             r.desired += 1;
+        }
+        if (self.pm) |pm| {
+            for (parsed.value.plugin_state) |ps| {
+                if (ps.hex.len % 2 != 0 or ps.hex.len > 2 * 64 * 1024) continue;
+                const bytes = self.allocator.alloc(u8, ps.hex.len / 2) catch continue;
+                defer self.allocator.free(bytes);
+                _ = std.fmt.hexToBytes(bytes, ps.hex) catch continue;
+                if (pm.restoreCommittedState(ps.name, bytes)) r.plugin_states += 1;
+            }
         }
         // 復元した内容を「保存済み」とみなす
         const json = self.collect(self.allocator) catch return r;
