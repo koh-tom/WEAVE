@@ -49,6 +49,10 @@ jobs:
       - name: Unit, EventBus and stress tests
         run: zig build test_all
 
+      # 最適化で挙動が変わる不具合 (例: SDK os_alloc の u32 折り返しで OOM テストが命令数上限に化けた) を拾う
+      - name: Unit, EventBus and stress tests (ReleaseFast)
+        run: zig build test_all -Doptimize=ReleaseFast
+
       - name: E2E — kusa pipeline (mock Twitch -> Wasm -> mock OBS)
         run: ./tests/e2e/kusa_pipeline.sh
 
@@ -66,6 +70,9 @@ jobs:
 
       - name: E2E — howling (echo loop) is stopped by the hop limit
         run: ./tests/e2e/howling.sh
+
+      - name: E2E — infinite loop is stopped by instruction metering, quarantined and recovered
+        run: ./tests/e2e/infinite_loop.sh
 
       - name: E2E — StreamElements Astro adapter (mock; JWT via env only)
         run: ./tests/e2e/streamelements.sh
