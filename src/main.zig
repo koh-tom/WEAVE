@@ -328,7 +328,19 @@ pub fn main() !void {
     var symbols = host_api.getNativeSymbols();
     try core.runtime.registerNatives("env", &symbols);
 
+    var plugin_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const plugin_cell_exe: ?[]const u8 = if (config.isolate_plugins) blk: {
+        const d = try std.fs.selfExeDirPath(&plugin_exe_buf);
+        break :blk try std.fs.path.join(allocator, &.{ d, "weave-cell" });
+    } else null;
+    defer if (plugin_cell_exe) |p| allocator.free(p);
     for (config.plugins.items) |path| {
+        if (plugin_cell_exe) |exe| {
+            core.loadPluginIsolated(path, exe, config.state_dir) catch |err| {
+                log.err("Failed to load plugin '{s}' in its own process: {any}", .{ path, err });
+            };
+            continue;
+        }
         core.loadPlugin(path) catch |err| {
             log.err("Failed to load plugin '{s}': {any}", .{ path, err });
         };
@@ -486,6 +498,7 @@ pub fn main() !void {
     if (maybe_mock_obs) |o| o.stop();
     if (maybe_obs) |o| o.stop();
     if (maybe_link) |l| l.stop();
+    core.stopIsolated();
     if (maybe_mock_twitch) |*t| t.stop();
     if (maybe_replay) |*r| r.stop();
     if (maybe_twitch) |*t| t.stop();

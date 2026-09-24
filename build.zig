@@ -249,6 +249,8 @@ pub fn build(b: *std.Build) void {
     cell_exe.root_module.addImport("common", common_module);
     cell_exe.use_llvm = true;
     cell_exe.use_lld = true;
+    // プラグインのセル (段階 2) は子の中で WAMR を動かす
+    addWamrDeps(b, cell_exe, wamr_dir, wamr_include_paths, wamr_sources, wamr_defines);
     b.installArtifact(cell_exe);
 
     // --- 既存ツール (Streamer.bot) とのブリッジ (互換戦略 C) ---

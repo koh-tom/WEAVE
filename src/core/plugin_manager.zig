@@ -50,8 +50,9 @@ pub const PluginMetadata = struct {
         self.published_topics.deinit(allocator);
         self.manifest_parsed.deinit();
         if (self.spare) |sp| wamr.wasm_runtime_deinstantiate(sp);
-        wamr.wasm_runtime_deinstantiate(self.instance);
-        wamr.wasm_runtime_unload(self.module);
+        // 別プロセスのセルで動くプラグイン (ADR-010) は Core にインスタンスを持たない
+        if (self.instance != null) wamr.wasm_runtime_deinstantiate(self.instance);
+        if (self.module != null) wamr.wasm_runtime_unload(self.module);
         allocator.free(self.wasm_path);
         allocator.free(self.manifest_path);
         allocator.free(self.wasm_buffer);
