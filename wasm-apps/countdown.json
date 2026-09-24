@@ -1,0 +1,11 @@
+{
+    "abi_version": 1,
+    "name": "countdown",
+    "version": "1.0.0",
+    "description": "Countdown timer for a text source (clean-room reimplementation of the behavior of OBS's bundled Countdown script)",
+    "permissions": {
+        "publish": ["core.obs.request.SetInputSettings"],
+        "subscribe": ["ext.countdown.cmd", "core.system.tick"]
+    },
+    "rate_limit_eps": 20
+}

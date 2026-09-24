@@ -24,6 +24,8 @@ const STATEFUL = [_]struct { request: []const u8, keys: []const []const u8 }{
     .{ .request = "SetCurrentProgramScene", .keys = &.{} },
     .{ .request = "SetInputMute", .keys = &.{"inputName"} },
     .{ .request = "SetSourceFilterEnabled", .keys = &.{ "sourceName", "filterName" } },
+    // テキストソースの内容など (countdown が使う)。入力ごとに最後の設定だけが意味を持つ
+    .{ .request = "SetInputSettings", .keys = &.{"inputName"} },
 };
 
 /// 「WEAVE が意図した OBS の状態」。キー = 要求種別 + 対象を特定するフィールド

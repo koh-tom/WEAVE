@@ -80,6 +80,9 @@ jobs:
       - name: E2E — record the events, replay the inputs, get the same OBS requests
         run: ./tests/e2e/record_replay.sh
 
+      - name: E2E — OBS's bundled Countdown behavior as a WEAVE plugin (C3)
+        run: ./tests/e2e/countdown.sh
+
       - name: Setup Bun (AssemblyScript SDK)
         uses: oven-sh/setup-bun@v2
 
