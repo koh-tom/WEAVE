@@ -664,3 +664,81 @@ test "A3 bench: other cells' delivery latency while 4 kinds of faults are inject
     // 細かい比率は負荷とスケジューラに依存するので benchmark.md に数字で残す
     try std.testing.expect(under.p99_us <= @max(base.p99_us * 10, 2000));
 }
+
+test "C3: countdown (clean-room port of OBS's Countdown script) shows the same sequence for the same timestamps" {
+    const allocator = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(allocator, 256);
+    defer bus.deinit();
+    bus.verbose = false;
+    var runtime = try @import("../core/wasm_runtime.zig").WasmRuntime.init();
+    defer runtime.deinit();
+    var pm = plugin_manager.PluginManager.init(allocator);
+    defer pm.deinit();
+    pm.runtime = &runtime;
+    const host_api = @import("../api/host_api.zig");
+    host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
+    host_api.enable_log = false;
+    defer {
+        host_api.global_bus = null;
+        host_api.global_plugin_manager = null;
+        host_api.enable_log = true;
+    }
+    var symbols = host_api.getNativeSymbols();
+    try runtime.registerNatives("env", &symbols);
+
+    const T = struct {
+        var mutex: std.Thread.Mutex = .{};
+        var texts: [16][32]u8 = undefined;
+        var lens: [16]usize = undefined;
+        var n: usize = 0;
+        fn onReq(_: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+            const P = struct { inputName: []const u8, inputSettings: struct { text: []const u8 } };
+            const p = std.json.parseFromSlice(P, std.heap.page_allocator, msg.payload, .{}) catch return;
+            defer p.deinit();
+            mutex.lock();
+            defer mutex.unlock();
+            if (n >= texts.len or !std.mem.eql(u8, p.value.inputName, "Timer")) return;
+            const l = @min(p.value.inputSettings.text.len, 32);
+            @memcpy(texts[n][0..l], p.value.inputSettings.text[0..l]);
+            lens[n] = l;
+            n += 1;
+        }
+    };
+    T.n = 0;
+    try bus.subscribe("core.obs.request.SetInputSettings", 90, T.onReq, null);
+
+    const wasm_path = "wasm-apps/countdown.wasm";
+    const buf = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 1024 * 1024);
+    const module = try runtime.loadModule(buf);
+    const inst = try runtime.instantiateLimited(module, 128 * 1024, 64 * 1024, 256);
+    const meta = try pm.registerPlugin(module, inst, wasm_path, "wasm-apps/countdown.json", buf, &bus);
+    meta.subscriber.?.cell = try bus.createCell("plugin.countdown", .{ .trust = .untrusted });
+    pm.initPlugin(meta);
+    try pm.applyManifestSubscriptions(meta.instance, &bus);
+    try bus.start();
+
+    const t0: i64 = 1_700_000_000_000;
+    const at = struct {
+        fn f(b: *event_bus.EventBus, topic: []const u8, payload: []const u8, ts: i64) !void {
+            try b.publishWithMessageTimestamp(topic, payload, .Reliable, 0, ts);
+            b.waitIdle();
+        }
+    }.f;
+    try at(&bus, "ext.countdown.cmd", "{\"cmd\":\"start\",\"seconds\":3,\"source\":\"Timer\",\"final\":\"Go!\"}", t0);
+    try at(&bus, "core.system.tick", "{}", t0 + 500); // まだ 3 秒 (表示は変えない)
+    try at(&bus, "core.system.tick", "{}", t0 + 1000);
+    try at(&bus, "ext.countdown.cmd", "{\"cmd\":\"stop\"}", t0 + 1500); // 残り 1.5 秒で一時停止
+    try at(&bus, "core.system.tick", "{}", t0 + 3000); // 停止中は変わらない
+    try at(&bus, "ext.countdown.cmd", "{\"cmd\":\"start\"}", t0 + 5000); // 続きから
+    try at(&bus, "core.system.tick", "{}", t0 + 6000);
+    try at(&bus, "core.system.tick", "{}", t0 + 6500); // 終了
+    try at(&bus, "core.system.tick", "{}", t0 + 7500); // 終了後は何もしない
+    try at(&bus, "ext.countdown.cmd", "{\"cmd\":\"reset\"}", t0 + 8000);
+
+    const expected = [_][]const u8{ "00:00:03", "00:00:02", "00:00:02", "00:00:01", "Go!", "00:00:03" };
+    T.mutex.lock();
+    defer T.mutex.unlock();
+    try std.testing.expectEqual(expected.len, T.n);
+    for (expected, 0..) |e, i| try std.testing.expectEqualStrings(e, T.texts[i][0..T.lens[i]]);
+}
