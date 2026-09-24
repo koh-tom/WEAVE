@@ -10,6 +10,7 @@
 //!
 //! 使い方 (Core が起動する。手で起動するものではない):
 //!   weave-cell egress --socket <path> [--mock-obs-file <file>] [--obs-host H --obs-port P]
+//!   weave-cell plugin --socket <path>     (段階 2: Wasm プラグインのセル。wasm と manifest は Core からソケットで受け取る)
 //!   環境変数: WEAVE_CELL_TOKEN (Core との認証), WEAVE_OBS_PASSWORD
 const std = @import("std");
 const event_bus = @import("core/event_bus.zig");
@@ -48,6 +49,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "plugin")) return pluginMain(allocator, args);
     if (args.len < 2 or !std.mem.eql(u8, args[1], "egress")) {
         std.debug.print("usage: weave-cell egress --socket <path> [--mock-obs-file F] [--obs-host H --obs-port P]\n", .{});
         std.process.exit(2);
@@ -121,4 +123,233 @@ pub fn main() !void {
     }
     bus.waitIdle();
     log.info("weave-cell: Core closed the link; exiting", .{});
+}
+
+// ======================================================================
+// 段階 2: Wasm プラグインのセル (ADR-010 §7)
+// 子の中では今の部品 (バス・PluginManager・WasmSubscriber) をそのまま使う。違うのは Host API で、
+// publish / subscribe / unsubscribe は判定せずに Core に問い合わせる (host_api.forwarder)。
+// ======================================================================
+
+const host_api = @import("api/host_api.zig");
+const PluginManager = @import("core/plugin_manager.zig").PluginManager;
+const WasmRuntime = @import("core/wasm_runtime.zig").WasmRuntime;
+
+const PluginLink = struct {
+    allocator: std.mem.Allocator,
+    stream: std.net.Stream,
+    write_mutex: std.Thread.Mutex = .{},
+    // Core への問い合わせは同時に 1 つ (プラグインの実行は 1 本のスレッド)。答えはリーダーのスレッドが入れる
+    ret_mutex: std.Thread.Mutex = .{},
+    ret_cond: std.Thread.Condition = .{},
+    ret_code: ?i32 = null,
+    // Core から届いた処理待ちのメッセージ (1 つずつ。Core は done を待ってから次を送る)
+    work_mutex: std.Thread.Mutex = .{},
+    work_cond: std.Thread.Condition = .{},
+    work: ?[]u8 = null,
+    closed: bool = false,
+    node_id: u32 = 0,
+
+    fn sendJson(self: *PluginLink, value: anytype) void {
+        var out: std.ArrayListUnmanaged(u8) = .{};
+        defer out.deinit(self.allocator);
+        out.writer(self.allocator).print("{f}", .{std.json.fmt(value, .{})}) catch return;
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        ws.writeFrame(self.stream, .text, out.items, false) catch {};
+    }
+
+    fn ask(self: *PluginLink, value: anytype) i32 {
+        self.ret_mutex.lock();
+        self.ret_code = null;
+        self.ret_mutex.unlock();
+        self.sendJson(value);
+        self.ret_mutex.lock();
+        defer self.ret_mutex.unlock();
+        while (self.ret_code == null and !self.closed) self.ret_cond.wait(&self.ret_mutex);
+        return self.ret_code orelse 1; // ERROR_UNKNOWN
+    }
+
+    fn fwdPublish(ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: u32) i32 {
+        const self: *PluginLink = @ptrCast(@alignCast(ctx));
+        return self.ask(.{ .op = "pub", .t = topic, .p = payload, .qos = qos });
+    }
+    fn fwdSubscribe(ctx: *anyopaque, topic: []const u8) i32 {
+        const self: *PluginLink = @ptrCast(@alignCast(ctx));
+        return self.ask(.{ .op = "sub", .t = topic });
+    }
+    fn fwdUnsubscribe(ctx: *anyopaque, topic: []const u8) i32 {
+        const self: *PluginLink = @ptrCast(@alignCast(ctx));
+        return self.ask(.{ .op = "unsub", .t = topic });
+    }
+
+    /// 子の中のバスで WasmSubscriber が出した障害・メトリクス・毒を Core に知らせる
+    fn tap(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+        const self: *PluginLink = @ptrCast(@alignCast(ctx.?));
+        if (std.mem.eql(u8, msg.topic, "core.node.metrics") or std.mem.eql(u8, msg.topic, "core.node.fault") or std.mem.eql(u8, msg.topic, "core.node.poison")) {
+            self.sendJson(.{ .op = "tele", .t = msg.topic, .p = msg.payload });
+        }
+    }
+
+    /// Core からのフレームを読み続ける: ret は問い合わせの答え、msg は処理待ちに置く
+    fn readLoop(self: *PluginLink) void {
+        while (true) {
+            const f = ws.readMessage(self.stream, self.allocator, 2 << 20) catch break;
+            if (f.opcode == .close) {
+                self.allocator.free(f.payload);
+                break;
+            }
+            if (f.opcode != .text) {
+                self.allocator.free(f.payload);
+                continue;
+            }
+            if (std.mem.indexOf(u8, f.payload, "\"op\":\"ret\"") != null) {
+                defer self.allocator.free(f.payload);
+                const R = struct { code: i32 = 1 };
+                const r = std.json.parseFromSlice(R, self.allocator, f.payload, .{ .ignore_unknown_fields = true }) catch continue;
+                defer r.deinit();
+                self.ret_mutex.lock();
+                self.ret_code = r.value.code;
+                self.ret_cond.signal();
+                self.ret_mutex.unlock();
+                continue;
+            }
+            self.work_mutex.lock();
+            if (self.work) |old| self.allocator.free(old);
+            self.work = f.payload;
+            self.work_cond.signal();
+            self.work_mutex.unlock();
+        }
+        // Core が切れた: 待っている全員を起こして終わる
+        self.ret_mutex.lock();
+        self.closed = true;
+        self.ret_cond.broadcast();
+        self.ret_mutex.unlock();
+        self.work_mutex.lock();
+        self.work_cond.broadcast();
+        self.work_mutex.unlock();
+    }
+
+    fn nextWork(self: *PluginLink) ?[]u8 {
+        self.work_mutex.lock();
+        defer self.work_mutex.unlock();
+        while (self.work == null and !self.closed) self.work_cond.wait(&self.work_mutex);
+        const w = self.work;
+        self.work = null;
+        return w;
+    }
+};
+
+fn pluginMain(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+    var socket_path: ?[]const u8 = null;
+    var i: usize = 2;
+    while (i + 1 < args.len) : (i += 2) {
+        if (std.mem.eql(u8, args[i], "--socket")) socket_path = args[i + 1];
+    }
+    const path = socket_path orelse return error.SocketRequired;
+    const token = std.process.getEnvVarOwned(allocator, "WEAVE_CELL_TOKEN") catch return error.TokenRequired;
+    defer allocator.free(token);
+
+    const stream = try std.net.connectUnixSocket(path);
+    defer stream.close();
+    var link = PluginLink{ .allocator = allocator, .stream = stream };
+    link.sendJson(.{ .hello = "plugin", .token = token });
+
+    // 読み込み: {"op":"load","node_id":N} + manifest + wasm (検証済みのバイト列。ディスクは読まない)
+    const load = try ws.readMessage(stream, allocator, 4096);
+    defer allocator.free(load.payload);
+    const L = struct { op: []const u8, node_id: u32 };
+    const l = try std.json.parseFromSlice(L, allocator, load.payload, .{ .ignore_unknown_fields = true });
+    defer l.deinit();
+    const manifest_frame = try ws.readMessage(stream, allocator, 1 << 20);
+    defer allocator.free(manifest_frame.payload);
+    const wasm_frame = try ws.readMessage(stream, allocator, 16 << 20);
+    const wasm_buf = wasm_frame.payload; // PluginManager が所有する
+    link.node_id = l.value.node_id;
+
+    var bus = try event_bus.EventBus.init(allocator, 1024);
+    defer bus.deinit();
+    bus.verbose = false;
+    var runtime = try WasmRuntime.init();
+    defer runtime.deinit();
+    var pm = PluginManager.init(allocator);
+    defer pm.deinit();
+    pm.runtime = &runtime;
+    host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
+    host_api.forwarder = .{ .ctx = &link, .publish = PluginLink.fwdPublish, .subscribe = PluginLink.fwdSubscribe, .unsubscribe = PluginLink.fwdUnsubscribe };
+    var symbols = host_api.getNativeSymbols();
+    try runtime.registerNatives("env", &symbols);
+
+    try bus.subscribeEx("#", 98, PluginLink.tap, &link, .{ .receive_own = true, .record_graph = false });
+    try bus.start();
+    defer bus.stop();
+
+    const reader = try std.Thread.spawn(.{}, PluginLink.readLoop, .{&link});
+    defer reader.join();
+
+    // 今の部品でロードする (R2〜R5 / breaker は子の中でそのまま働く)
+    const M = @import("core/manifest.zig").Manifest;
+    const pre = try M.parse(allocator, manifest_frame.payload);
+    const limits = pre.value.limits;
+    const cell_name = try std.fmt.allocPrint(allocator, "plugin.{s}", .{pre.value.name});
+    defer allocator.free(cell_name);
+    pre.deinit();
+    const module = try runtime.loadModule(wasm_buf);
+    const inst = try runtime.instantiateLimited(module, pm.wasm_stack_size, pm.wasm_heap_size, limits.memory_pages);
+    pm.next_node_id = link.node_id; // Core と同じノード ID を使う (障害通知の node_id が一致する)
+    const meta = try pm.registerPluginWithManifest(module, inst, "cell.wasm", "cell.json", manifest_frame.payload, wasm_buf, &bus);
+    meta.subscriber.?.cell = try bus.createCell(cell_name, .{ .trust = .untrusted });
+    pm.initPlugin(meta); // on_init の subscribe は Core に問い合わせる
+    // manifest の購読は Core が自分のバスで張っているので、子の中では配送先としてだけ張る
+    for (meta.manifest_parsed.value.permissions.subscribe) |pat| {
+        try bus.subscribeEx(pat, meta.node_id, @import("core/wasm_subscriber.zig").WasmSubscriber.callback, &meta.subscriber.?, .{ .cell = meta.subscriber.?.cell });
+    }
+    link.sendJson(.{ .op = "ready" });
+
+    // Core から 1 件ずつ受け取り、子の中のバスに流し、処理し終えたら done を返す。
+    // コミット済みの状態 (R5) が変わっていれば done に載せて Core に預ける (プロセスごと落ちても続きから)
+    var last_state: std.ArrayListUnmanaged(u8) = .{};
+    defer last_state.deinit(allocator);
+    const plugin_name = meta.manifest_parsed.value.name;
+    while (link.nextWork()) |w| {
+        defer allocator.free(w);
+        const Msg = struct { op: []const u8, id: u64 = 0, t: []const u8 = "", p: []const u8 = "", ts: i64 = 0, qos: u8 = 0, state: []const u8 = "" };
+        const m = std.json.parseFromSlice(Msg, allocator, w, .{ .ignore_unknown_fields = true }) catch continue;
+        defer m.deinit();
+        if (std.mem.eql(u8, m.value.op, "restore")) {
+            if (m.value.state.len % 2 == 0) {
+                const bytes = try allocator.alloc(u8, m.value.state.len / 2);
+                defer allocator.free(bytes);
+                if (std.fmt.hexToBytes(bytes, m.value.state)) |_| {
+                    if (pm.restoreCommittedState(plugin_name, bytes)) {
+                        last_state.clearRetainingCapacity();
+                        try last_state.appendSlice(allocator, bytes);
+                        log.info("weave-cell: restored the committed state of '{s}' from Core", .{plugin_name});
+                    }
+                } else |_| {}
+            }
+            link.sendJson(.{ .op = "restored" });
+            continue;
+        }
+        if (!std.mem.eql(u8, m.value.op, "msg")) continue;
+        const qos: event_bus.QoS = if (m.value.qos <= 2) @enumFromInt(m.value.qos) else .BestEffort;
+        bus.publishEx(m.value.t, m.value.p, .{ .qos = qos, .source = 0, .timestamp = m.value.ts }) catch {};
+        bus.waitIdle();
+        const changed: ?[]u8 = blk: {
+            const sub = &meta.subscriber.?;
+            sub.mutex.lock();
+            defer sub.mutex.unlock();
+            const st = sub.committedState() orelse break :blk null;
+            if (std.mem.eql(u8, st, last_state.items)) break :blk null;
+            last_state.clearRetainingCapacity();
+            last_state.appendSlice(allocator, st) catch break :blk null;
+            break :blk std.fmt.allocPrint(allocator, "{x}", .{st}) catch null;
+        };
+        if (changed) |hex| {
+            defer allocator.free(hex);
+            link.sendJson(.{ .op = "done", .state = hex });
+        } else link.sendJson(.{ .op = "done" });
+    }
+    std.posix.shutdown(stream.handle, .both) catch {};
 }

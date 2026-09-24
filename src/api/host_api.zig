@@ -13,6 +13,16 @@ pub var global_plugin_manager: ?*plugin_manager.PluginManager = null;
 /// ログ出力を有効にするかどうか
 pub var enable_log: bool = true;
 
+/// 別プロセスのセル (weave-cell plugin, ADR-010 段階 2) の中で使う。設定されていると publish / subscribe /
+/// unsubscribe は、ここで判定せずに Core へ問い合わせる (強制点は Core。子プロセスは信頼されない)。
+pub const Forwarder = struct {
+    ctx: *anyopaque,
+    publish: *const fn (ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: u32) i32,
+    subscribe: *const fn (ctx: *anyopaque, topic: []const u8) i32,
+    unsubscribe: *const fn (ctx: *anyopaque, topic: []const u8) i32,
+};
+pub var forwarder: ?Forwarder = null;
+
 /// ゲストから受け取る文字列の上限
 const MAX_TOPIC_BYTES: u32 = 256;
 const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
@@ -58,6 +68,19 @@ export fn os_api_publish(
     const topic = @as([*]const u8, @ptrCast(t_native))[0..topic_len];
     const payload = @as([*]const u8, @ptrCast(p_native))[0..payload_len];
 
+    if (forwarder) |f| return f.publish(f.ctx, topic, payload, qos);
+
+    // 因果トレース: 処理中のメッセージに反応した publish は parent を持ち、深さが 1 増える。
+    const parent = current_message_id;
+    const hops: u8 = if (parent != 0) current_message_hops +| 1 else 0;
+    const cell: ?*event_bus.Cell = if (meta.subscriber) |*sub| sub.cell else null;
+    return publishChecked(bus, pm.allocator, meta, cell, topic, payload, qos, parent, hops);
+}
+
+/// publish の検査 (ACL → 流量 → トピック数 → セル予算 → 保持の制限 → 因果の深さ) を通して発行する。
+/// Wasm の Host API と、別プロセスのセルからの問い合わせ (ADR-010) の両方が使う唯一の強制点。
+pub fn publishChecked(bus: *event_bus.EventBus, allocator: std.mem.Allocator, meta: *plugin_manager.PluginMetadata, cell: ?*event_bus.Cell, topic: []const u8, payload: []const u8, qos: u32, parent: u64, hops: u8) i32 {
+    if (topic.len > MAX_TOPIC_BYTES or payload.len > MAX_PAYLOAD_BYTES) return toI32(.ERROR_INVALID_PARAMETER);
     // 権限チェック (ACL)
     if (!meta.manifest_parsed.value.canPublish(topic)) {
         if (enable_log) std.debug.print("Security Error: Plugin '{s}' (Node {}) attempted to publish to unauthorized topic '{s}'\n", .{
@@ -97,21 +120,21 @@ export fn os_api_publish(
                 meta.emitLimitAggregated(bus, "max_topics", topic);
                 return toI32(.ERROR_LIMIT_EXCEEDED);
             }
-            const key = pm.allocator.dupe(u8, topic) catch return toI32(.ERROR_UNKNOWN);
-            meta.published_topics.put(pm.allocator, key, {}) catch {
-                pm.allocator.free(key);
+            const key = allocator.dupe(u8, topic) catch return toI32(.ERROR_UNKNOWN);
+            meta.published_topics.put(allocator, key, {}) catch {
+                allocator.free(key);
                 return toI32(.ERROR_UNKNOWN);
             };
         }
     }
 
     // セル単位の予算 (同じセルに属する全ノードの合計)。運用者が weave.json / --cell-budget で決める
-    if (meta.subscriber) |*sub| if (sub.cell) |cell| {
+    if (cell) |c| {
         const now = std.time.milliTimestamp();
-        if (!cell.tryBudget(now)) {
+        if (!c.tryBudget(now)) {
             if (now - meta.rl_last_emit_ms >= 1000) {
                 var dbuf: [320]u8 = undefined;
-                const detail = std.fmt.bufPrint(&dbuf, "{s} (cell '{s}' budget {d:.0} eps exhausted, +{d} dropped in the last second)", .{ topic, cell.name, cell.budgetEps(), meta.rl_suppressed }) catch topic;
+                const detail = std.fmt.bufPrint(&dbuf, "{s} (cell '{s}' budget {d:.0} eps exhausted, +{d} dropped in the last second)", .{ topic, c.name, c.budgetEps(), meta.rl_suppressed }) catch topic;
                 emitSecurity(bus, "rate_limited", meta.node_id, meta.manifest_parsed.value.name, "publish", detail);
                 meta.rl_last_emit_ms = now;
                 meta.rl_suppressed = 0;
@@ -120,7 +143,7 @@ export fn os_api_publish(
             }
             return toI32(.ERROR_RATE_LIMITED);
         }
-    };
+    }
 
     var qos_val = if (qos >= 3) event_bus.QoS.BestEffort else @as(event_bus.QoS, @enumFromInt(@as(u32, @intCast(qos))));
     // 保持 (Transient) は state 種別のトピックだけ。event を保持すると古いイベントが新しい購読者に
@@ -128,10 +151,7 @@ export fn os_api_publish(
     // リモートノードと同じ規則。配送はそのまま行い、保持だけしない。
     if (qos_val == .Transient and topics.classify(topic) != .state) qos_val = .BestEffort;
 
-    // 因果トレース: 処理中のメッセージに反応した publish は parent を持ち、深さが 1 増える。
     // 深さが上限を超えた連鎖はハウリング (ツール同士の無限反響) とみなしてバスが止める。
-    const parent = current_message_id;
-    const hops: u8 = if (parent != 0) current_message_hops +| 1 else 0;
     bus.publishEx(topic, payload, .{ .qos = qos_val, .source = meta.node_id, .parent_id = parent, .hops = hops }) catch |err| {
         if (err == error.QueueFull) return toI32(.ERROR_QUEUE_FULL);
         if (err == error.InvalidTopic) return toI32(.ERROR_INVALID_TOPIC);
@@ -164,6 +184,33 @@ export fn os_api_subscribe(
     // topic_ptr から topic_len の範囲で安全にスライスを取得 (null-terminated 前提を排除)
     const topic = @as([*]const u8, @ptrCast(t_native))[0..topic_len];
 
+    if (forwarder) |f| {
+        // Core が許可したら、子の中のバスにも購読を張る (配送は Core → 子 → WasmSubscriber)
+        const r = f.subscribe(f.ctx, topic);
+        if (r != toI32(.SUCCESS)) return r;
+        const sub = if (meta.subscriber) |*s| s else return toI32(.ERROR_UNKNOWN);
+        bus.subscribeEx(topic, meta.node_id, WasmSubscriber.callback, sub, .{ .cell = sub.cell }) catch return toI32(.ERROR_UNKNOWN);
+        return r;
+    }
+
+    const allowed = subscribeAllowed(bus, meta, topic);
+    if (allowed != toI32(.SUCCESS)) return allowed;
+
+    // 購読登録
+    if (meta.subscriber) |*sub| {
+        bus.subscribeEx(topic, meta.node_id, WasmSubscriber.callback, sub, .{ .cell = sub.cell }) catch |err| {
+            if (err == error.InvalidTopic) return toI32(.ERROR_INVALID_TOPIC);
+            return toI32(.ERROR_UNKNOWN);
+        };
+    } else return toI32(.ERROR_UNKNOWN);
+
+    log.debug("Node {} subscribed to topic '{s}'", .{ meta.node_id, topic });
+    return toI32(.SUCCESS);
+}
+
+/// 購読してよいか (ACL・購読数の上限)。登録はしない。Wasm の Host API と別プロセスのセルの両方が使う
+pub fn subscribeAllowed(bus: *event_bus.EventBus, meta: *plugin_manager.PluginMetadata, topic: []const u8) i32 {
+    if (topic.len > MAX_TOPIC_BYTES) return toI32(.ERROR_INVALID_PARAMETER);
     // 権限チェック (ACL)
     if (!meta.manifest_parsed.value.canSubscribe(topic)) {
         log.err("Security Error: Plugin '{s}' (Node {}) attempted to subscribe to unauthorized topic '{s}'", .{
@@ -181,16 +228,6 @@ export fn os_api_subscribe(
         meta.emitLimitAggregated(bus, "max_subscriptions", topic);
         return toI32(.ERROR_LIMIT_EXCEEDED);
     }
-
-    // 購読登録
-    if (meta.subscriber) |*sub| {
-        bus.subscribeEx(topic, meta.node_id, WasmSubscriber.callback, sub, .{ .cell = sub.cell }) catch |err| {
-            if (err == error.InvalidTopic) return toI32(.ERROR_INVALID_TOPIC);
-            return toI32(.ERROR_UNKNOWN);
-        };
-    } else return toI32(.ERROR_UNKNOWN);
-
-    log.debug("Node {} subscribed to topic '{s}'", .{ meta.node_id, topic });
     return toI32(.SUCCESS);
 }
 
@@ -226,7 +263,7 @@ export fn os_api_log(
 }
 
 /// セキュリティイベントを core.security.* に発行する (監査ログが購読)。
-fn emitSecurity(bus: *event_bus.EventBus, subtopic: []const u8, node_id: u32, name: []const u8, action: []const u8, topic: []const u8) void {
+pub fn emitSecurity(bus: *event_bus.EventBus, subtopic: []const u8, node_id: u32, name: []const u8, action: []const u8, topic: []const u8) void {
     var topic_buf: [96]u8 = undefined;
     const full_topic = std.fmt.bufPrint(&topic_buf, "core.security.{s}", .{subtopic}) catch return;
     // JSON は std.json で組み立てる (トピック名に引用符などが入っても監査ログが壊れない, P1-3)
@@ -251,6 +288,7 @@ export fn os_api_unsubscribe(
     if (!wamr.wasm_runtime_validate_app_addr(module_inst, topic_ptr, topic_len)) return toI32(.ERROR_INVALID_PARAMETER);
     const t_native = wamr.wasm_runtime_addr_app_to_native(module_inst, topic_ptr) orelse return toI32(.ERROR_INVALID_PARAMETER);
     const topic = @as([*]const u8, @ptrCast(t_native))[0..topic_len];
+    if (forwarder) |f| _ = f.unsubscribe(f.ctx, topic);
     bus.unsubscribe(meta.node_id, topic);
     if (bus.graph) |g| g.removeSubscription(meta.node_id, topic);
     return toI32(.SUCCESS);

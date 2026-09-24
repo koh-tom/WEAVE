@@ -8,6 +8,8 @@ const SystemGraph = @import("graph.zig").SystemGraph;
 const signing = @import("../security/signing.zig");
 const log = @import("../common/log.zig");
 
+const PluginCell = @import("plugin_cell.zig").PluginCell;
+
 pub const Core = struct {
     allocator: std.mem.Allocator,
     bus: EventBus,
@@ -20,6 +22,9 @@ pub const Core = struct {
     /// 運用者が宣言したセルの予算 (名前 → eps)。ここに無い名前のセルにプラグインは自分から入れない
     cell_budgets: std.StringHashMapUnmanaged(f64) = .{},
     trust_store: signing.TrustStore = .{},
+    /// 別プロセスで動かしているプラグインのセル (ADR-010 段階 2)
+    isolated: std.ArrayListUnmanaged(*PluginCell) = .{},
+    isolated_metas: std.ArrayListUnmanaged(*@import("plugin_manager.zig").PluginMetadata) = .{},
 
     pub fn init(allocator: std.mem.Allocator) !Core {
         return Core{
@@ -33,6 +38,14 @@ pub const Core = struct {
     }
 
     pub fn deinit(self: *Core) void {
+        self.stopIsolated();
+        for (self.isolated.items) |c| c.destroy();
+        self.isolated.deinit(self.allocator);
+        for (self.isolated_metas.items) |m| {
+            m.deinit(self.allocator);
+            self.allocator.destroy(m);
+        }
+        self.isolated_metas.deinit(self.allocator);
         var it = self.cell_budgets.keyIterator();
         while (it.next()) |k| self.allocator.free(k.*);
         self.cell_budgets.deinit(self.allocator);
@@ -142,6 +155,63 @@ pub const Core = struct {
         }
         if (self.bus.getCell(cell_name)) |c| return c;
         return self.bus.createCell(cell_name, .{ .trust = .untrusted, .budget_eps = self.cell_budgets.get(cell_name) orelse 0 });
+    }
+
+    pub fn stopIsolated(self: *Core) void {
+        for (self.isolated.items) |c| c.stop();
+    }
+
+    /// Wasm プラグインを別の OS プロセス (weave-cell plugin) で動かす (ADR-010 段階 2)。
+    /// 署名の検証・manifest の検査・セルの割り当ては同じプロセスで動かす時と同じ。Core はインスタンスを持たず、
+    /// 検証済みのバイト列を子に渡す。publish / subscribe の検査は Core で行う (PluginCell)。
+    pub fn loadPluginIsolated(self: *Core, wasm_path: []const u8, cell_exe: []const u8, socket_dir: []const u8) !void {
+        const wasm_buffer = try std.fs.cwd().readFileAlloc(self.allocator, wasm_path, 16 * 1024 * 1024);
+        var meta_owns = false;
+        errdefer if (!meta_owns) self.allocator.free(wasm_buffer);
+        var manifest_path_buf: [256]u8 = undefined;
+        const manifest_path = if (std.mem.endsWith(u8, wasm_path, ".wasm"))
+            try std.fmt.bufPrint(&manifest_path_buf, "{s}.json", .{wasm_path[0 .. wasm_path.len - 5]})
+        else
+            "wasm-apps/manifest.json";
+        const manifest_bytes = try std.fs.cwd().readFileAlloc(self.allocator, manifest_path, 1024 * 1024);
+        defer self.allocator.free(manifest_bytes);
+        try self.verifyPluginSignature(wasm_path, wasm_buffer, manifest_bytes);
+
+        const PM = @import("plugin_manager.zig");
+        const parsed = try @import("manifest.zig").Manifest.parse(self.allocator, manifest_bytes);
+        errdefer if (!meta_owns) parsed.deinit();
+        const node_id = self.pm.next_node_id;
+        self.pm.next_node_id += 1;
+        const meta = try self.allocator.create(PM.PluginMetadata);
+        errdefer if (!meta_owns) self.allocator.destroy(meta);
+        meta.* = .{
+            .node_id = node_id,
+            .wasm_path = try self.allocator.dupe(u8, wasm_path),
+            .manifest_path = try self.allocator.dupe(u8, manifest_path),
+            .wasm_buffer = wasm_buffer,
+            .manifest_parsed = parsed,
+            .module = null,
+            .instance = null,
+            .rate_limiter = @import("rate_limiter.zig").RateLimiter.init(parsed.value.rate_limit_eps),
+        };
+        try self.isolated_metas.append(self.allocator, meta);
+        meta_owns = true;
+
+        const name = parsed.value.name;
+        const cell = try self.pluginCell(&parsed.value);
+        try self.graph.registerNodeIn(node_id, name, .wasm, cell.name);
+        var reg_buf: [256]u8 = undefined;
+        var reg_w = std.io.Writer.fixed(&reg_buf);
+        reg_w.print("{f}", .{std.json.fmt(.{ .node_id = node_id, .name = name, .type = "wasm", .cell = cell.name, .process = true }, .{})}) catch {};
+        try self.bus.publish("core.node.registered", reg_w.buffered(), .Transient, 0);
+
+        var sock_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const sock = try std.fmt.bufPrint(&sock_buf, "{s}/plugin-{d}.sock", .{ socket_dir, node_id });
+        const pc = try PluginCell.create(self.allocator, &self.bus, meta, cell, manifest_bytes, cell_exe, sock);
+        errdefer pc.destroy();
+        try pc.start();
+        try self.isolated.append(self.allocator, pc);
+        std.debug.print("Core: Loaded plugin '{s}' (Node {}) in its own process\n", .{ name, node_id });
     }
 
     /// Wasmプラグインをロードして初期化する
@@ -378,4 +448,63 @@ test "cell budget: plugins in an operator-declared cell share one publish budget
     try std.testing.expect(shared_out >= 2 and shared_out <= 3);
     try std.testing.expect(C.limited.load(.monotonic) >= 1);
     try std.testing.expect(cell_a.budget_denied.load(.monotonic) >= 7);
+}
+
+test "ADR-010 stage 2: a plugin in its own process gets the same deliveries and checks (and what it costs)" {
+    const allocator = std.testing.allocator;
+    const host_api = @import("../api/host_api.zig");
+    const cell_exe = "zig-out/bin/weave-cell";
+    std.fs.cwd().access(cell_exe, .{}) catch return error.SkipZigTest; // `zig build` の後でだけ動く
+    const cell_exe_abs = try std.fs.cwd().realpathAlloc(allocator, cell_exe);
+    defer allocator.free(cell_exe_abs);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const sock_dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(sock_dir);
+
+    const N = 2000;
+    var elapsed: [2]u64 = undefined;
+    for ([_]bool{ false, true }, 0..) |isolated, round| {
+        var core = try Core.init(allocator);
+        defer core.deinit();
+        core.bus.verbose = false;
+        core.pm.runtime = &core.runtime;
+        host_api.global_bus = &core.bus;
+        host_api.global_plugin_manager = &core.pm;
+        host_api.enable_log = false;
+        defer {
+            host_api.global_bus = null;
+            host_api.global_plugin_manager = null;
+            host_api.enable_log = true;
+        }
+        var symbols = host_api.getNativeSymbols();
+        try core.runtime.registerNatives("env", &symbols);
+
+        const C = struct {
+            var n = std.atomic.Value(u32).init(0);
+            var last = std.atomic.Value(i64).init(0);
+            fn onValue(_: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+                _ = n.fetchAdd(1, .monotonic);
+                const P = struct { count: i64 };
+                const p = std.json.parseFromSlice(P, std.heap.page_allocator, msg.payload, .{}) catch return;
+                defer p.deinit();
+                last.store(p.value.count, .monotonic);
+            }
+        };
+        C.n.store(0, .monotonic);
+        try core.bus.subscribe("ext.counter.value", 90, C.onValue, null);
+        try core.bus.start();
+        if (isolated) try core.loadPluginIsolated("wasm-apps/counter_node.wasm", cell_exe_abs, sock_dir) else try core.loadPlugin("wasm-apps/counter_node.wasm");
+
+        const t0 = std.time.nanoTimestamp();
+        var i: usize = 0;
+        while (i < N) : (i += 1) try core.bus.publish("ext.counter.inc", "{}", .Reliable, 0);
+        core.bus.waitIdle();
+        elapsed[round] = @intCast(std.time.nanoTimestamp() - t0);
+        // 全件が届き、プラグインの publish は Core の検査を通って出てきた
+        try std.testing.expectEqual(@as(u32, N), C.n.load(.monotonic));
+        try std.testing.expectEqual(@as(i64, N), C.last.load(.monotonic));
+        core.stopIsolated();
+    }
+    std.debug.print("\n[ADR-010 stage 2] {d} messages to counter_node: in-process {d} us/msg, own process {d} us/msg\n", .{ N, elapsed[0] / N / 1000, elapsed[1] / N / 1000 });
 }

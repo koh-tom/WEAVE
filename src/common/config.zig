@@ -34,6 +34,8 @@ pub const Config = struct {
     mock_obs: bool = false,
     /// OBS への送信セル (egress) を別の OS プロセス (weave-cell) で動かす (ADR-010 Level 2 段階 1)
     isolate_egress: bool = false,
+    /// Wasm プラグインを 1 つずつ別の OS プロセス (weave-cell plugin) で動かす (ADR-010 段階 2)
+    isolate_plugins: bool = false,
     mock_twitch_scenario: ?[]const u8 = null,
     no_twitch: bool = false,
     // 署名検証 (トラストアンカー Stage 1): "off" | "warn" | "strict"
@@ -314,6 +316,8 @@ pub const Config = struct {
                 self.streamlabs = true;
             } else if (std.mem.eql(u8, arg, "--isolate-egress")) {
                 self.isolate_egress = true;
+            } else if (std.mem.eql(u8, arg, "--isolate-plugins")) {
+                self.isolate_plugins = true;
             } else if (std.mem.eql(u8, arg, "--replay")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -509,6 +513,8 @@ fn printHelp() void {
         \\  --mock-twitch-once   Play the mock Twitch scenario once (no loop)
         \\  --isolate-egress     Run the OBS egress cell as a separate process (weave-cell). If it crashes
         \\                       it is restarted and the intended OBS state is re-sent; Core keeps running
+        \\  --isolate-plugins    Run each Wasm plugin in its own process (weave-cell plugin). Its host calls
+        \\                       are still checked by Core; if the process dies it is restarted
         \\  --replay <file>      Replay the external inputs and ticks recorded by `weave record` with the
         \\                       original timing, so plugins make the same decisions. Replaces Twitch as the input
         \\  --dashboard-dist <d> Directory of the built dashboard (default: dashboard/dist)
