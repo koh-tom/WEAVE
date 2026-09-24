@@ -1,0 +1,11 @@
+{
+  "name": "weave-sdk-assemblyscript",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "./build.sh examples/hello_as.ts"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.0"
+  }
+}
