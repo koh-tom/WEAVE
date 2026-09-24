@@ -36,6 +36,9 @@ pub const Config = struct {
     isolate_egress: bool = false,
     /// Wasm プラグインを 1 つずつ別の OS プロセス (weave-cell plugin) で動かす (ADR-010 段階 2)
     isolate_plugins: bool = false,
+    /// 名前 (wasm のファイル名から .wasm を除いたもの) を指定して、そのプラグインだけ別プロセスにする
+    /// (--isolate-plugin <name> / weave.json の "isolate_plugins": ["name", ...])。手順 2-5
+    isolate_plugin_names: std.ArrayListUnmanaged([]const u8) = .{},
     mock_twitch_scenario: ?[]const u8 = null,
     no_twitch: bool = false,
     // 署名検証 (トラストアンカー Stage 1): "off" | "warn" | "strict"
@@ -160,6 +163,11 @@ pub const Config = struct {
                 if (obj.get("audit_log_path")) |v| {
                     allocator.free(self.audit_log_path);
                     self.audit_log_path = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("isolate_plugins")) |v| {
+                    if (v == .array) for (v.array.items) |item| {
+                        if (item == .string) try self.isolate_plugin_names.append(allocator, try allocator.dupe(u8, item.string));
+                    };
                 }
                 if (obj.get("cell_budgets")) |v| {
                     if (v == .object) {
@@ -318,10 +326,16 @@ pub const Config = struct {
                 self.isolate_egress = true;
             } else if (std.mem.eql(u8, arg, "--isolate-plugins")) {
                 self.isolate_plugins = true;
+            } else if (std.mem.eql(u8, arg, "--isolate-plugin")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                try self.isolate_plugin_names.append(allocator, try allocator.dupe(u8, args[i]));
             } else if (std.mem.eql(u8, arg, "--replay")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
                 if (self.replay_path) |p| allocator.free(p);
+                for (self.isolate_plugin_names.items) |n| allocator.free(n);
+                self.isolate_plugin_names.deinit(allocator);
                 self.replay_path = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--mock-twitch-once")) {
                 self.mock_twitch_once = true;
@@ -513,6 +527,7 @@ fn printHelp() void {
         \\  --mock-twitch-once   Play the mock Twitch scenario once (no loop)
         \\  --isolate-egress     Run the OBS egress cell as a separate process (weave-cell). If it crashes
         \\                       it is restarted and the intended OBS state is re-sent; Core keeps running
+        \\  --isolate-plugin <name>  Run only this plugin (file name without .wasm) in its own process (repeatable)
         \\  --isolate-plugins    Run each Wasm plugin in its own process (weave-cell plugin). Its host calls
         \\                       are still checked by Core; if the process dies it is restarted
         \\  --replay <file>      Replay the external inputs and ticks recorded by `weave record` with the

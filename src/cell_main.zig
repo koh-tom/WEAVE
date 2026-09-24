@@ -50,6 +50,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len >= 2 and std.mem.eql(u8, args[1], "plugin")) return pluginMain(allocator, args);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "selftest-seccomp")) return selftestSeccomp();
     if (args.len < 2 or !std.mem.eql(u8, args[1], "egress")) {
         std.debug.print("usage: weave-cell egress --socket <path> [--mock-obs-file F] [--obs-host H --obs-port P]\n", .{});
         std.process.exit(2);
@@ -132,6 +133,20 @@ pub fn main() !void {
 // ======================================================================
 
 const host_api = @import("api/host_api.zig");
+const sandbox = @import("security/sandbox.zig");
+
+/// seccomp が効いていることを確かめる: フィルタを掛けてからファイルを開こうとする。
+/// 正しく効いていれば SIGSYS で終わり、ここには戻らない
+fn selftestSeccomp() !void {
+    try sandbox.applySeccomp();
+    const f = std.fs.cwd().openFile("/etc/hostname", .{}) catch |err| {
+        std.debug.print("open failed without being killed: {any}\n", .{err});
+        std.process.exit(3);
+    };
+    f.close();
+    std.debug.print("NOT BLOCKED: opened a file after seccomp\n", .{});
+    std.process.exit(1);
+}
 const PluginManager = @import("core/plugin_manager.zig").PluginManager;
 const WasmRuntime = @import("core/wasm_runtime.zig").WasmRuntime;
 
@@ -240,7 +255,11 @@ const PluginLink = struct {
     }
 };
 
-fn pluginMain(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+fn pluginMain(debug_allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+    // seccomp 下では DebugAllocator が使えない (確保ごとのスタックトレース取得が process_vm_readv を呼ぶ。
+    // 他プロセスのメモリを読めるシステムコールなので許可しない)。子ではスタックトレースを取らないアロケータを使う
+    _ = debug_allocator;
+    const allocator = std.heap.smp_allocator;
     var socket_path: ?[]const u8 = null;
     var i: usize = 2;
     while (i + 1 < args.len) : (i += 2) {
@@ -249,6 +268,11 @@ fn pluginMain(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
     const path = socket_path orelse return error.SocketRequired;
     const token = std.process.getEnvVarOwned(allocator, "WEAVE_CELL_TOKEN") catch return error.TokenRequired;
     defer allocator.free(token);
+    const sandbox_on = !std.process.hasEnvVarConstant("WEAVE_CELL_NO_SANDBOX");
+
+    // 段階 3: スレッドを作る前に user + network 名前空間へ (外へ出るネットワークを持たない)。
+    // Core との UNIX ソケットはファイルシステムのパスでつなぐので、この後でも接続できる
+    if (sandbox_on) sandbox.unshareNetwork() catch |err| log.warn("weave-cell: could not enter a network namespace ({any}); continuing without it", .{err});
 
     const stream = try std.net.connectUnixSocket(path);
     defer stream.close();
@@ -304,6 +328,13 @@ fn pluginMain(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
     // manifest の購読は Core が自分のバスで張っているので、子の中では配送先としてだけ張る
     for (meta.manifest_parsed.value.permissions.subscribe) |pat| {
         try bus.subscribeEx(pat, meta.node_id, @import("core/wasm_subscriber.zig").WasmSubscriber.callback, &meta.subscriber.?, .{ .cell = meta.subscriber.?.cell });
+    }
+    // 段階 3: 読み込み・スレッド作成・購読が終わったので、必要なシステムコールだけに絞る。
+    // 以後 open / socket / execve などを呼ぶとこのプロセスは SIGSYS で終わり、Core はそれを障害として扱う
+    if (sandbox_on) {
+        if (sandbox.applySeccomp()) |_| {
+            log.info("weave-cell: '{s}' sandboxed (seccomp allowlist{s})", .{ meta.manifest_parsed.value.name, "" });
+        } else |err| log.warn("weave-cell: seccomp not applied ({any})", .{err});
     }
     link.sendJson(.{ .op = "ready" });
 

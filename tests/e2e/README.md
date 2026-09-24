@@ -8,7 +8,7 @@
 | `kusa_pipeline.sh` | 草コメント 10 件 / 3 秒で OBS のオーバーレイが出る。5 秒後に自動で消え、7 秒のクールダウン中は再発火しない |
 | `obs_compat_pipeline.sh` | 既存の OBS プラグイン (C) を Wasm に再コンパイルして動かす。manifest にない操作は拒否される |
 | `obs_reconnect.sh` | OBS (シミュレータ) を kill -9 して新品で戻しても、意図した表示状態が再適用される |
-| `core_restart.sh` | Core を kill -9 しても Supervisor が 1 秒以内に戻し、表示状態と自動非表示が続く |
+| `core_restart.sh` (`ISOLATE=1` でプラグインを別プロセスに) | Core を kill -9 しても Supervisor が 1 秒以内に戻し、表示状態と自動非表示が続く |
 | `streamerbot_bridge.sh` | Streamer.bot (モック) のチャットがブリッジ経由で kusa に届き、WEAVE から DoAction を呼べる |
 | `howling.sh` | 反響し合う 2 プラグインを因果の深さ 16 で止め、`loop_detected` を記録する。他のプラグインは巻き込まれない |
 | `infinite_loop.sh` | `!freeze` で無限ループに入る loop_node を命令数上限で止め、毒メッセージを DLQ に隔離し、予備インスタンスで数 ms で戻す。同じ時間の草ラッシュで kusa_node は OBS を操作できる |
@@ -18,6 +18,7 @@
 | `countdown.sh` | OBS 同梱の Countdown スクリプトの振る舞いを再実装した `countdown` プラグインで、開始 → 毎秒のテキスト更新 → 終了メッセージが OBS (mock) に届く (C3) |
 | `egress_isolation.sh` | `--isolate-egress` で OBS への送信役を別プロセス (weave-cell) にし、表示中に kill -9 しても Core は止まらず ~90 ms で子が戻り、意図した表示が送り直され、その後の要求も届く。終了時は子も片付く (ADR-010 段階 1) |
 | `plugin_isolation.sh` | `--isolate-plugins` で Wasm プラグインを 1 つずつ別プロセスに。同じ出力、子の publish も Core が検査 (malicious の core.system.shutdown を拒否)、待機中の kill -9 から状態ごと復帰、処理中に落ちたメッセージは Core で隔離 (ADR-010 段階 2) |
+| `plugin_sandbox.sh` | 別プロセスのプラグインを OS で閉じ込める: seccomp (禁止したシステムコールで SIGSYS)、ネットワーク名前空間の分離、cgroup で CPU 50% の上限 (委譲がある環境)、ループ中でも即終了して片付く (ADR-010 段階 3) |
 | `streamlabs.sh` | Streamlabs Socket API (モック, socket.io 2.x) のアラートが届く。サーバー指定の間隔で ping を送る。不正なトークンは拒否され、トークンはログに出ない |
 | `streamelements.sh` | StreamElements Astro (モック) の channel.activities が届く。PING に PONG を返す。不正な JWT は拒否され、JWT はログに出ない |
 

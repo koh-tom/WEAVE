@@ -27,6 +27,7 @@ const log = @import("../common/log.zig");
 const host_api = @import("../api/host_api.zig");
 const plugin_manager = @import("plugin_manager.zig");
 const fingerprint = @import("wasm_subscriber.zig").fingerprint;
+const cgroup = @import("../security/cgroup.zig");
 
 pub const PluginCell = struct {
     allocator: std.mem.Allocator,
@@ -44,7 +45,10 @@ pub const PluginCell = struct {
     child: ?std.process.Child = null,
     /// 子とのやり取りは 1 つずつ (配送はセルの executor 1 本から来る)
     mutex: std.Thread.Mutex = .{},
-    running: bool = false,
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// 停止時にロックを取らずに子を止め、待っている読み込みを中断させるための控え
+    child_pid: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    stream_fd: std.atomic.Value(i32) = std.atomic.Value(i32).init(-1),
 
     // 処理中のメッセージ (子からの publish の parent / 深さ)
     inflight_id: u64 = 0,
@@ -56,8 +60,13 @@ pub const PluginCell = struct {
     crash_pos: usize = 0,
     quarantined_until: i64 = 0,
     crashes: u32 = 0,
+    /// 資源の上限 (段階 3)。Core が持つ共有の cgroup 管理 (null なら掛けない)
+    cgroups: ?*cgroup.Cgroups = null,
+    cg_dir: ?[]u8 = null,
     /// 子がコミットした状態 (R5) の最新値。子のプロセスごと消えても、起動し直した子に書き戻す (手順 2-3)
     state: ?[]u8 = null,
+    /// state だけのロック (スナップショットのスレッドが、長い配送の間も待たされずに読めるように)
+    state_mutex: std.Thread.Mutex = .{},
 
     pub fn create(allocator: std.mem.Allocator, bus: *event_bus.EventBus, meta: *plugin_manager.PluginMetadata, cell: *event_bus.Cell, manifest_bytes: []const u8, cell_exe: []const u8, socket_path: []const u8) !*PluginCell {
         const self = try allocator.create(PluginCell);
@@ -98,7 +107,7 @@ pub const PluginCell = struct {
         const addr = try std.net.Address.initUnix(self.socket_path);
         self.server = try addr.listen(.{});
         std.posix.fchmodat(std.fs.cwd().fd, self.socket_path, 0o600, 0) catch {};
-        self.running = true;
+        self.running.store(true, .release);
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -113,10 +122,15 @@ pub const PluginCell = struct {
     }
 
     pub fn stop(self: *PluginCell) void {
+        if (!self.running.swap(false, .acq_rel)) return;
+        // 配送中 (子が長いループの最中など) はコールバックがロックを持って子の返事を待っている。
+        // ロックを取る前に子を止めてソケットを閉じ側にし、待っている読み込みを中断させる
+        const pid = self.child_pid.load(.acquire);
+        if (pid > 0) std.posix.kill(pid, std.posix.SIG.TERM) catch {};
+        const fd = self.stream_fd.load(.acquire);
+        if (fd >= 0) std.posix.shutdown(fd, .both) catch {};
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (!self.running) return;
-        self.running = false;
         self.dropChild(false);
         if (self.server) |*s| s.deinit();
         self.server = null;
@@ -127,13 +141,31 @@ pub const PluginCell = struct {
         if (self.stream) |s| {
             if (!kill) ws.writeFrame(s, .close, "", false) catch {};
             std.posix.shutdown(s.handle, .both) catch {};
+            self.stream_fd.store(-1, .release);
             s.close();
             self.stream = null;
         }
         if (self.child) |*c| {
-            if (kill) std.posix.kill(c.id, std.posix.SIG.KILL) catch {};
-            _ = c.wait() catch {};
+            if (!kill) {
+                // 閉じたことに気づいて自分で終わるのを少しだけ待つ。処理の途中 (長いループなど) で終わらなければ止める
+                var waited: u32 = 0;
+                while (waited < 500) : (waited += 10) {
+                    if (std.posix.waitpid(c.id, std.posix.W.NOHANG).pid == c.id) break;
+                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                } else {
+                    std.posix.kill(c.id, std.posix.SIG.KILL) catch {};
+                    _ = std.posix.waitpid(c.id, 0);
+                }
+            } else {
+                std.posix.kill(c.id, std.posix.SIG.KILL) catch {};
+                _ = std.posix.waitpid(c.id, 0);
+            }
             self.child = null;
+            self.child_pid.store(0, .release);
+        }
+        if (self.cg_dir) |d| {
+            if (self.cgroups) |cg| cg.remove(d);
+            self.cg_dir = null;
         }
     }
 
@@ -154,11 +186,24 @@ pub const PluginCell = struct {
         child.stdin_behavior = .Ignore;
         try child.spawn();
         self.child = child;
+        self.child_pid.store(child.id, .release);
         errdefer self.dropChild(true);
+        if (self.cgroups) |cg| {
+            var nbuf: [48]u8 = undefined;
+            const cg_name = std.fmt.bufPrint(&nbuf, "cell-{d}-{d}", .{ self.meta.node_id, child.id }) catch "cell";
+            const lim = self.meta.manifest_parsed.value.limits;
+            // 線形メモリの上限 (現用 + 予備インスタンス) に、WAMR とバスの分を足す
+            const mem: u64 = @as(u64, lim.memory_pages) * 65536 * 2 + 64 * 1024 * 1024;
+            self.cg_dir = cg.place(cg_name, child.id, .{ .memory_bytes = mem }) catch |err| blk: {
+                log.warn("PluginCell: '{s}': cgroup limits not applied ({any})", .{ self.name(), err });
+                break :blk null;
+            };
+        }
 
         var server = &(self.server orelse return error.NotListening);
         const conn = try server.accept();
         self.stream = conn.stream;
+        self.stream_fd.store(conn.stream.handle, .release);
         const hello = try ws.readMessage(conn.stream, self.allocator, 4096);
         defer self.allocator.free(hello.payload);
         const H = struct { hello: []const u8 = "", token: []const u8 = "" };
@@ -172,7 +217,13 @@ pub const PluginCell = struct {
         self.inflight_id = 0;
         self.inflight_hops = 0;
         try self.pump("ready");
-        if (self.state) |st| {
+        const st_copy: ?[]u8 = blk: {
+            self.state_mutex.lock();
+            defer self.state_mutex.unlock();
+            break :blk if (self.state) |st| try self.allocator.dupe(u8, st) else null;
+        };
+        defer if (st_copy) |c| self.allocator.free(c);
+        if (st_copy) |st| {
             const hex = try std.fmt.allocPrint(self.allocator, "{x}", .{st});
             defer self.allocator.free(hex);
             try self.send(.{ .op = "restore", .state = hex });
@@ -223,8 +274,34 @@ pub const PluginCell = struct {
             self.allocator.free(bytes);
             return;
         };
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
         if (self.state) |old| self.allocator.free(old);
         self.state = bytes;
+    }
+
+    /// スナップショット用: 預かっている状態の複製 (R7)
+    pub fn copyState(self: *PluginCell, a: std.mem.Allocator) !?[]u8 {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        return if (self.state) |st| try a.dupe(u8, st) else null;
+    }
+
+    /// スナップショットから戻す (Core の起動直後): 預かり、動いている子にも書き戻す
+    pub fn restoreState(self: *PluginCell, bytes: []const u8) bool {
+        const hex = std.fmt.allocPrint(self.allocator, "{x}", .{bytes}) catch return false;
+        defer self.allocator.free(hex);
+        self.keepState(hex);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.stream == null) return true; // 次に起動した時に書き戻される
+        self.send(.{ .op = "restore", .state = hex }) catch return false;
+        self.pump("restored") catch return false;
+        return true;
+    }
+
+    pub fn pluginName(self: *PluginCell) []const u8 {
+        return self.name();
     }
 
     /// 子が中で出した障害・メトリクス・毒の通知を、自分のノードのものに限って Core のバスに出す
@@ -249,7 +326,7 @@ pub const PluginCell = struct {
         const self: *PluginCell = @ptrCast(@alignCast(ctx.?));
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (!self.running) return;
+        if (!self.running.load(.acquire)) return;
         const fp = fingerprint(msg.topic, msg.payload);
         if (self.poison.contains(fp)) return;
         const now = std.time.milliTimestamp();
@@ -294,6 +371,8 @@ pub const PluginCell = struct {
     /// 子のプロセスが落ちた: 処理中のメッセージを隔離し、障害を知らせ、起動し直す (breaker 付き)
     fn onChildCrash(self: *PluginCell, msg: *const event_bus.EventMessage, fp: u64) void {
         self.dropChild(true);
+        // 停止のために中断されたのなら障害ではない (隔離も再起動もしない)
+        if (!self.running.load(.acquire)) return;
         self.crashes += 1;
         self.poison.put(self.allocator, fp, {}) catch {};
         var buf: [512]u8 = undefined;

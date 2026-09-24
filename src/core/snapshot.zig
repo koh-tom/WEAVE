@@ -38,6 +38,8 @@ pub const Snapshot = struct {
     desired: ?*obs.DesiredState,
     /// プラグインの状態も記録する場合に設定する (R5 + R7)
     pm: ?*PluginManager = null,
+    /// 別プロセスで動くプラグインの状態 (ADR-010 段階 2)。Core が預かっている
+    isolated: ?*const std.ArrayListUnmanaged(*@import("plugin_cell.zig").PluginCell) = null,
     interval_ms: u64 = 200,
 
     thread: ?std.Thread = null,
@@ -90,9 +92,21 @@ pub const Snapshot = struct {
         if (self.pm) |pm| {
             const states = try pm.copyCommittedStates(allocator);
             defer PluginManager.freeStateCopies(allocator, states);
-            for (states, 0..) |st, i| {
-                if (i > 0) try w.writeAll(",");
+            var first = true;
+            for (states) |st| {
+                if (!first) try w.writeAll(",");
+                first = false;
                 try w.print("{{\"name\":{f},\"hex\":\"{x}\"}}", .{ std.json.fmt(st.name, .{}), st.bytes });
+            }
+            // 別プロセスのプラグインの状態は Core が預かっている分を書く
+            if (self.isolated) |cells| {
+                for (cells.items) |pc| {
+                    const st = (try pc.copyState(allocator)) orelse continue;
+                    defer allocator.free(st);
+                    if (!first) try w.writeAll(",");
+                    first = false;
+                    try w.print("{{\"name\":{f},\"hex\":\"{x}\"}}", .{ std.json.fmt(pc.pluginName(), .{}), st });
+                }
             }
         }
         try w.writeAll("]}\n");
@@ -170,7 +184,13 @@ pub const Snapshot = struct {
                 const bytes = self.allocator.alloc(u8, ps.hex.len / 2) catch continue;
                 defer self.allocator.free(bytes);
                 _ = std.fmt.hexToBytes(bytes, ps.hex) catch continue;
-                if (pm.restoreCommittedState(ps.name, bytes)) r.plugin_states += 1;
+                if (pm.restoreCommittedState(ps.name, bytes)) {
+                    r.plugin_states += 1;
+                } else if (self.isolated) |cells| {
+                    for (cells.items) |pc| {
+                        if (std.mem.eql(u8, pc.pluginName(), ps.name) and pc.restoreState(bytes)) r.plugin_states += 1;
+                    }
+                }
             }
         }
         // 復元した内容を「保存済み」とみなす

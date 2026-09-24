@@ -237,6 +237,20 @@ pub fn main() !void {
     log.info("----------------------------------------", .{});
 
     // 1. Coreの初期化
+    // 待ち受けるポートが空いているかを、スレッドを作る前に確かめる。使用中 (別の WEAVE など) なら分かりやすく止める
+    // (待ち受けは SO_REUSEPORT を付けないので、同じポートを別のプロセスと黙って分け合うことはない)
+    for ([_]struct { name: []const u8, port: u16, flag: []const u8 }{
+        .{ .name = "Dashboard / Inspector", .port = config.dashboard_port, .flag = "--dash-port" },
+        .{ .name = "remote nodes", .port = config.node_ws_port, .flag = "--node-port" },
+    }) |p| {
+        const addr = std.net.Address.parseIp(config.bind, p.port) catch continue;
+        var probe = @import("transport/ws_proto.zig").listenExclusive(addr) catch |err| {
+            log.err("Port {d} ({s}) on {s} is not available: {any}. Is another WEAVE running? Choose another with {s}.", .{ p.port, p.name, config.bind, err, p.flag });
+            std.process.exit(2);
+        };
+        probe.deinit();
+    }
+
     var core = try Core.init(allocator);
     defer core.deinit();
 
@@ -329,13 +343,18 @@ pub fn main() !void {
     try core.runtime.registerNatives("env", &symbols);
 
     var plugin_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const plugin_cell_exe: ?[]const u8 = if (config.isolate_plugins) blk: {
+    const plugin_cell_exe: ?[]const u8 = if (config.isolate_plugins or config.isolate_plugin_names.items.len > 0) blk: {
         const d = try std.fs.selfExeDirPath(&plugin_exe_buf);
         break :blk try std.fs.path.join(allocator, &.{ d, "weave-cell" });
     } else null;
     defer if (plugin_cell_exe) |p| allocator.free(p);
     for (config.plugins.items) |path| {
-        if (plugin_cell_exe) |exe| {
+        const stem = std.fs.path.stem(path);
+        const isolate_this = config.isolate_plugins or for (config.isolate_plugin_names.items) |n| {
+            if (std.mem.eql(u8, n, stem)) break true;
+        } else false;
+        if (plugin_cell_exe != null and isolate_this) {
+            const exe = plugin_cell_exe.?;
             core.loadPluginIsolated(path, exe, config.state_dir) catch |err| {
                 log.err("Failed to load plugin '{s}' in its own process: {any}", .{ path, err });
             };
@@ -448,6 +467,7 @@ pub fn main() !void {
         try maybe_link.?.start();
         snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_link.?.desired);
         snapshot.?.pm = &core.pm;
+        snapshot.?.isolated = &core.isolated;
         // 要求としてバスに流し直す → CellLink が記録し、子に (接続後に) 送る
         if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, true);
     } else if (config.mock_obs) {
@@ -455,12 +475,14 @@ pub fn main() !void {
         try maybe_mock_obs.?.connect(config.obs_host, config.obs_port);
         snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_mock_obs.?.desired);
         snapshot.?.pm = &core.pm;
+        snapshot.?.isolated = &core.isolated;
         if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, true);
     } else {
         maybe_obs = try ObsEgressNode.init(allocator, &core.bus, 2, config.obs_password);
         // 意図した状態を接続前に戻しておく → 接続 (Identified) 時に OBS へ再適用される
         snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_obs.?.desired);
         snapshot.?.pm = &core.pm;
+        snapshot.?.isolated = &core.isolated;
         if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, false);
         maybe_obs.?.connect(config.obs_host, config.obs_port) catch |err| {
             log.warn("Main: OBS connect failed (optional): {any}", .{err});

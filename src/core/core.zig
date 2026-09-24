@@ -25,6 +25,9 @@ pub const Core = struct {
     /// 別プロセスで動かしているプラグインのセル (ADR-010 段階 2)
     isolated: std.ArrayListUnmanaged(*PluginCell) = .{},
     isolated_metas: std.ArrayListUnmanaged(*@import("plugin_manager.zig").PluginMetadata) = .{},
+    /// 別プロセスのセルに掛ける cgroup (段階 3)。使えない環境では null
+    cgroups: ?@import("../security/cgroup.zig").Cgroups = null,
+    cgroups_tried: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !Core {
         return Core{
@@ -46,6 +49,7 @@ pub const Core = struct {
             self.allocator.destroy(m);
         }
         self.isolated_metas.deinit(self.allocator);
+        if (self.cgroups) |*cg| cg.deinit();
         var it = self.cell_budgets.keyIterator();
         while (it.next()) |k| self.allocator.free(k.*);
         self.cell_budgets.deinit(self.allocator);
@@ -209,6 +213,14 @@ pub const Core = struct {
         const sock = try std.fmt.bufPrint(&sock_buf, "{s}/plugin-{d}.sock", .{ socket_dir, node_id });
         const pc = try PluginCell.create(self.allocator, &self.bus, meta, cell, manifest_bytes, cell_exe, sock);
         errdefer pc.destroy();
+        if (!self.cgroups_tried) {
+            self.cgroups_tried = true;
+            if (@import("../security/cgroup.zig").Cgroups.init(self.allocator)) |cg| {
+                self.cgroups = cg;
+                log.info("Core: plugin processes get cgroup limits under {s}", .{cg.root});
+            } else |err| log.warn("Core: cgroup v2 delegation not available ({any}); plugin processes run without CPU / memory limits", .{err});
+        }
+        if (self.cgroups) |*cg| pc.cgroups = cg;
         try pc.start();
         try self.isolated.append(self.allocator, pc);
         std.debug.print("Core: Loaded plugin '{s}' (Node {}) in its own process\n", .{ name, node_id });
