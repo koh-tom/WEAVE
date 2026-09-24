@@ -495,6 +495,15 @@ test "ADR-010 stage 2: a plugin in its own process gets the same deliveries and 
         const C = struct {
             var n = std.atomic.Value(u32).init(0);
             var last = std.atomic.Value(i64).init(0);
+            var exec_ns = std.atomic.Value(u64).init(0);
+            var exec_n = std.atomic.Value(u64).init(0);
+            fn onMetrics(_: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+                const P = struct { exec_time_ns: u64 = 0 };
+                const p = std.json.parseFromSlice(P, std.heap.page_allocator, msg.payload, .{ .ignore_unknown_fields = true }) catch return;
+                defer p.deinit();
+                _ = exec_ns.fetchAdd(p.value.exec_time_ns, .monotonic);
+                _ = exec_n.fetchAdd(1, .monotonic);
+            }
             fn onValue(_: ?*anyopaque, msg: *const event_bus.EventMessage) void {
                 _ = n.fetchAdd(1, .monotonic);
                 const P = struct { count: i64 };
@@ -504,7 +513,11 @@ test "ADR-010 stage 2: a plugin in its own process gets the same deliveries and 
             }
         };
         C.n.store(0, .monotonic);
+        C.exec_ns.store(0, .monotonic);
+        C.exec_n.store(0, .monotonic);
         try core.bus.subscribe("ext.counter.value", 90, C.onValue, null);
+        // 値の購読者と同じセルに置くと、そのセルのキューがあふれて BestEffort の値が捨てられる (正しい挙動) ので分ける
+        try core.bus.subscribeEx("core.node.metrics", 91, C.onMetrics, null, .{ .cell = try core.bus.createCell("test.metrics", .{ .capacity = 8192 }) });
         try core.bus.start();
         if (isolated) try core.loadPluginIsolated("wasm-apps/counter_node.wasm", cell_exe_abs, sock_dir) else try core.loadPlugin("wasm-apps/counter_node.wasm");
 
@@ -513,6 +526,8 @@ test "ADR-010 stage 2: a plugin in its own process gets the same deliveries and 
         while (i < N) : (i += 1) try core.bus.publish("ext.counter.inc", "{}", .Reliable, 0);
         core.bus.waitIdle();
         elapsed[round] = @intCast(std.time.nanoTimestamp() - t0);
+        const en = C.exec_n.load(.monotonic);
+        std.debug.print("\n[ADR-010 stage 2] {s}: plugin execution {d} us/msg (from core.node.metrics, {d} samples)", .{ if (isolated) "own process" else "in-process", if (en > 0) C.exec_ns.load(.monotonic) / en / 1000 else 0, en });
         // 全件が届き、プラグインの publish は Core の検査を通って出てきた
         try std.testing.expectEqual(@as(u32, N), C.n.load(.monotonic));
         try std.testing.expectEqual(@as(i64, N), C.last.load(.monotonic));

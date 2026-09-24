@@ -153,17 +153,14 @@ const WasmRuntime = @import("core/wasm_runtime.zig").WasmRuntime;
 const PluginLink = struct {
     allocator: std.mem.Allocator,
     stream: std.net.Stream,
+    /// 書き込みは作業スレッドだけ (プラグインの実行・問い合わせ・通知・done) だが、念のため直列化する
     write_mutex: std.Thread.Mutex = .{},
-    // Core への問い合わせは同時に 1 つ (プラグインの実行は 1 本のスレッド)。答えはリーダーのスレッドが入れる
-    ret_mutex: std.Thread.Mutex = .{},
-    ret_cond: std.Thread.Condition = .{},
-    ret_code: ?i32 = null,
-    // Core から届いた処理待ちのメッセージ (1 つずつ。Core は done を待ってから次を送る)
-    work_mutex: std.Thread.Mutex = .{},
-    work_cond: std.Thread.Condition = .{},
-    work: ?[]u8 = null,
     closed: bool = false,
     node_id: u32 = 0,
+
+    // 読み書きは全て作業スレッド 1 本で行う (受信スレッドを置かない)。Core は done を受け取るまで次を送らず、
+    // 問い合わせ (pub / sub / unsub) の間は ret しか送らないので、読む順番は決まっている。
+    // スレッドの受け渡しが無いぶん、1 件あたりの往復が速い (ADR-010 2-4)
 
     fn sendJson(self: *PluginLink, value: anytype) void {
         var out: std.ArrayListUnmanaged(u8) = .{};
@@ -174,15 +171,26 @@ const PluginLink = struct {
         ws.writeFrame(self.stream, .text, out.items, false) catch {};
     }
 
+    /// 問い合わせを送り、Core の答え (ret) をその場で読む
     fn ask(self: *PluginLink, value: anytype) i32 {
-        self.ret_mutex.lock();
-        self.ret_code = null;
-        self.ret_mutex.unlock();
+        if (self.closed) return 1; // ERROR_UNKNOWN
         self.sendJson(value);
-        self.ret_mutex.lock();
-        defer self.ret_mutex.unlock();
-        while (self.ret_code == null and !self.closed) self.ret_cond.wait(&self.ret_mutex);
-        return self.ret_code orelse 1; // ERROR_UNKNOWN
+        while (true) {
+            const f = ws.readMessage(self.stream, self.allocator, 2 << 20) catch {
+                self.closed = true;
+                return 1;
+            };
+            defer self.allocator.free(f.payload);
+            if (f.opcode == .close) {
+                self.closed = true;
+                return 1;
+            }
+            if (f.opcode != .text) continue;
+            const R = struct { op: []const u8 = "", code: i32 = 1 };
+            const r = std.json.parseFromSlice(R, self.allocator, f.payload, .{ .ignore_unknown_fields = true }) catch continue;
+            defer r.deinit();
+            if (std.mem.eql(u8, r.value.op, "ret")) return r.value.code;
+        }
     }
 
     fn fwdPublish(ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: u32) i32 {
@@ -198,60 +206,33 @@ const PluginLink = struct {
         return self.ask(.{ .op = "unsub", .t = topic });
     }
 
-    /// 子の中のバスで WasmSubscriber が出した障害・メトリクス・毒を Core に知らせる
-    fn tap(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
-        const self: *PluginLink = @ptrCast(@alignCast(ctx.?));
-        if (std.mem.eql(u8, msg.topic, "core.node.metrics") or std.mem.eql(u8, msg.topic, "core.node.fault") or std.mem.eql(u8, msg.topic, "core.node.poison")) {
-            self.sendJson(.{ .op = "tele", .t = msg.topic, .p = msg.payload });
+    /// 子の中で WasmSubscriber が出した障害・メトリクス・毒を、発行したその場で Core に知らせる (EventBus.sync_tap)
+    fn tap(ctx: *anyopaque, topic: []const u8, payload: []const u8) void {
+        const self: *PluginLink = @ptrCast(@alignCast(ctx));
+        if (std.mem.eql(u8, topic, "core.node.metrics") or std.mem.eql(u8, topic, "core.node.fault") or std.mem.eql(u8, topic, "core.node.poison")) {
+            self.sendJson(.{ .op = "tele", .t = topic, .p = payload });
         }
     }
 
-    /// Core からのフレームを読み続ける: ret は問い合わせの答え、msg は処理待ちに置く
-    fn readLoop(self: *PluginLink) void {
-        while (true) {
-            const f = ws.readMessage(self.stream, self.allocator, 2 << 20) catch break;
+    /// Core から次の指示 (msg / restore) を読む。Core が切れたら null
+    fn nextWork(self: *PluginLink) ?[]u8 {
+        while (!self.closed) {
+            const f = ws.readMessage(self.stream, self.allocator, 2 << 20) catch {
+                self.closed = true;
+                return null;
+            };
             if (f.opcode == .close) {
                 self.allocator.free(f.payload);
-                break;
+                self.closed = true;
+                return null;
             }
             if (f.opcode != .text) {
                 self.allocator.free(f.payload);
                 continue;
             }
-            if (std.mem.indexOf(u8, f.payload, "\"op\":\"ret\"") != null) {
-                defer self.allocator.free(f.payload);
-                const R = struct { code: i32 = 1 };
-                const r = std.json.parseFromSlice(R, self.allocator, f.payload, .{ .ignore_unknown_fields = true }) catch continue;
-                defer r.deinit();
-                self.ret_mutex.lock();
-                self.ret_code = r.value.code;
-                self.ret_cond.signal();
-                self.ret_mutex.unlock();
-                continue;
-            }
-            self.work_mutex.lock();
-            if (self.work) |old| self.allocator.free(old);
-            self.work = f.payload;
-            self.work_cond.signal();
-            self.work_mutex.unlock();
+            return f.payload;
         }
-        // Core が切れた: 待っている全員を起こして終わる
-        self.ret_mutex.lock();
-        self.closed = true;
-        self.ret_cond.broadcast();
-        self.ret_mutex.unlock();
-        self.work_mutex.lock();
-        self.work_cond.broadcast();
-        self.work_mutex.unlock();
-    }
-
-    fn nextWork(self: *PluginLink) ?[]u8 {
-        self.work_mutex.lock();
-        defer self.work_mutex.unlock();
-        while (self.work == null and !self.closed) self.work_cond.wait(&self.work_mutex);
-        const w = self.work;
-        self.work = null;
-        return w;
+        return null;
     }
 };
 
@@ -305,12 +286,9 @@ fn pluginMain(debug_allocator: std.mem.Allocator, args: []const [:0]u8) !void {
     var symbols = host_api.getNativeSymbols();
     try runtime.registerNatives("env", &symbols);
 
-    try bus.subscribeEx("#", 98, PluginLink.tap, &link, .{ .receive_own = true, .record_graph = false });
+    bus.sync_tap = .{ .ctx = &link, .f = PluginLink.tap };
     try bus.start();
     defer bus.stop();
-
-    const reader = try std.Thread.spawn(.{}, PluginLink.readLoop, .{&link});
-    defer reader.join();
 
     // 今の部品でロードする (R2〜R5 / breaker は子の中でそのまま働く)
     const M = @import("core/manifest.zig").Manifest;
@@ -365,8 +343,11 @@ fn pluginMain(debug_allocator: std.mem.Allocator, args: []const [:0]u8) !void {
         }
         if (!std.mem.eql(u8, m.value.op, "msg")) continue;
         const qos: event_bus.QoS = if (m.value.qos <= 2) @enumFromInt(m.value.qos) else .BestEffort;
-        bus.publishEx(m.value.t, m.value.p, .{ .qos = qos, .source = 0, .timestamp = m.value.ts }) catch {};
-        bus.waitIdle();
+        // 子の中のバスを経由せず、この作業スレッドから WasmSubscriber に直接渡す (スレッドの受け渡しを 2 回減らす)。
+        // R2〜R5 / breaker は WasmSubscriber の中にあるので同じように働く。障害通知・メトリクスは
+        // 発行したその場で Core に送られる (sync_tap) ので、待つものは無い
+        const ev = event_bus.EventMessage{ .id = m.value.id, .topic = m.value.t, .timestamp = m.value.ts, .source_node_id = 0, .qos = qos, .payload = m.value.p };
+        @import("core/wasm_subscriber.zig").WasmSubscriber.callback(&meta.subscriber.?, &ev);
         const changed: ?[]u8 = blk: {
             const sub = &meta.subscriber.?;
             sub.mutex.lock();

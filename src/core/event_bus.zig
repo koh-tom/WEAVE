@@ -492,6 +492,9 @@ pub const PublishError = error{ InvalidTopic, QueueFull, QueueShutdown, OutOfMem
 /// Event Bus コア実装 (スレッドセーフ)
 pub const EventBus = struct {
     allocator: std.mem.Allocator,
+    /// 発行の場で同期的に呼ばれるフック (別プロセスのセル weave-cell が、障害通知などをその場で Core に送るのに使う)。
+    /// 呼ばれるのは発行したスレッド上。配送はこれとは別に通常どおり行う
+    sync_tap: ?SyncTap = null,
     mutex: std.Thread.Mutex = .{},
     /// 完全一致の購読 (トピック → 購読者)
     exact: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Subscriber)) = .{},
@@ -829,8 +832,14 @@ pub const EventBus = struct {
         return self.publishEx(topic, payload, .{ .qos = qos, .source = source_node_id, .timestamp = timestamp });
     }
 
+    pub const SyncTap = struct {
+        ctx: *anyopaque,
+        f: *const fn (ctx: *anyopaque, topic: []const u8, payload: []const u8) void,
+    };
+
     pub fn publishEx(self: *EventBus, topic: []const u8, payload: []const u8, opts: PublishOptions) PublishError!void {
         if (!pattern.validTopic(topic)) return error.InvalidTopic;
+        if (self.sync_tap) |t| t.f(t.ctx, topic, payload);
 
         if (std.mem.eql(u8, topic, "core.system.introspection")) {
             self.handleIntrospection(payload);
