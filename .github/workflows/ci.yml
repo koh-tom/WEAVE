@@ -83,6 +83,9 @@ jobs:
       - name: E2E — OBS's bundled Countdown behavior as a WEAVE plugin (C3)
         run: ./tests/e2e/countdown.sh
 
+      - name: E2E — egress cell as a separate process survives kill -9 (ADR-010 stage 1)
+        run: ./tests/e2e/egress_isolation.sh
+
       - name: Setup Bun (AssemblyScript SDK)
         uses: oven-sh/setup-bun@v2
 

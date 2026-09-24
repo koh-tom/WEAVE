@@ -16,6 +16,7 @@
 | `assemblyscript_sdk.sh` | `weave init --lang as` で作った AssemblyScript のプラグインをビルドして載せ、チャットに反応することを確かめる (bun が必要) |
 | `record_replay.sh` | `weave record` で全イベントを記録し、`--replay` で外部入力と tick を流し直すと、kusa_node が同じ判断をして OBS への要求の列 (内容と間隔) が一致する |
 | `countdown.sh` | OBS 同梱の Countdown スクリプトの振る舞いを再実装した `countdown` プラグインで、開始 → 毎秒のテキスト更新 → 終了メッセージが OBS (mock) に届く (C3) |
+| `egress_isolation.sh` | `--isolate-egress` で OBS への送信役を別プロセス (weave-cell) にし、表示中に kill -9 しても Core は止まらず ~90 ms で子が戻り、意図した表示が送り直され、その後の要求も届く。終了時は子も片付く (ADR-010 段階 1) |
 | `streamlabs.sh` | Streamlabs Socket API (モック, socket.io 2.x) のアラートが届く。サーバー指定の間隔で ping を送る。不正なトークンは拒否され、トークンはログに出ない |
 | `streamelements.sh` | StreamElements Astro (モック) の channel.activities が届く。PING に PONG を返す。不正な JWT は拒否され、JWT はログに出ない |
 

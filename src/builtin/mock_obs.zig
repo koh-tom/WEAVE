@@ -13,6 +13,9 @@ pub const MockObsEgressNode = struct {
     mutex: std.Thread.Mutex,
     /// WEAVE が意図した OBS の状態 (スナップショットの対象, R7)
     desired: DesiredState,
+    /// 接続時に出力ファイルを空にする。egress を別プロセスにしたとき (ADR-010) は、子プロセスが
+    /// 再起動するたびに記録が消えないよう false にし、空にするのは Core の起動時 1 回だけにする
+    truncate_on_connect: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, bus: *event_bus.EventBus, node_id: u32, password: ?[]const u8, filepath: []const u8) !*MockObsEgressNode {
         const self = try allocator.create(MockObsEgressNode);
@@ -47,9 +50,11 @@ pub const MockObsEgressNode = struct {
         self.running = true;
 
         // 起動時にファイルクリア: deleteFile catch {} の後 create
-        std.fs.cwd().deleteFile(self.filepath) catch {};
-        const file = try std.fs.cwd().createFile(self.filepath, .{});
-        file.close();
+        if (self.truncate_on_connect) {
+            std.fs.cwd().deleteFile(self.filepath) catch {};
+            const file = try std.fs.cwd().createFile(self.filepath, .{});
+            file.close();
+        }
 
         // OBS への送信は専用セル "egress" で行う (OBS が遅くても他の配送を待たせない)
         const cell = self.bus.getCell("egress") orelse try self.bus.createCell("egress", .{ .trust = .core });

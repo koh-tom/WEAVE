@@ -237,6 +237,20 @@ pub fn build(b: *std.Build) void {
     cli_exe.use_lld = true;
     b.installArtifact(cli_exe);
 
+    // --- 別プロセスのセル (ADR-010 Level 2 段階 1: egress) ---
+    const cell_exe = b.addExecutable(.{
+        .name = "weave-cell",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cell_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    cell_exe.root_module.addImport("common", common_module);
+    cell_exe.use_llvm = true;
+    cell_exe.use_lld = true;
+    b.installArtifact(cell_exe);
+
     // --- 既存ツール (Streamer.bot) とのブリッジ (互換戦略 C) ---
     const bridge_exe = b.addExecutable(.{
         .name = "weave-bridge",
