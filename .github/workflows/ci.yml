@@ -89,6 +89,12 @@ jobs:
       - name: E2E — Wasm plugins in their own processes, checked by Core (ADR-010 stage 2)
         run: ./tests/e2e/plugin_isolation.sh
 
+      - name: E2E — Core kill -9 with a plugin in its own process (state held by Core, restored from the snapshot)
+        run: ISOLATE=1 ./tests/e2e/core_restart.sh
+
+      - name: E2E — plugin processes are sandboxed (seccomp, network namespace, cgroup when delegated)
+        run: ./tests/e2e/plugin_sandbox.sh
+
       - name: Setup Bun (AssemblyScript SDK)
         uses: oven-sh/setup-bun@v2
 

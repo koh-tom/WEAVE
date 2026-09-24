@@ -12,15 +12,24 @@ cd "$(dirname "$0")/../.."
 BIN=./zig-out/bin
 DIR=$(mktemp -d)
 PORT=4478
-cleanup() { kill -INT "${SUP:-0}" 2>/dev/null || true; sleep 0.3; kill -9 "${SUP:-0}" "${SIM:-0}" 2>/dev/null || true; echo "logs: $DIR"; }
+cleanup() {
+  # Supervisor に止めてもらう (子の Core も片付ける)。3 秒で終わらなければ、子ごと強制終了する
+  local kids; kids=$(pgrep -P "${SUP:-0}" 2>/dev/null || true)
+  kill -INT "${SUP:-0}" 2>/dev/null || true
+  for _ in $(seq 1 60); do kill -0 "${SUP:-0}" 2>/dev/null || break; sleep 0.05; done
+  kill -9 "${SUP:-0}" $kids $(pgrep -P "${SUP:-0}" 2>/dev/null || true) "${SIM:-0}" 2>/dev/null || true
+  echo "logs: $DIR"
+}
 trap cleanup EXIT INT TERM
 
 "$BIN/weave-obs-sim" --port $PORT --state-file "$DIR/obs.json" --quiet > "$DIR/sim.log" 2>&1 &
 SIM=$!
 sleep 0.3
-"$BIN/WEAVE" --supervise --real-obs --obs-port $PORT \
+# ISOLATE=1 なら kusa を別プロセス (ADR-010 段階 2) で動かす: Core が預かった状態がスナップショットで戻ることを確かめる
+EXTRA=""; [ "${ISOLATE:-0}" = 1 ] && EXTRA="--isolate-plugins"
+"$BIN/WEAVE" --supervise --real-obs --obs-port $PORT $EXTRA \
   --mock-twitch demo/scenarios/kusa.jsonl --mock-twitch-once \
-  --dash-port 3075 --node-port 8075 --state-dir "$DIR/state" \
+  --dash-port 3052 --node-port 8052 --state-dir "$DIR/state" \
   wasm-apps/kusa_node.wasm > "$DIR/weave.log" 2>&1 &
 SUP=$!
 
