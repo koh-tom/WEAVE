@@ -163,6 +163,19 @@ pub const LatencyStats = struct {
     samples: usize = 0,
 };
 
+/// 信頼していないセル (プラグイン) の executor は OS のスケジューリング優先度を下げる (nice +10)。
+/// 隔離 Level 1 はスレッド分離なので CPU 時間は分けられない。無限ループを命令数上限で止めるまでの間や、
+/// 大きな確保をしている間に、Core・Twitch・OBS・監査の各セルが CPU を取り負けないようにする (A3)。
+/// nice を上げる (優先度を下げる) のに特権は要らない。Linux 以外では何もしない。
+fn lowerPriorityIfUntrusted(trust: Trust) void {
+    if (trust != .untrusted) return;
+    if (@import("builtin").os.tag != .linux) return;
+    const linux = std.os.linux;
+    const tid = linux.gettid();
+    // setpriority(PRIO_PROCESS=0, tid, 10): Linux ではスレッド単位に効く
+    _ = linux.syscall3(.setpriority, 0, @as(usize, @intCast(tid)), 10);
+}
+
 pub const Cell = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
@@ -428,6 +441,7 @@ pub const Cell = struct {
     fn run(self: *Cell) void {
         tl_current_cell = self;
         defer tl_current_cell = null;
+        lowerPriorityIfUntrusted(self.trust);
         var next_due: i64 = std.math.maxInt(i64);
         while (true) {
             var timeout: ?u64 = null;
@@ -769,6 +783,19 @@ pub const EventBus = struct {
     }
 
     /// ノードの購読数
+    /// node_id が pattern を (完全に同じ文字列で) 購読しているか
+    pub fn hasSubscription(self: *EventBus, node_id: u32, pattern_str: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.exact.get(pattern_str)) |list| {
+            for (list.items) |s| if (s.node_id == node_id) return true;
+        }
+        for (self.wildcard.items) |w| {
+            if (w.sub.node_id == node_id and std.mem.eql(u8, w.pattern, pattern_str)) return true;
+        }
+        return false;
+    }
+
     pub fn subscriptionCount(self: *EventBus, node_id: u32) usize {
         self.mutex.lock();
         defer self.mutex.unlock();

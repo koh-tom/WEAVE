@@ -22,9 +22,32 @@ pub const PluginMetadata = struct {
     /// rate_limited セキュリティイベントの集約 (1 秒に 1 件、間引いた件数を添える)
     rl_last_emit_ms: i64 = 0,
     rl_suppressed: u32 = 0,
+    /// これまでに publish した異なるトピック (limits.max_topics の強制用, キーは所有)
+    published_topics: std.StringHashMapUnmanaged(void) = .{},
+    topics_mutex: std.Thread.Mutex = .{},
+    /// limit_exceeded 監査イベントの集約 (1 秒に 1 件)。暴走したプラグインが監査ログを埋め尽くせないように
+    le_last_emit_ms: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
+    le_suppressed: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+    /// limit_exceeded を 1 秒に 1 件へ集約して発行する。間引いた件数を topic 欄に添える
+    pub fn emitLimitAggregated(self: *PluginMetadata, bus: *event_bus.EventBus, limit: []const u8, topic: []const u8) void {
+        const now = std.time.milliTimestamp();
+        const last = self.le_last_emit_ms.load(.monotonic);
+        if (now - last < 1000 or self.le_last_emit_ms.cmpxchgStrong(last, now, .monotonic, .monotonic) != null) {
+            _ = self.le_suppressed.fetchAdd(1, .monotonic);
+            return;
+        }
+        const suppressed = self.le_suppressed.swap(0, .monotonic);
+        var buf: [320]u8 = undefined;
+        const detail = if (suppressed > 0) std.fmt.bufPrint(&buf, "{s} (+{d} more in the last second)", .{ topic, suppressed }) catch topic else topic;
+        @import("wasm_subscriber.zig").emitLimitEvent(bus, self.node_id, self.manifest_parsed.value.name, limit, detail);
+    }
 
     pub fn deinit(self: *PluginMetadata, allocator: std.mem.Allocator) void {
         if (self.subscriber) |*sub| sub.deinit();
+        var kit = self.published_topics.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        self.published_topics.deinit(allocator);
         self.manifest_parsed.deinit();
         if (self.spare) |sp| wamr.wasm_runtime_deinstantiate(sp);
         wamr.wasm_runtime_deinstantiate(self.instance);

@@ -24,6 +24,8 @@ pub const Limits = struct {
     state_bytes: u32 = 4096,
     /// publish できる異なるトピックの数
     max_topics: u32 = 64,
+    /// 同時に持てる購読 (パターン) の数
+    max_subscriptions: u32 = 64,
     /// 再起動中に溜めておけるメッセージ数
     mailbox: u32 = 256,
 };

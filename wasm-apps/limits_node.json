@@ -1,0 +1,14 @@
+{
+    "abi_version": 1,
+    "name": "limits_node",
+    "version": "1.0.0",
+    "description": "resource limit demo: tries to publish to / subscribe to many topics",
+    "permissions": {
+        "publish": ["ext.limits.*"],
+        "subscribe": ["ext.limits.#"]
+    },
+    "limits": {
+        "max_topics": 5,
+        "max_subscriptions": 3
+    }
+}

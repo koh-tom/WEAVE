@@ -477,3 +477,190 @@ test "lock order: snapshotting plugin state while the plugin restarts does not d
     try h.send("{}");
     try std.testing.expectEqual(@as(i64, 2), CounterHarness.last_value.load(.monotonic));
 }
+
+test "A5: exceeding any declared limit is refused and audited as core.security.limit_exceeded" {
+    const allocator = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(allocator, 256);
+    defer bus.deinit();
+    bus.verbose = false;
+    var runtime = try @import("../core/wasm_runtime.zig").WasmRuntime.init();
+    defer runtime.deinit();
+    var pm = plugin_manager.PluginManager.init(allocator);
+    defer pm.deinit();
+    pm.runtime = &runtime;
+    const host_api = @import("../api/host_api.zig");
+    host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
+    host_api.enable_log = false;
+    defer {
+        host_api.global_bus = null;
+        host_api.global_plugin_manager = null;
+        host_api.enable_log = true;
+    }
+    var symbols = host_api.getNativeSymbols();
+    try runtime.registerNatives("env", &symbols);
+
+    const L = struct {
+        var by_kind = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** 4;
+        const kinds = [_][]const u8{ "\"max_topics\"", "\"max_subscriptions\"", "\"max_instructions\"", "\"memory_pages\"" };
+        var last_report: [64]u8 = undefined;
+        var last_len = std.atomic.Value(usize).init(0);
+        fn onLimit(_: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+            for (kinds, 0..) |k, i| {
+                if (std.mem.indexOf(u8, msg.payload, k) != null) _ = by_kind[i].fetchAdd(1, .monotonic);
+            }
+        }
+        fn onReport(_: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+            const n = @min(msg.payload.len, last_report.len);
+            @memcpy(last_report[0..n], msg.payload[0..n]);
+            last_len.store(n, .release);
+        }
+    };
+    for (&L.by_kind) |*v| v.store(0, .monotonic);
+    try bus.subscribe("core.security.limit_exceeded", 90, L.onLimit, null);
+    try bus.subscribe("ext.limits.report", 91, L.onReport, null);
+
+    // limits_node: トピック 5 個・購読 3 個まで
+    const load = struct {
+        fn f(a: std.mem.Allocator, rt: anytype, p: *plugin_manager.PluginManager, b: *event_bus.EventBus, name: []const u8, cell_name: []const u8) !*plugin_manager.PluginMetadata {
+            var pb: [64]u8 = undefined;
+            var mb: [64]u8 = undefined;
+            const wasm_path = try std.fmt.bufPrint(&pb, "wasm-apps/{s}.wasm", .{name});
+            const buf = try std.fs.cwd().readFileAlloc(a, wasm_path, 1024 * 1024);
+            const module = try rt.loadModule(buf);
+            const inst = try rt.instantiateLimited(module, 128 * 1024, 64 * 1024, 256);
+            const meta = try p.registerPlugin(module, inst, wasm_path, try std.fmt.bufPrint(&mb, "wasm-apps/{s}.json", .{name}), buf, b);
+            meta.subscriber.?.cell = try b.createCell(cell_name, .{ .trust = .untrusted });
+            p.initPlugin(meta);
+            try p.applyManifestSubscriptions(meta.instance, b);
+            return meta;
+        }
+    }.f;
+    _ = try load(allocator, &runtime, &pm, &bus, "limits_node", "plugin.limits_node");
+    _ = try load(allocator, &runtime, &pm, &bus, "loop_node", "plugin.loop_node");
+    _ = try load(allocator, &runtime, &pm, &bus, "bad_node", "plugin.bad_node");
+    try bus.start();
+
+    // 8 個のトピックへ publish → 5 個まで (report 用の ext.limits.report も 1 個と数える)
+    try bus.publish("ext.limits.cmd", "topics:8", .Reliable, 0);
+    bus.waitIdle();
+    // 超過した試みは 1 秒に 1 件へ集約して監査される (暴走で監査ログを埋め尽くせない)
+    try std.testing.expectEqual(@as(u32, 1), L.by_kind[0].load(.monotonic));
+
+    // 集約の窓 (1 秒, ノード単位) を越えてから、5 個の購読 → manifest の購読 (ext.limits.#) に加えて 2 個まで。
+    // 超過した 3 回の試みは監査イベント 1 件にまとまる
+    std.Thread.sleep(1100 * std.time.ns_per_ms);
+    try bus.publish("ext.limits.cmd", "subs:5", .Reliable, 0);
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 1), L.by_kind[1].load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 3), bus.subscriptionCount(100));
+    // 同じ窓の中でもう一度試みても、監査イベントは増えない (件数は次のイベントに添えられる)
+    try bus.publish("ext.limits.cmd", "subs:5", .Reliable, 0);
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 1), L.by_kind[1].load(.monotonic));
+
+    // 命令数上限とメモリ上限による停止も同じイベントで残る
+    try bus.publish("ext.twitch.chat.message", "{\"text\":\"!freeze\"}", .BestEffort, 0);
+    try bus.publish("allowed.topic", "ALLOC_UNTIL_OOM", .BestEffort, 0);
+    bus.waitIdle();
+    try std.testing.expectEqual(@as(u32, 1), L.by_kind[2].load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), L.by_kind[3].load(.monotonic));
+}
+
+test "A3 bench: other cells' delivery latency while 4 kinds of faults are injected" {
+    const allocator = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(allocator, 1024);
+    defer bus.deinit();
+    bus.verbose = false;
+    var runtime = try @import("../core/wasm_runtime.zig").WasmRuntime.init();
+    defer runtime.deinit();
+    var pm = plugin_manager.PluginManager.init(allocator);
+    defer pm.deinit();
+    pm.runtime = &runtime;
+    const host_api = @import("../api/host_api.zig");
+    host_api.global_bus = &bus;
+    host_api.global_plugin_manager = &pm;
+    host_api.enable_log = false;
+    defer {
+        host_api.global_bus = null;
+        host_api.global_plugin_manager = null;
+        host_api.enable_log = true;
+    }
+    var symbols = host_api.getNativeSymbols();
+    try runtime.registerNatives("env", &symbols);
+
+    const load = struct {
+        fn f(a: std.mem.Allocator, rt: anytype, p: *plugin_manager.PluginManager, b: *event_bus.EventBus, name: []const u8) !void {
+            var pb: [64]u8 = undefined;
+            var mb: [64]u8 = undefined;
+            var cb: [64]u8 = undefined;
+            const wasm_path = try std.fmt.bufPrint(&pb, "wasm-apps/{s}.wasm", .{name});
+            const buf = try std.fs.cwd().readFileAlloc(a, wasm_path, 1024 * 1024);
+            const module = try rt.loadModule(buf);
+            const inst = try rt.instantiateLimited(module, 128 * 1024, 64 * 1024, 256);
+            const meta = try p.registerPlugin(module, inst, wasm_path, try std.fmt.bufPrint(&mb, "wasm-apps/{s}.json", .{name}), buf, b);
+            meta.subscriber.?.cell = try b.createCell(try std.fmt.bufPrint(&cb, "plugin.{s}", .{name}), .{ .trust = .untrusted });
+            p.initPlugin(meta);
+            try p.applyManifestSubscriptions(meta.instance, b);
+        }
+    }.f;
+    try load(allocator, &runtime, &pm, &bus, "loop_node"); // 無限ループ
+    try load(allocator, &runtime, &pm, &bus, "bad_node"); // OOM と trap
+    try load(allocator, &runtime, &pm, &bus, "counter_node"); // trap
+    try load(allocator, &runtime, &pm, &bus, "limits_node"); // 購読の暴走
+
+    // 測られる側: 何もしない購読者を持つ別セル (Twitch / OBS / 他プラグインの代わり)
+    const Nop = struct {
+        fn cb(_: ?*anyopaque, _: *const event_bus.EventMessage) void {}
+    };
+    const base_cell = try bus.createCell("other.baseline", .{});
+    const fault_cell = try bus.createCell("other.under_faults", .{});
+    try bus.subscribeEx("ext.ping.base", 60, Nop.cb, null, .{ .cell = base_cell });
+    try bus.subscribeEx("ext.ping.fault", 61, Nop.cb, null, .{ .cell = fault_cell });
+    try bus.start();
+
+    const N = 400;
+    // 1. 障害なし
+    var i: usize = 0;
+    while (i < N) : (i += 1) {
+        try bus.publish("ext.ping.base", "{}", .BestEffort, 0);
+        std.Thread.sleep(500 * std.time.ns_per_us);
+    }
+    bus.waitIdle();
+
+    // 2. 障害を注入しながら (別スレッドから 4 種類を交互に、毎回少し違う内容で)
+    const Injector = struct {
+        fn run(b: *event_bus.EventBus, stop: *std.atomic.Value(bool)) void {
+            var k: u32 = 0;
+            var buf: [64]u8 = undefined;
+            while (!stop.load(.acquire)) : (k += 1) {
+                const r = switch (k % 4) {
+                    0 => b.publish("ext.twitch.chat.message", std.fmt.bufPrint(&buf, "!freeze {d}", .{k}) catch "!freeze", .BestEffort, 0),
+                    1 => b.publish("allowed.topic", std.fmt.bufPrint(&buf, "ALLOC_UNTIL_OOM#{d}", .{k}) catch "ALLOC_UNTIL_OOM", .BestEffort, 0),
+                    2 => b.publish("ext.counter.inc", std.fmt.bufPrint(&buf, "TRAP {d}", .{k}) catch "TRAP", .BestEffort, 0),
+                    else => b.publish("ext.limits.cmd", "subs:1000", .BestEffort, 0),
+                };
+                r catch {};
+                std.Thread.sleep(2 * std.time.ns_per_ms);
+            }
+        }
+    };
+    var stop = std.atomic.Value(bool).init(false);
+    const t = try std.Thread.spawn(.{}, Injector.run, .{ &bus, &stop });
+    i = 0;
+    while (i < N) : (i += 1) {
+        try bus.publish("ext.ping.fault", "{}", .BestEffort, 0);
+        std.Thread.sleep(500 * std.time.ns_per_us);
+    }
+    stop.store(true, .release);
+    t.join();
+    bus.waitIdle();
+
+    const base = base_cell.latency();
+    const under = fault_cell.latency();
+    std.debug.print("\n[A3 bench] other cell latency  baseline p50 {d} us / p99 {d} us  |  under faults p50 {d} us / p99 {d} us  ({d} samples)\n", .{ base.p50_us, base.p99_us, under.p50_us, under.p99_us, under.samples });
+    try std.testing.expectEqual(@as(usize, N), under.samples);
+    // 配送が止まらない (全件届く) ことと、p99 が桁違いに悪化しないこと。
+    // 細かい比率は負荷とスケジューラに依存するので benchmark.md に数字で残す
+    try std.testing.expect(under.p99_us <= @max(base.p99_us * 10, 2000));
+}

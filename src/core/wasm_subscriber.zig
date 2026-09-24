@@ -31,6 +31,14 @@ pub fn fingerprint(topic: []const u8, payload: []const u8) u64 {
 
 pub const Breaker = enum { closed, open, half_open, stopped };
 
+/// `core.security.limit_exceeded {node_id, name, limit, topic}` を発行する (A5)。監査ログに残る
+pub fn emitLimitEvent(bus: *event_bus.EventBus, node_id: u32, name: []const u8, limit: []const u8, topic: []const u8) void {
+    var buf: [512]u8 = undefined;
+    var w = std.io.Writer.fixed(&buf);
+    w.print("{f}", .{std.json.fmt(.{ .node_id = node_id, .name = name, .limit = limit, .topic = topic }, .{})}) catch return;
+    _ = bus.publish("core.security.limit_exceeded", w.buffered(), .Transient, 0) catch {};
+}
+
 /// 隔離中に溜めておくメッセージのコピー
 const Buffered = struct {
     msg: EventMessage,
@@ -98,6 +106,9 @@ pub const WasmSubscriber = struct {
     state_commit: []u8 = &.{},
     state_valid: bool = false,
 
+    /// 監査イベント用のプラグイン名 (manifest が生きている間有効)
+    name: []const u8 = "",
+
     /// 直近の再起動にかかった時間 (µs)。差し替え + on_init + 状態の書き戻し
     last_restart_us: u64 = 0,
 
@@ -123,6 +134,7 @@ pub const WasmSubscriber = struct {
 
     /// manifest の limits / restart を反映する
     pub fn applyManifest(self: *WasmSubscriber, m: *const manifest_mod.Manifest) void {
+        self.name = m.name;
         self.max_instructions = m.limits.max_instructions;
         self.max_init_instructions = m.limits.max_init_instructions;
         self.mailbox_cap = m.limits.mailbox;
@@ -285,6 +297,15 @@ pub const WasmSubscriber = struct {
 
         if (msg) |m| self.quarantineMessage(m, fp, exception_msg);
 
+        // 資源上限による停止は監査イベントとしても残す (A5)
+        const limit: ?[]const u8 = if (std.mem.indexOf(u8, exception_msg, "instruction limit exceeded") != null)
+            "max_instructions"
+        else if (std.mem.eql(u8, exception_msg, "out_of_memory"))
+            "memory_pages"
+        else
+            null;
+        if (limit) |l| self.emitLimitExceeded(l, if (msg) |m| m.topic else "");
+
         // trap したインスタンスのヒープは捨てる (次の再起動で差し替わる)
         if (self.func_os_reset_heap) |reset_func| {
             var reset_argv = [_]u32{0};
@@ -315,6 +336,10 @@ pub const WasmSubscriber = struct {
         self.setStatus(.restarting);
         log.info("WasmSubscriber: Triggering automatic restart for Node {} (fault {}/{} in window)", .{ self.node_id, self.faultsInWindow(now), self.max_faults });
         self.restart_pending = true;
+    }
+
+    pub fn emitLimitExceeded(self: *WasmSubscriber, limit: []const u8, topic: []const u8) void {
+        emitLimitEvent(self.bus, self.node_id, self.name, limit, topic);
     }
 
     fn runPendingRestart(self: *WasmSubscriber) void {
