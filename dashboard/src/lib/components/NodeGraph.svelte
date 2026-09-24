@@ -1,6 +1,6 @@
 <script lang="ts">
   import { SvelteFlow, Controls, Background, BackgroundVariant } from '@xyflow/svelte';
-  import { systemGraph } from '../stores';
+  import { systemGraph, selectedNode, blast, nodes } from '../stores';
   
   // Svelte Flow の基本スタイルをインポート
   import '@xyflow/svelte/dist/style.css';
@@ -14,11 +14,29 @@
         colorMode="light"
         minZoom={0.2}
         maxZoom={2}
+        onnodeclick={({ node }) => selectedNode.update((cur) => (cur === Number(node.id) ? null : Number(node.id)))}
+        onpaneclick={() => selectedNode.set(null)}
     >
         <Background variant={BackgroundVariant.Dots} patternColor="#cbd5e1" gap={20} size={1} />
         <Controls />
     </SvelteFlow>
     
+    {#if $blast}
+        <div class="absolute top-2 left-2 max-w-xs rounded-md border border-orange-300 bg-orange-50/95 px-3 py-2 text-xs text-slate-800 shadow" data-testid="blast-panel">
+            <div class="font-bold text-orange-700">影響範囲: {$nodes[$blast.origin]?.name}</div>
+            <div class="mt-1">乗っ取られた / 落ちたときに届きうるノード: <b>{$blast.reach.size}</b></div>
+            {#if $blast.reach.size > 0}
+                <div class="mt-0.5 text-slate-600">{[...$blast.reach].map((id) => $nodes[id]?.name ?? id).join(', ')}</div>
+            {/if}
+            <div class="mt-1 font-bold {$blast.sinks.length > 0 ? 'text-red-700' : 'text-emerald-700'}">
+                実世界 (OBS) への到達: {$blast.sinks.length > 0 ? `あり (${$blast.sinks.join(', ')})` : 'なし'}
+            </div>
+            <div class="mt-1 text-[10px] text-slate-500">ノードをもう一度クリック / 背景クリックで解除。起動前の予測は weave audit</div>
+        </div>
+    {:else if $systemGraph.nodes.length > 0}
+        <div class="absolute top-2 left-2 rounded bg-white/80 px-2 py-1 text-[10px] text-slate-500 pointer-events-none">ノードをクリックすると影響範囲を表示</div>
+    {/if}
+
     {#if $systemGraph.nodes.length === 0}
         <div class="absolute inset-0 flex items-center justify-center pointer-events-none text-slate-300 italic text-sm">
             Waiting for topology data...

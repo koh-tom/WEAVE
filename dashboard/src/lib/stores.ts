@@ -109,8 +109,51 @@ export function statusColor(s: string): string {
   return STATUS_COLOR[s] ?? '#475569';
 }
 
-/** Svelte Flow 用のグラフ (状態で枠の色を変える) */
-export const systemGraph = derived([nodes, edges], ([$nodes, $edges]) => {
+/** Inspector でクリックしたノード (影響範囲の起点) */
+export const selectedNode = writable<number | null>(null);
+
+export interface BlastView {
+  origin: number;
+  /** 起点から publish → subscribe を辿って届くノード (起点を含まない) */
+  reach: Set<number>;
+  /** 辿った辺 (source-target-topic) */
+  edgeKeys: Set<string>;
+  /** 届く先のうち実世界に作用するシンク (egress セル) */
+  sinks: string[];
+}
+
+export function edgeKey(e: GraphEdge): string {
+  return `${e.source}-${e.target}-${e.topic}`;
+}
+
+/**
+ * 影響範囲 (blast radius) — 起点ノードが乗っ取られた / 落ちたときに、書いたものが届きうる範囲。
+ * weave audit と同じ考え方 (宣言された publish → subscribe の到達) を、実行中の購読グラフで辿る。
+ */
+export const blast = derived([selectedNode, nodes, edges], ([$sel, $nodes, $edges]): BlastView | null => {
+  if ($sel == null || !$nodes[$sel]) return null;
+  const reach = new Set<number>();
+  const edgeKeys = new Set<string>();
+  const queue = [$sel];
+  const seen = new Set<number>([$sel]);
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const e of $edges) {
+      if (e.source !== cur) continue;
+      edgeKeys.add(edgeKey(e));
+      if (!seen.has(e.target)) {
+        seen.add(e.target);
+        reach.add(e.target);
+        queue.push(e.target);
+      }
+    }
+  }
+  const sinks = [...reach].map((id) => $nodes[id]).filter((n) => n && n.cell === 'egress').map((n) => n.name);
+  return { origin: $sel, reach, edgeKeys, sinks };
+});
+
+/** Svelte Flow 用のグラフ (状態で枠の色を変える。ノード選択中は影響範囲を重ねる) */
+export const systemGraph = derived([nodes, edges, blast], ([$nodes, $edges, $blast]) => {
   const list = Object.values($nodes).sort((a, b) => a.cell.localeCompare(b.cell) || a.id - b.id);
   const cells = [...new Set(list.map((n) => n.cell))];
   const perCell: Record<string, number> = {};
@@ -121,20 +164,36 @@ export const systemGraph = derived([nodes, edges], ([$nodes, $edges]) => {
       id: String(n.id),
       position: { x: 40 + col * 230, y: 60 + row * 110 },
       data: { label: `${n.name}\n[${n.cell}]` },
-      style: `border: 2px solid ${statusColor(n.status)}; border-radius: 6px; padding: 8px; font-weight: 700; background: white; white-space: pre-line; font-size: 11px;`,
+      style: nodeStyle(n, $blast),
     };
   });
-  const sfEdges: Edge[] = $edges.map((e) => ({
-    id: `e-${e.source}-${e.target}-${e.topic}`,
-    source: String(e.source),
-    target: String(e.target),
-    animated: true,
-    label: e.topic,
-    style: 'stroke: #0A1C56; stroke-width: 2px;',
-    labelStyle: 'font-size: 9px; fill: #0A1C56; font-weight: 700;',
-  }));
+  const sfEdges: Edge[] = $edges.map((e) => {
+    const hot = $blast?.edgeKeys.has(edgeKey(e)) ?? false;
+    const dim = $blast != null && !hot;
+    const color = hot ? '#ea580c' : '#0A1C56';
+    return {
+      id: `e-${edgeKey(e)}`,
+      source: String(e.source),
+      target: String(e.target),
+      animated: !dim,
+      label: e.topic,
+      style: `stroke: ${color}; stroke-width: ${hot ? 3 : 2}px; opacity: ${dim ? 0.15 : 1};`,
+      labelStyle: `font-size: 9px; fill: ${color}; font-weight: 700; opacity: ${dim ? 0.2 : 1};`,
+    };
+  });
   return { nodes: sfNodes, edges: sfEdges };
 });
+
+function nodeStyle(n: NodeView, b: BlastView | null): string {
+  const base = 'border-radius: 6px; padding: 8px; font-weight: 700; white-space: pre-line; font-size: 11px;';
+  if (b == null) return `${base} border: 2px solid ${statusColor(n.status)}; background: white;`;
+  if (n.id === b.origin) return `${base} border: 3px solid #ea580c; background: #ffedd5;`;
+  if (b.reach.has(n.id)) {
+    const sink = n.cell === 'egress';
+    return `${base} border: 3px solid ${sink ? '#dc2626' : '#f97316'}; background: ${sink ? '#fee2e2' : '#fff7ed'};`;
+  }
+  return `${base} border: 2px solid ${statusColor(n.status)}; background: white; opacity: 0.25;`;
+}
 
 function pushCapped<T>(list: T[], item: T, max: number): T[] {
   const next = [item, ...list];
