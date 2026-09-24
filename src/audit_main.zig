@@ -61,10 +61,22 @@ pub fn main() !void {
 
     if (manifest_paths.items.len == 0) try collectManifests(arena, "wasm-apps", &manifest_paths);
 
+    // 運用者が宣言したセル (weave.json の cell_budgets)。実行時と同じく、ここにあるセルにだけ
+    // manifest の `cell` で入れる
+    var declared = std.ArrayListUnmanaged([]const u8){};
+    if (std.fs.cwd().readFileAlloc(arena, "weave.json", 1024 * 1024)) |cfg| {
+        if (std.json.parseFromSliceLeaky(std.json.Value, arena, cfg, .{})) |v| {
+            if (v == .object) if (v.object.get("cell_budgets")) |cb| if (cb == .object) {
+                var it = cb.object.iterator();
+                while (it.next()) |e| try declared.append(arena, e.key_ptr.*);
+            };
+        } else |_| {}
+    } else |_| {}
+
     var nodes = std.ArrayListUnmanaged(blast.Node){};
     for (try blast.builtinNodes(arena)) |b| try nodes.append(arena, b);
     for (manifest_paths.items) |path| {
-        const node = blast.loadManifestNode(arena, path) catch |err| {
+        const node = blast.loadManifestNodeIn(arena, path, declared.items) catch |err| {
             std.debug.print("warn: skip {s}: {any}\n", .{ path, err });
             continue;
         };
@@ -89,8 +101,8 @@ pub fn main() !void {
     } else {
         try w.print("\n=== WEAVE Impact Summary ({d} nodes) ===\n", .{nodes.items.len});
         try w.print("侵害されたら (security) / 落ちたら (failure) の上限を、宣言だけから起動前に計算\n\n", .{});
-        try w.print("{s: <20} {s: <7} {s: <16} {s: <11} {s}\n", .{ "NODE", "KIND", "REACHES SINK", "READS PII", "IF DOWN, ALSO STOPS" });
-        try w.print("{s: <20} {s: <7} {s: <16} {s: <11} {s}\n", .{ "----", "----", "------------", "---------", "-------------------" });
+        try w.print("{s: <20} {s: <7} {s: <24} {s: <16} {s: <11} {s}\n", .{ "NODE", "KIND", "CELL", "REACHES SINK", "READS PII", "IF DOWN, ALSO STOPS" });
+        try w.print("{s: <20} {s: <7} {s: <24} {s: <16} {s: <11} {s}\n", .{ "----", "----", "----", "------------", "---------", "-------------------" });
         for (nodes.items) |n| {
             const report = try blast.computeBlast(arena, nodes.items, n.name);
             var reads_pii = false;
@@ -103,9 +115,14 @@ pub fn main() !void {
                 if (k > 0) try stops.appendSlice(arena, ", ");
                 try stops.appendSlice(arena, s);
             }
-            try w.print("{s: <20} {s: <7} {s: <16} {s: <11} {s}\n", .{
+            for (f.cell_mates) |m| {
+                if (stops.items.len > 0) try stops.appendSlice(arena, ", ");
+                try stops.appendSlice(arena, try std.fmt.allocPrint(arena, "{s} (delayed, same cell)", .{m}));
+            }
+            try w.print("{s: <20} {s: <7} {s: <24} {s: <16} {s: <11} {s}\n", .{
                 n.name,
                 n.kind,
+                n.cell,
                 if (report.reachable_sinks.len > 0) "YES (!)" else "no",
                 if (reads_pii) "YES (!)" else "no",
                 if (stops.items.len == 0) "(nothing)" else stops.items,
