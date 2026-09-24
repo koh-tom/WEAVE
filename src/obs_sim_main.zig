@@ -201,7 +201,7 @@ pub fn main() !void {
     _ = std.os.linux.sigaction(std.os.linux.SIG.TERM, &act, null);
 
     const addr = try std.net.Address.parseIp("127.0.0.1", port);
-    var server = try addr.listen(.{ .reuse_address = true });
+    var server = try ws.listenExclusive(addr);
     defer server.deinit();
     std.debug.print("[OBS-SIM] listening on ws://127.0.0.1:{d} (auth: {s})\n", .{ port, if (password != null) "on" else "off" });
     state.writeFile();

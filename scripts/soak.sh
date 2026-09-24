@@ -19,7 +19,7 @@ INTERVAL=10
 [ "$DURATION" -lt 60 ] && INTERVAL=2
 
 ./zig-out/bin/WEAVE --mock-twitch demo/scenarios/soak.jsonl --mock-obs --mock-obs-file "$DIR/obs.jsonl" \
-  --dash-port 3075 --node-port 8075 --audit-log "$DIR/audit.log" --state-dir "$DIR/state" \
+  --dash-port 3059 --node-port 8059 --audit-log "$DIR/audit.log" --state-dir "$DIR/state" \
   wasm-apps/kusa_node.wasm wasm-apps/spam_node.wasm wasm-apps/counter_node.wasm wasm-apps/loop_node.wasm \
   > "$DIR/weave.log" 2>&1 &
 W=$!

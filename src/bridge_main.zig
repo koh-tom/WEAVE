@@ -331,7 +331,7 @@ const Mock = struct {
 
 fn mockServe(allocator: std.mem.Allocator, port: u16, m: Mock) !void {
     const addr = try std.net.Address.parseIp("127.0.0.1", port);
-    var server = try addr.listen(.{ .reuse_address = true });
+    var server = try ws.listenExclusive(addr);
     defer server.deinit();
     std.debug.print("[mock-streamerbot] ws://127.0.0.1:{d}/ (auth: {s})\n", .{ port, if (m.password != null) "on" else "off" });
     while (true) {
@@ -417,7 +417,7 @@ const MockAstro = struct {
 
 fn astroServe(allocator: std.mem.Allocator, port: u16, m: MockAstro) !void {
     const addr = try std.net.Address.parseIp("127.0.0.1", port);
-    var server = try addr.listen(.{ .reuse_address = true });
+    var server = try ws.listenExclusive(addr);
     defer server.deinit();
     std.debug.print("[mock-astro] ws://127.0.0.1:{d}/\n", .{port});
     while (true) {
@@ -506,7 +506,7 @@ const MockStreamlabs = struct {
 
 fn slServe(port: u16, m: MockStreamlabs) !void {
     const addr = try std.net.Address.parseIp("127.0.0.1", port);
-    var server = try addr.listen(.{ .reuse_address = true });
+    var server = try ws.listenExclusive(addr);
     defer server.deinit();
     std.debug.print("[mock-streamlabs] ws://127.0.0.1:{d}/socket.io/?EIO=3&transport=websocket\n", .{port});
     while (true) {

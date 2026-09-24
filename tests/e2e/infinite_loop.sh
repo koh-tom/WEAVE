@@ -11,7 +11,7 @@ cleanup() { kill -INT "${W:-0}" 2>/dev/null || true; sleep 0.3; kill -9 "${W:-0}
 trap cleanup EXIT INT TERM
 
 "$BIN/WEAVE" --mock-twitch demo/scenarios/freeze.jsonl --mock-twitch-once --mock-obs --mock-obs-file "$DIR/obs.jsonl" \
-  --dash-port 3079 --node-port 8079 --audit-log "$DIR/audit.log" --state-dir "$DIR/state" \
+  --dash-port 3048 --node-port 8048 --audit-log "$DIR/audit.log" --state-dir "$DIR/state" \
   wasm-apps/loop_node.wasm wasm-apps/kusa_node.wasm > "$DIR/weave.log" 2>&1 &
 W=$!
 for _ in $(seq 1 50); do grep -q '"sceneItemEnabled":true' "$DIR/obs.jsonl" 2>/dev/null && break; sleep 0.1; done
