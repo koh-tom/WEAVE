@@ -9,6 +9,7 @@ const NodeWsTransport = @import("transport/node_ws.zig").NodeWsTransport;
 const ObsEgressNode = @import("builtin/obs.zig").ObsEgressNode;
 const MockObsEgressNode = @import("builtin/mock_obs.zig").MockObsEgressNode;
 const MockTwitchAdapter = @import("builtin/mock_twitch.zig").MockTwitchAdapter;
+const Replayer = @import("builtin/replay.zig").Replayer;
 const DashboardNode = @import("builtin/dashboard.zig").DashboardNode;
 const StreamElementsAdapter = @import("builtin/streamelements.zig").StreamElementsAdapter;
 const streamlabs = @import("builtin/streamlabs.zig");
@@ -20,6 +21,10 @@ fn runTwitch(t: *TwitchAdapter) void {
     t.run() catch |err| {
         log.err("TwitchAdapter Error: {any}", .{err});
     };
+}
+
+fn runReplay(r: *Replayer) void {
+    r.run() catch |err| log.err("Replay: {any}", .{err});
 }
 
 fn runMockTwitch(t: *MockTwitchAdapter) void {
@@ -40,6 +45,9 @@ var running = std.atomic.Value(bool).init(true);
 
 /// 500ms 間隔で core.system.tick を publish する。
 /// Wasm プラグイン等が"時間の経過"を検知するために使う (例: kusa_node の auto-hide)。
+/// 記録の再生中は、時刻 (tick) も記録から流すので実時間の tick を止める
+var replay_active = std.atomic.Value(bool).init(false);
+
 fn runTicker(core: *Core) void {
     const interval_ns: u64 = 500 * std.time.ns_per_ms;
     while (running.load(.acquire)) {
@@ -56,6 +64,7 @@ fn runTicker(core: *Core) void {
         run_mutex.unlock();
         if (!running.load(.acquire)) break;
 
+        if (replay_active.load(.acquire)) continue;
         core.bus.publish("core.system.tick", "{}", .BestEffort, 0) catch |err| {
             log.err("Ticker publish error: {any}", .{err});
         };
@@ -330,8 +339,18 @@ pub fn main() !void {
     var maybe_twitch: ?TwitchAdapter = null;
     var maybe_mock_twitch: ?MockTwitchAdapter = null;
     var twitch_thread: ?std.Thread = null;
+    var maybe_replay: ?Replayer = null;
+    var replay_thread: ?std.Thread = null;
 
-    if (!config.no_twitch) {
+    if (config.replay_path) |rp| {
+        // 記録の再生が入力源になる (実 Twitch には繋がない)
+        try core.graph.registerNode(1, "TwitchAdapter", .native);
+        try core.bus.publish("core.node.registered", "{\"node_id\":1,\"name\":\"TwitchAdapter\",\"type\":\"native\"}", .Transient, 0);
+        maybe_replay = .{ .allocator = allocator, .bus = &core.bus, .path = rp };
+        replay_active.store(true, .release);
+        replay_thread = try std.Thread.spawn(.{}, runReplay, .{&maybe_replay.?});
+        log.info("Replay: {s}", .{rp});
+    } else if (!config.no_twitch) {
         try core.graph.registerNode(1, "TwitchAdapter", .native);
         try core.bus.publish("core.node.registered", "{\"node_id\":1,\"name\":\"TwitchAdapter\",\"type\":\"native\"}", .Transient, 0);
 
@@ -435,6 +454,7 @@ pub fn main() !void {
     if (maybe_mock_obs) |o| o.stop();
     if (maybe_obs) |o| o.stop();
     if (maybe_mock_twitch) |*t| t.stop();
+    if (maybe_replay) |*r| r.stop();
     if (maybe_twitch) |*t| t.stop();
     if (maybe_se) |se| se.stop();
     if (maybe_sl) |sl| sl.stop();
@@ -445,6 +465,7 @@ pub fn main() !void {
     dashboard.deinit();
 
     if (twitch_thread) |t| t.join();
+    if (replay_thread) |t| t.join();
     node_ws_thread.join();
     graph_thread.join();
     ticker_thread.join();
@@ -470,6 +491,9 @@ test {
     _ = @import("core/pattern.zig");
     _ = @import("core/topics.zig");
     _ = @import("transport/ws_proto.zig");
+    _ = @import("tests/fuzz_test.zig");
+    _ = @import("builtin/replay.zig");
+    _ = @import("tests/audit_match_test.zig");
     _ = @import("transport/node_ws.zig");
     _ = @import("builtin/dashboard.zig");
     _ = @import("builtin/obs.zig");

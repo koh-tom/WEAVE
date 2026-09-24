@@ -10,6 +10,7 @@
 //!   weave node ls                            ノード一覧 (セル・状態)
 //!   weave doctor                             環境の自己診断
 //!   weave init <name>                        プラグインのひな形 (wasm-apps/<name>.zig/.json)
+//!   weave demo [name] [args]                 デモ台本 (demo/run_<name>_demo.sh) を実行。名前なしで一覧
 //!
 //! 接続先: --url ws://127.0.0.1:3030/ws (既定)  トークン: --token / WEAVE_DASHBOARD_TOKEN
 
@@ -33,7 +34,9 @@ fn usage() void {
         \\  weave topic echo [pattern]              イベントを表示
         \\  weave node ls                           ノード一覧
         \\  weave doctor                            自己診断
-        \\  weave init <name>                       プラグインのひな形を作る
+        \\  weave init <name> [--lang zig|as]      プラグインのひな形を作る (as = AssemblyScript)
+        \\  weave demo [name] [args]                デモ台本を実行 (名前なしで一覧)
+        \\  weave record <file>                     全イベントを JSONL に記録 (weave run --replay <file> で再生)
         \\
         \\  共通: --url ws://127.0.0.1:3030/ws  --token <t> (または WEAVE_DASHBOARD_TOKEN)
         \\
@@ -132,6 +135,31 @@ fn cmdTopicEcho(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
+/// 全イベントを JSONL に記録する。後で `weave run --replay <file>` で外部入力を再生できる。
+/// 再生には payload が要るので、観測レベルを contents に上げてから記録する (Inspector を見ている人にも中身が見える)
+fn cmdRecord(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var rest: std.ArrayListUnmanaged([]const u8) = .{};
+    const c = try parseConn(allocator, args, &rest);
+    if (rest.items.len < 1) return usage();
+    const path = rest.items[0];
+    const s = try connect(allocator, c);
+    defer s.close();
+    try ws.writeFrame(s, .text, "{\"topic\":\"core.system.introspection\",\"payload\":\"contents\"}", true);
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o600 });
+    defer file.close();
+    std.debug.print("recording all events to {s} (observation level set to contents). Ctrl+C to stop.\n", .{path});
+    var n: usize = 0;
+    while (true) {
+        const f = ws.readMessage(s, allocator, 16 << 20) catch break;
+        defer allocator.free(f.payload);
+        if (f.opcode != .text) continue;
+        try file.writeAll(f.payload);
+        try file.writeAll("\n");
+        n += 1;
+    }
+    std.debug.print("recorded {d} event(s)\n", .{n});
+}
+
 fn cmdNodeLs(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var rest: std.ArrayListUnmanaged([]const u8) = .{};
     const c = try parseConn(allocator, args, &rest);
@@ -222,14 +250,21 @@ fn cmdDoctor(allocator: std.mem.Allocator) !void {
 fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 1) return usage();
     const name = args[0];
+    var lang: []const u8 = "zig";
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "--lang")) lang = args[2];
+    if (!std.mem.eql(u8, lang, "zig") and !std.mem.eql(u8, lang, "as")) {
+        std.debug.print("weave init: --lang must be zig or as (AssemblyScript)\n", .{});
+        std.process.exit(2);
+    }
     for (name) |ch| {
         if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) {
             std.debug.print("weave init: name must be [A-Za-z0-9_]\n", .{});
             std.process.exit(2);
         }
     }
-    const zig_path = try std.fmt.allocPrint(allocator, "wasm-apps/{s}.zig", .{name});
     const json_path = try std.fmt.allocPrint(allocator, "wasm-apps/{s}.json", .{name});
+    if (std.mem.eql(u8, lang, "as")) return initAssemblyScript(allocator, name, json_path);
+    const zig_path = try std.fmt.allocPrint(allocator, "wasm-apps/{s}.zig", .{name});
     if (std.fs.cwd().access(zig_path, .{})) |_| {
         std.debug.print("weave init: {s} already exists\n", .{zig_path});
         std.process.exit(1);
@@ -287,6 +322,66 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     , .{ zig_path, json_path, name, name, name });
 }
 
+fn initManifest(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        \\{{
+        \\    "abi_version": 1,
+        \\    "name": "{s}",
+        \\    "version": "0.1.0",
+        \\    "permissions": {{
+        \\        "publish": ["ext.{s}.greeting"],
+        \\        "subscribe": ["ext.twitch.chat.message"],
+        \\        "data_access": ["pii"]
+        \\    }},
+        \\    "rate_limit_eps": 20
+        \\}}
+        \\
+    , .{ name, name });
+}
+
+fn initAssemblyScript(allocator: std.mem.Allocator, name: []const u8, json_path: []const u8) !void {
+    const ts_path = try std.fmt.allocPrint(allocator, "sdk/assemblyscript/plugins/{s}.ts", .{name});
+    if (std.fs.cwd().access(ts_path, .{})) |_| {
+        std.debug.print("weave init: {s} already exists\n", .{ts_path});
+        std.process.exit(1);
+    } else |_| {}
+    std.fs.cwd().access("sdk/assemblyscript/assembly/weave.ts", .{}) catch {
+        std.debug.print("weave init: run this in the WEAVE checkout (sdk/assemblyscript が見つからない)\n", .{});
+        std.process.exit(1);
+    };
+    try std.fs.cwd().makePath("sdk/assemblyscript/plugins");
+    const src = try std.fmt.allocPrint(allocator,
+        \\// {s}: チャットに "!hello" が来たら ext.{s}.greeting を発行する最小のプラグイン (AssemblyScript)
+        \\import {{ publish, log, text, Level, QoS }} from "../assembly/weave";
+        \\export {{ os_alloc, os_reset_heap, os_api_get_heap_usage }} from "../assembly/weave";
+        \\
+        \\export function on_init(): i32 {{
+        \\  log(Level.Info, "[{s}] started");
+        \\  return 0;
+        \\}}
+        \\
+        \\export function on_message(topic_ptr: usize, topic_len: u32, payload_ptr: usize, payload_len: u32): void {{
+        \\  if (text(topic_ptr, topic_len) != "ext.twitch.chat.message") return;
+        \\  const payload = text(payload_ptr, payload_len);
+        \\  if (payload.includes('"message":"!hello')) {{
+        \\    publish("ext.{s}.greeting", '{{"hello":true}}', QoS.BestEffort);
+        \\  }}
+        \\}}
+        \\
+    , .{ name, name, name, name });
+    try std.fs.cwd().writeFile(.{ .sub_path = ts_path, .data = src });
+    try std.fs.cwd().writeFile(.{ .sub_path = json_path, .data = try initManifest(allocator, name) });
+    std.debug.print(
+        \\created {s} and {s}
+        \\
+        \\next:
+        \\  sdk/assemblyscript/build.sh {s}         # wasm-apps/{s}.wasm ができる (bun が必要)
+        \\  weave audit {s}                           # 乗っ取られたら何ができるかを確認
+        \\  weave run --mock-obs wasm-apps/{s}.wasm   # 起動して Inspector で確認
+        \\
+    , .{ ts_path, json_path, ts_path, name, name, name });
+}
+
 pub fn main() void {
     realMain() catch |err| {
         const hint: []const u8 = switch (err) {
@@ -297,6 +392,47 @@ pub fn main() void {
         std.debug.print("weave: {s}{s}\n", .{ @errorName(err), hint });
         std.process.exit(1);
     };
+}
+
+/// demo/run_<name>_demo.sh を実行する。リポジトリの位置は実行ファイル (zig-out/bin/weave) から辿る
+fn cmdDemo(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const bin_dir = try std.fs.selfExeDirPath(&dir_buf);
+    const demo_dir = try std.fs.path.join(allocator, &.{ bin_dir, "..", "..", "demo" });
+    if (rest.len == 0) {
+        var dir = std.fs.cwd().openDir(demo_dir, .{ .iterate = true }) catch {
+            std.debug.print("weave demo: {s} not found (run from a source checkout)\n", .{demo_dir});
+            return error.DemoDirNotFound;
+        };
+        defer dir.close();
+        var names: std.ArrayListUnmanaged([]const u8) = .{};
+        var it = dir.iterate();
+        while (try it.next()) |e| {
+            if (e.kind != .file or !std.mem.startsWith(u8, e.name, "run_") or !std.mem.endsWith(u8, e.name, "_demo.sh")) continue;
+            try names.append(allocator, try allocator.dupe(u8, e.name["run_".len .. e.name.len - "_demo.sh".len]));
+        }
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lt(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lt);
+        std.debug.print("demos (weave demo <name>):\n", .{});
+        for (names.items) |n| std.debug.print("  {s}\n", .{n});
+        return;
+    }
+    const name = rest[0];
+    for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-')) return error.InvalidDemoName;
+    const script = try std.fmt.allocPrint(allocator, "{s}/run_{s}_demo.sh", .{ demo_dir, name });
+    std.fs.cwd().access(script, .{}) catch {
+        std.debug.print("weave demo: no demo named '{s}' (weave demo で一覧)\n", .{name});
+        std.process.exit(2);
+    };
+    var argv: std.ArrayListUnmanaged([]const u8) = .{};
+    try argv.appendSlice(allocator, &.{ "bash", script });
+    try argv.appendSlice(allocator, rest[1..]);
+    const err = std.process.execv(allocator, argv.items);
+    std.debug.print("weave demo: failed to exec {s}: {any}\n", .{ script, err });
+    return err;
 }
 
 fn realMain() !void {
@@ -315,6 +451,8 @@ fn realMain() !void {
     if (std.mem.eql(u8, cmd, "obs-sim")) return execSibling(allocator, "weave-obs-sim", rest, null);
     if (std.mem.eql(u8, cmd, "doctor")) return cmdDoctor(allocator);
     if (std.mem.eql(u8, cmd, "init")) return cmdInit(allocator, rest);
+    if (std.mem.eql(u8, cmd, "demo")) return cmdDemo(allocator, rest);
+    if (std.mem.eql(u8, cmd, "record")) return cmdRecord(allocator, rest);
     if (std.mem.eql(u8, cmd, "topic") and rest.len >= 1) {
         if (std.mem.eql(u8, rest[0], "pub")) return cmdTopicPub(allocator, rest[1..]);
         if (std.mem.eql(u8, rest[0], "echo")) return cmdTopicEcho(allocator, rest[1..]);

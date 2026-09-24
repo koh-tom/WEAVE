@@ -46,6 +46,9 @@ pub const Config = struct {
     introspection: []const u8 = "metadata",
     /// mock Twitch のシナリオを 1 回だけ再生する (e2e テスト用)
     mock_twitch_once: bool = false,
+    /// `weave record` の記録から外部入力を再生する (Twitch の代わりに入力源になる)
+    replay_path: ?[]const u8 = null,
+
     dashboard_dist: []const u8 = "dashboard/dist",
     /// 状態 (スナップショット等) の置き場
     state_dir: []const u8 = ".weave/state",
@@ -307,6 +310,11 @@ pub const Config = struct {
                 if (self.streamlabs_url) |u| allocator.free(u);
                 self.streamlabs_url = try allocator.dupe(u8, args[i]);
                 self.streamlabs = true;
+            } else if (std.mem.eql(u8, arg, "--replay")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                if (self.replay_path) |p| allocator.free(p);
+                self.replay_path = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--mock-twitch-once")) {
                 self.mock_twitch_once = true;
             } else if (std.mem.eql(u8, arg, "--state-dir")) {
@@ -438,6 +446,7 @@ pub const Config = struct {
         allocator.free(self.trust_keys_path);
         allocator.free(self.audit_log_path);
         for (self.cell_budgets.items) |cb| allocator.free(cb.name);
+        if (self.replay_path) |p| allocator.free(p);
         self.cell_budgets.deinit(allocator);
         allocator.free(self.bind);
         allocator.free(self.introspection);
@@ -494,6 +503,8 @@ fn printHelp() void {
         \\  --streamlabs-url <url>         Socket API endpoint (implies --streamlabs)
         \\  --introspection <l> off|metadata|contents (default: metadata)
         \\  --mock-twitch-once   Play the mock Twitch scenario once (no loop)
+        \\  --replay <file>      Replay the external inputs and ticks recorded by `weave record` with the
+        \\                       original timing, so plugins make the same decisions. Replaces Twitch as the input
         \\  --dashboard-dist <d> Directory of the built dashboard (default: dashboard/dist)
         \\  --state-dir <dir>    Where snapshots are kept (default: .weave/state)
         \\  --no-snapshot        Do not save state snapshots
