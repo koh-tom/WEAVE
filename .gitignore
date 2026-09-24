@@ -42,3 +42,7 @@ wasm-apps/*.wasm
 .weave/*
 !.weave/trusted_keys
 wasm-apps/*.sig
+
+# AssemblyScript SDK の依存 (bun install で入る)
+sdk/assemblyscript/node_modules/
+sdk/assemblyscript/plugins/

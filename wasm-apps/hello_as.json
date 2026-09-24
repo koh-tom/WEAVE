@@ -1,0 +1,11 @@
+{
+    "abi_version": 1,
+    "name": "hello_as",
+    "version": "1.0.0",
+    "description": "AssemblyScript SDK example: counts chat messages containing hello",
+    "permissions": {
+        "publish": ["ext.as.greetings"],
+        "subscribe": ["ext.twitch.chat.message"],
+        "data_access": ["pii"]
+    }
+}
