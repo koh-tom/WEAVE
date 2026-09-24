@@ -74,6 +74,18 @@ jobs:
       - name: E2E — infinite loop is stopped by instruction metering, quarantined and recovered
         run: ./tests/e2e/infinite_loop.sh
 
+      - name: E2E — Ctrl+C / SIGTERM exit cleanly every time (10 × 2 rounds)
+        run: ./tests/e2e/shutdown.sh
+
+      - name: E2E — record the events, replay the inputs, get the same OBS requests
+        run: ./tests/e2e/record_replay.sh
+
+      - name: Setup Bun (AssemblyScript SDK)
+        uses: oven-sh/setup-bun@v2
+
+      - name: E2E — plugin written with the AssemblyScript SDK (weave init --lang as)
+        run: ./tests/e2e/assemblyscript_sdk.sh
+
       - name: E2E — StreamElements Astro adapter (mock; JWT via env only)
         run: ./tests/e2e/streamelements.sh
 

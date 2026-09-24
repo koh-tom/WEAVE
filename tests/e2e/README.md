@@ -12,6 +12,9 @@
 | `streamerbot_bridge.sh` | Streamer.bot (モック) のチャットがブリッジ経由で kusa に届き、WEAVE から DoAction を呼べる |
 | `howling.sh` | 反響し合う 2 プラグインを因果の深さ 16 で止め、`loop_detected` を記録する。他のプラグインは巻き込まれない |
 | `infinite_loop.sh` | `!freeze` で無限ループに入る loop_node を命令数上限で止め、毒メッセージを DLQ に隔離し、予備インスタンスで数 ms で戻す。同じ時間の草ラッシュで kusa_node は OBS を操作できる |
+| `shutdown.sh` | Ctrl+C (SIGINT) と SIGTERM で、イベントが流れている最中に止めても毎回 2 秒以内・終了コード 0 で終わる (既定 10 × 2 回, `ROUNDS=` で変更) |
+| `assemblyscript_sdk.sh` | `weave init --lang as` で作った AssemblyScript のプラグインをビルドして載せ、チャットに反応することを確かめる (bun が必要) |
+| `record_replay.sh` | `weave record` で全イベントを記録し、`--replay` で外部入力と tick を流し直すと、kusa_node が同じ判断をして OBS への要求の列 (内容と間隔) が一致する |
 | `streamlabs.sh` | Streamlabs Socket API (モック, socket.io 2.x) のアラートが届く。サーバー指定の間隔で ping を送る。不正なトークンは拒否され、トークンはログに出ない |
 | `streamelements.sh` | StreamElements Astro (モック) の channel.activities が届く。PING に PONG を返す。不正な JWT は拒否され、JWT はログに出ない |
 
