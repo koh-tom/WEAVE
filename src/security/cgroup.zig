@@ -23,7 +23,12 @@ pub const Cgroups = struct {
     pub fn init(allocator: std.mem.Allocator) !Cgroups {
         const root = if (std.process.getEnvVarOwned(allocator, "WEAVE_CGROUP_ROOT")) |r| r else |_| try findDelegated(allocator);
         errdefer allocator.free(root);
-        std.fs.cwd().makePath(root) catch return error.CgroupUnavailable;
+        // 親 (委譲された user@<uid>.service など) は存在するはずなので最後の 1 段だけ作る。
+        // makePath は /proc など mkdir が特殊な失敗をする場所で戻ってこないことがある
+        std.fs.cwd().makeDir(root) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return error.CgroupUnavailable,
+        };
         // weave.slice 自体にはプロセスを置かないので、子に cpu / memory / pids を配れる
         writeFile(root, "cgroup.subtree_control", "+cpu +memory +pids") catch return error.CgroupControllersUnavailable;
         var self: Cgroups = .{ .allocator = allocator, .root = root };
