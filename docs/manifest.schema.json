@@ -44,6 +44,7 @@
         "memory_pages": { "type": "integer", "minimum": 1 },
         "state_bytes": { "type": "integer", "minimum": 0 },
         "max_topics": { "type": "integer", "minimum": 1 },
+        "max_subscriptions": { "type": "integer", "minimum": 1 },
         "mailbox": { "type": "integer", "minimum": 0 }
       }
     },

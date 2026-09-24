@@ -86,6 +86,25 @@ export fn os_api_publish(
         return toI32(.ERROR_RATE_LIMITED);
     }
 
+    // 異なるトピックの数の上限 (A5)。ワイルドカード権限で topic を無限に作られると、Core の
+    // 購読照合・グラフ・Inspector の負荷が増え続けるので、ノードごとに数を抑える
+    {
+        const max_topics = meta.manifest_parsed.value.limits.max_topics;
+        meta.topics_mutex.lock();
+        defer meta.topics_mutex.unlock();
+        if (!meta.published_topics.contains(topic)) {
+            if (max_topics > 0 and meta.published_topics.count() >= max_topics) {
+                meta.emitLimitAggregated(bus, "max_topics", topic);
+                return toI32(.ERROR_LIMIT_EXCEEDED);
+            }
+            const key = pm.allocator.dupe(u8, topic) catch return toI32(.ERROR_UNKNOWN);
+            meta.published_topics.put(pm.allocator, key, {}) catch {
+                pm.allocator.free(key);
+                return toI32(.ERROR_UNKNOWN);
+            };
+        }
+    }
+
     // セル単位の予算 (同じセルに属する全ノードの合計)。運用者が weave.json / --cell-budget で決める
     if (meta.subscriber) |*sub| if (sub.cell) |cell| {
         const now = std.time.milliTimestamp();
@@ -154,6 +173,13 @@ export fn os_api_subscribe(
         });
         emitSecurity(bus, "acl_denied", meta.node_id, meta.manifest_parsed.value.name, "subscribe", topic);
         return toI32(.ERROR_PERMISSION_DENIED);
+    }
+
+    // 購読数の上限 (A5)。同じパターンの張り直しは冪等なので数えない
+    const max_subs = meta.manifest_parsed.value.limits.max_subscriptions;
+    if (max_subs > 0 and !bus.hasSubscription(meta.node_id, topic) and bus.subscriptionCount(meta.node_id) >= max_subs) {
+        meta.emitLimitAggregated(bus, "max_subscriptions", topic);
+        return toI32(.ERROR_LIMIT_EXCEEDED);
     }
 
     // 購読登録
