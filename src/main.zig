@@ -10,6 +10,7 @@ const ObsEgressNode = @import("builtin/obs.zig").ObsEgressNode;
 const MockObsEgressNode = @import("builtin/mock_obs.zig").MockObsEgressNode;
 const MockTwitchAdapter = @import("builtin/mock_twitch.zig").MockTwitchAdapter;
 const Replayer = @import("builtin/replay.zig").Replayer;
+const CellLink = @import("core/cell_link.zig").CellLink;
 const DashboardNode = @import("builtin/dashboard.zig").DashboardNode;
 const StreamElementsAdapter = @import("builtin/streamelements.zig").StreamElementsAdapter;
 const streamlabs = @import("builtin/streamlabs.zig");
@@ -410,7 +411,34 @@ pub fn main() !void {
     const snapshot_path = try std.fmt.bufPrint(&snap_path_buf, "{s}/snapshot.json", .{config.state_dir});
     var maybe_obs: ?*ObsEgressNode = null;
     var maybe_mock_obs: ?*MockObsEgressNode = null;
-    if (config.mock_obs) {
+    var maybe_link: ?*CellLink = null;
+    var cell_argv: std.ArrayListUnmanaged([]const u8) = .{};
+    defer cell_argv.deinit(allocator);
+    var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var sock_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var port_buf: [8]u8 = undefined;
+    if (config.isolate_egress) {
+        // egress セルを別プロセスで動かす (ADR-010)。強制と意図した状態は Core に残す
+        const exe_dir = try std.fs.selfExeDirPath(&exe_dir_buf);
+        const cell_exe = try std.fs.path.join(allocator, &.{ exe_dir, "weave-cell" });
+        defer allocator.free(cell_exe);
+        const sock = try std.fmt.bufPrint(&sock_buf, "{s}/egress.sock", .{config.state_dir});
+        try cell_argv.appendSlice(allocator, &.{ try allocator.dupe(u8, cell_exe), "egress", "--socket", sock });
+        if (config.mock_obs) {
+            // 出力ファイルは Core の起動時に 1 回だけ空にする (子の再起動では消さない)
+            std.fs.cwd().deleteFile(config.mock_obs_filepath) catch {};
+            (try std.fs.cwd().createFile(config.mock_obs_filepath, .{})).close();
+            try cell_argv.appendSlice(allocator, &.{ "--mock-obs-file", config.mock_obs_filepath });
+        } else {
+            try cell_argv.appendSlice(allocator, &.{ "--obs-host", config.obs_host, "--obs-port", try std.fmt.bufPrint(&port_buf, "{d}", .{config.obs_port}) });
+        }
+        maybe_link = try CellLink.create(allocator, &core.bus, 2, sock, cell_argv.items, config.obs_password);
+        try maybe_link.?.start();
+        snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_link.?.desired);
+        snapshot.?.pm = &core.pm;
+        // 要求としてバスに流し直す → CellLink が記録し、子に (接続後に) 送る
+        if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, true);
+    } else if (config.mock_obs) {
         maybe_mock_obs = try MockObsEgressNode.init(allocator, &core.bus, 2, config.obs_password, config.mock_obs_filepath);
         try maybe_mock_obs.?.connect(config.obs_host, config.obs_port);
         snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_mock_obs.?.desired);
@@ -429,6 +457,10 @@ pub fn main() !void {
     defer {
         if (maybe_mock_obs) |o| o.deinit();
         if (maybe_obs) |o| o.deinit();
+        if (maybe_link) |l| {
+            l.destroy();
+            allocator.free(cell_argv.items[0]);
+        }
     }
 
     if (config.snapshot) {
@@ -453,6 +485,7 @@ pub fn main() !void {
     dashboard.stop();
     if (maybe_mock_obs) |o| o.stop();
     if (maybe_obs) |o| o.stop();
+    if (maybe_link) |l| l.stop();
     if (maybe_mock_twitch) |*t| t.stop();
     if (maybe_replay) |*r| r.stop();
     if (maybe_twitch) |*t| t.stop();
@@ -493,6 +526,7 @@ test {
     _ = @import("transport/ws_proto.zig");
     _ = @import("tests/fuzz_test.zig");
     _ = @import("builtin/replay.zig");
+    _ = @import("core/cell_link.zig");
     _ = @import("tests/audit_match_test.zig");
     _ = @import("transport/node_ws.zig");
     _ = @import("builtin/dashboard.zig");

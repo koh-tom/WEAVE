@@ -32,6 +32,8 @@ pub const Config = struct {
     wasm_heap_size: u32 = 64 * 1024,
     mock_obs_filepath: []const u8 = "mock_obs_received.jsonl",
     mock_obs: bool = false,
+    /// OBS への送信セル (egress) を別の OS プロセス (weave-cell) で動かす (ADR-010 Level 2 段階 1)
+    isolate_egress: bool = false,
     mock_twitch_scenario: ?[]const u8 = null,
     no_twitch: bool = false,
     // 署名検証 (トラストアンカー Stage 1): "off" | "warn" | "strict"
@@ -310,6 +312,8 @@ pub const Config = struct {
                 if (self.streamlabs_url) |u| allocator.free(u);
                 self.streamlabs_url = try allocator.dupe(u8, args[i]);
                 self.streamlabs = true;
+            } else if (std.mem.eql(u8, arg, "--isolate-egress")) {
+                self.isolate_egress = true;
             } else if (std.mem.eql(u8, arg, "--replay")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -503,6 +507,8 @@ fn printHelp() void {
         \\  --streamlabs-url <url>         Socket API endpoint (implies --streamlabs)
         \\  --introspection <l> off|metadata|contents (default: metadata)
         \\  --mock-twitch-once   Play the mock Twitch scenario once (no loop)
+        \\  --isolate-egress     Run the OBS egress cell as a separate process (weave-cell). If it crashes
+        \\                       it is restarted and the intended OBS state is re-sent; Core keeps running
         \\  --replay <file>      Replay the external inputs and ticks recorded by `weave record` with the
         \\                       original timing, so plugins make the same decisions. Replaces Twitch as the input
         \\  --dashboard-dist <d> Directory of the built dashboard (default: dashboard/dist)
