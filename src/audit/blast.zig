@@ -70,6 +70,8 @@ pub fn classify(topic_pattern: []const u8) Importance {
 pub const Node = struct {
     name: []const u8,
     kind: []const u8, // "wasm" | "native" | "remote"
+    /// 所属セル (実行時と同じ名前)。同じセルのノードは executor (実行スレッド) を共有する
+    cell: []const u8 = "core",
     /// このノードが実世界に副作用を及ぼすシンクか (OBS 等)。侵害時の到達先として重要。
     is_sink: bool = false,
     sink_desc: []const u8 = "",
@@ -94,6 +96,7 @@ pub fn builtinNodes(allocator: std.mem.Allocator) ![]Node {
     try list.append(allocator, .{
         .name = "TwitchAdapter",
         .kind = "native",
+        .cell = "core",
         .pub_patterns = twitch_pub,
         .sub_patterns = try allocator.dupe([]const u8, &.{}),
     });
@@ -102,6 +105,7 @@ pub fn builtinNodes(allocator: std.mem.Allocator) ![]Node {
     try list.append(allocator, .{
         .name = "StreamElements",
         .kind = "native",
+        .cell = "ingress",
         .pub_patterns = try allocator.dupe([]const u8, &.{"ext.streamelements.activity.*"}),
         .sub_patterns = try allocator.dupe([]const u8, &.{}),
     });
@@ -110,6 +114,7 @@ pub fn builtinNodes(allocator: std.mem.Allocator) ![]Node {
     try list.append(allocator, .{
         .name = "Streamlabs",
         .kind = "native",
+        .cell = "ingress",
         .pub_patterns = try allocator.dupe([]const u8, &.{"ext.streamlabs.event.*"}),
         .sub_patterns = try allocator.dupe([]const u8, &.{}),
     });
@@ -119,6 +124,7 @@ pub fn builtinNodes(allocator: std.mem.Allocator) ![]Node {
     try list.append(allocator, .{
         .name = "ObsEgress",
         .kind = "native",
+        .cell = "egress",
         .is_sink = true,
         .sink_desc = "OBS を操作 (シーン切替・ソース表示など配信画面に作用)",
         .pub_patterns = obs_pub,
@@ -135,6 +141,7 @@ pub fn builtinNodes(allocator: std.mem.Allocator) ![]Node {
 const ManifestShape = struct {
     name: []const u8,
     version: []const u8 = "",
+    cell: ?[]const u8 = null,
     permissions: struct {
         publish: [][]const u8 = &.{},
         subscribe: [][]const u8 = &.{},
@@ -142,14 +149,27 @@ const ManifestShape = struct {
 };
 
 /// manifest JSON ファイルを読み込み Node を返す。呼び出し側が arena で管理する前提。
+/// セルは実行時 (Core.pluginCell) と同じ規則: manifest の `cell` が運用者の宣言したセル
+/// (declared_cells) にあればそこ、無ければ `plugin.<name>` 専用セル。
 pub fn loadManifestNode(arena: std.mem.Allocator, path: []const u8) !Node {
+    return loadManifestNodeIn(arena, path, &.{});
+}
+
+pub fn loadManifestNodeIn(arena: std.mem.Allocator, path: []const u8, declared_cells: []const []const u8) !Node {
     const content = try std.fs.cwd().readFileAlloc(arena, path, 1024 * 1024);
     const parsed = try std.json.parseFromSliceLeaky(ManifestShape, arena, content, .{
         .ignore_unknown_fields = true,
     });
+    var cell = try std.fmt.allocPrint(arena, "plugin.{s}", .{parsed.name});
+    if (parsed.cell) |requested| {
+        for (declared_cells) |d| {
+            if (std.mem.eql(u8, d, requested)) cell = try arena.dupe(u8, requested);
+        }
+    }
     return Node{
         .name = parsed.name,
         .kind = "wasm",
+        .cell = cell,
         .pub_patterns = parsed.permissions.publish,
         .sub_patterns = parsed.permissions.subscribe,
     };
@@ -277,6 +297,9 @@ pub const FailureReport = struct {
     unaffected: [][]const u8,
     /// 止まる実世界シンク (OBS など)
     sinks_stopped: [][]const u8,
+    /// 同じプラグインセルにいて executor を共有するノード。落ちたノードが命令数上限まで CPU を使う間、
+    /// それらへの配送は待たされる (pub/sub の宣言だけでは見えない影響)
+    cell_mates: [][]const u8 = &.{},
 
     pub const Affected = struct {
         node: []const u8,
@@ -359,8 +382,16 @@ pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name
             try unaffected.append(arena, n.name);
         }
     }
+    var mates = std.ArrayListUnmanaged([]const u8){};
+    const t = findNode(nodes, target_name).?;
+    if (std.mem.startsWith(u8, t.cell, "plugin")) {
+        for (nodes) |n| {
+            if (!std.mem.eql(u8, n.name, target_name) and std.mem.eql(u8, n.cell, t.cell)) try mates.append(arena, n.name);
+        }
+    }
     return .{
         .target = target_name,
+        .cell_mates = try mates.toOwnedSlice(arena),
         .degraded = try degraded.toOwnedSlice(arena),
         .stalled = try stalled.toOwnedSlice(arena),
         .unaffected = try unaffected.toOwnedSlice(arena),
@@ -371,6 +402,10 @@ pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name
 pub fn printFailure(writer: anytype, r: FailureReport) !void {
     try writer.print("\n=== Failure Radius: {s} ===\n", .{r.target});
     try writer.print("(このノードが落ちた場合に、どこまで止まるかの上限。宣言された pub/sub から計算)\n\n", .{});
+    try writer.print("[同じセルで待たされる (executor を共有)]\n", .{});
+    if (r.cell_mates.len == 0) try writer.print("  (なし — 専用セル)\n", .{});
+    for (r.cell_mates) |m| try writer.print("  - {s}  (障害中・再起動中は配送が遅れる)\n", .{m});
+    try writer.print("\n", .{});
     try writer.print("[入力の一部を失う (縮退)]\n", .{});
     if (r.degraded.len == 0) try writer.print("  (なし)\n", .{});
     for (r.degraded) |d| {
@@ -568,4 +603,34 @@ test "computeFailure: only the plugin's own downstream degrades" {
     // emote_wall と emote_overlay はチャットにしか依存しないので沈黙する
     try std.testing.expectEqual(@as(usize, 2), r2.stalled.len);
     try std.testing.expectEqual(@as(usize, 0), r2.sinks_stopped.len);
+}
+
+test "computeFailure: plugins sharing an operator-declared cell wait for each other" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    const nodes = [_]Node{
+        .{ .name = "bot_a", .kind = "wasm", .cell = "plugins.bots", .pub_patterns = try a.dupe([]const u8, &.{"ext.a"}), .sub_patterns = try a.dupe([]const u8, &.{"ext.twitch.chat.message"}) },
+        .{ .name = "bot_b", .kind = "wasm", .cell = "plugins.bots", .pub_patterns = try a.dupe([]const u8, &.{"ext.b"}), .sub_patterns = try a.dupe([]const u8, &.{"ext.twitch.chat.message"}) },
+        .{ .name = "solo", .kind = "wasm", .cell = "plugin.solo", .pub_patterns = try a.dupe([]const u8, &.{"ext.c"}), .sub_patterns = try a.dupe([]const u8, &.{"ext.twitch.chat.message"}) },
+    };
+    const r = try computeFailure(a, &nodes, "bot_a");
+    try std.testing.expectEqual(@as(usize, 1), r.cell_mates.len);
+    try std.testing.expectEqualStrings("bot_b", r.cell_mates[0]);
+    // pub/sub では無関係なので、宣言グラフの上では誰も止まらない
+    try std.testing.expectEqual(@as(usize, 0), r.stalled.len);
+    const solo = try computeFailure(a, &nodes, "solo");
+    try std.testing.expectEqual(@as(usize, 0), solo.cell_mates.len);
+}
+
+test "loadManifestNodeIn: a requested cell counts only if the operator declared it" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "m.json", .data = "{\"name\":\"x\",\"cell\":\"plugins.bots\",\"permissions\":{}}" });
+    const path = try tmp.dir.realpathAlloc(a, "m.json");
+    try std.testing.expectEqualStrings("plugin.x", (try loadManifestNodeIn(a, path, &.{})).cell);
+    try std.testing.expectEqualStrings("plugins.bots", (try loadManifestNodeIn(a, path, &.{"plugins.bots"})).cell);
 }
