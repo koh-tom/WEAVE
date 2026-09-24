@@ -174,7 +174,7 @@ pub const NodeWsTransport = struct {
     /// 接続待ち受けループ (別スレッドで実行)
     pub fn run(self: *NodeWsTransport) !void {
         const address = try std.net.Address.parseIp(self.bind, self.opts.port);
-        self.server = try address.listen(.{ .reuse_address = true });
+        self.server = try ws.listenExclusive(address);
         self.running.store(true, .release);
         self.ready.set();
         log.info("NodeWsTransport: Listening on ws://{s}:{d} (remote nodes, cell 'remote')", .{ self.bind, self.listenPort() });

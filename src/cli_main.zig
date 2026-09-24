@@ -198,7 +198,7 @@ fn check(ok: bool, what: []const u8, hint: []const u8) bool {
 
 fn portFree(port: u16) bool {
     const addr = std.net.Address.parseIp("127.0.0.1", port) catch return false;
-    var srv = addr.listen(.{ .reuse_address = true }) catch return false;
+    var srv = ws.listenExclusive(addr) catch return false;
     srv.deinit();
     return true;
 }

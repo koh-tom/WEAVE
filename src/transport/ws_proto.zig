@@ -278,6 +278,23 @@ pub fn waitReadable(conn: anytype, timeout_ms: i32) !bool {
 }
 
 /// 定数時間の比較 (トークン検証用)
+/// TCP で待ち受ける。SO_REUSEADDR だけを付け、SO_REUSEPORT は付けない。
+/// std.net の `listen(.{ .reuse_address = true })` は Linux で SO_REUSEPORT も付けるため、同じポートで 2 つ目の
+/// WEAVE が黙って起動でき、接続が 2 つのプロセスに振り分けられてしまう (停止時の自己接続が相手に届いて終了が止まる、
+/// 同じユーザーの別プロセスが Inspector への接続を横取りできる)。ここでは 2 つ目は AddressInUse で失敗する。
+pub fn listenExclusive(address: std.net.Address) !std.net.Server {
+    const posix = std.posix;
+    const fd = try posix.socket(address.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, posix.IPPROTO.TCP);
+    errdefer posix.close(fd);
+    try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+    var socklen = address.getOsSockLen();
+    try posix.bind(fd, &address.any, socklen);
+    try posix.listen(fd, 128);
+    var bound = address;
+    try posix.getsockname(fd, &bound.any, &socklen);
+    return .{ .listen_address = bound, .stream = .{ .handle = fd } };
+}
+
 pub fn constantTimeEql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     var diff: u8 = 0;
@@ -440,4 +457,12 @@ test "constant time compare" {
     try std.testing.expect(constantTimeEql("abc", "abc"));
     try std.testing.expect(!constantTimeEql("abc", "abd"));
     try std.testing.expect(!constantTimeEql("abc", "ab"));
+}
+
+test "listenExclusive: a second listener on the same port fails instead of silently sharing it" {
+    const addr = try std.net.Address.parseIp("127.0.0.1", 0);
+    var first = try listenExclusive(addr);
+    defer first.deinit();
+    const port = first.listen_address.getPort();
+    try std.testing.expectError(error.AddressInUse, listenExclusive(try std.net.Address.parseIp("127.0.0.1", port)));
 }

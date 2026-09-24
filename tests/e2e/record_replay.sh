@@ -12,11 +12,11 @@ trap cleanup EXIT INT TERM
 
 # --- 1. 記録 ---
 "$BIN/WEAVE" --mock-twitch demo/scenarios/record.jsonl --mock-twitch-once --mock-obs --mock-obs-file "$DIR/obs1.jsonl" \
-  --dash-port 3071 --node-port 8071 --audit-log "$DIR/audit1.log" --state-dir "$DIR/state1" --dashboard-token rec \
+  --dash-port 3051 --node-port 8051 --audit-log "$DIR/audit1.log" --state-dir "$DIR/state1" --dashboard-token rec \
   wasm-apps/kusa_node.wasm > "$DIR/weave1.log" 2>&1 &
 W=$!
 for _ in $(seq 1 50); do grep -q "Running" "$DIR/weave1.log" 2>/dev/null && break; sleep 0.05; done
-"$BIN/weave" record "$DIR/rec.jsonl" --url ws://127.0.0.1:3071/ws --token rec > "$DIR/record.log" 2>&1 &
+"$BIN/weave" record "$DIR/rec.jsonl" --url ws://127.0.0.1:3051/ws --token rec > "$DIR/record.log" 2>&1 &
 R=$!
 sleep 12.5
 kill -INT "$R" 2>/dev/null || true; kill -INT "$W"; wait "$W" 2>/dev/null || true

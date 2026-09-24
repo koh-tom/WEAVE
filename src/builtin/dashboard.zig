@@ -82,7 +82,7 @@ pub const DashboardNode = struct {
 
     pub fn start(self: *DashboardNode) !void {
         const address = try std.net.Address.parseIp(self.bind, self.opts.port);
-        self.server = try address.listen(.{ .reuse_address = true });
+        self.server = try ws.listenExclusive(address);
         self.running.store(true, .release);
         self.accept_thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
 

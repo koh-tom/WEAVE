@@ -14,7 +14,7 @@ for i in $(seq 1 "$ROUNDS"); do
   for sig in INT TERM; do
     LOG="$DIR/run-$i-$sig.log"
     "$BIN/WEAVE" --mock-twitch demo/scenarios/kusa.jsonl --mock-obs --mock-obs-file "$DIR/obs.jsonl" \
-      --dash-port 3077 --node-port 8077 --audit-log "$DIR/audit.log" --state-dir "$DIR/state" \
+      --dash-port 3047 --node-port 8047 --audit-log "$DIR/audit.log" --state-dir "$DIR/state" \
       wasm-apps/kusa_node.wasm wasm-apps/spam_node.wasm wasm-apps/counter_node.wasm > "$LOG" 2>&1 &
     W=$!
     for _ in $(seq 1 50); do grep -q "Running" "$LOG" 2>/dev/null && break; sleep 0.05; done
