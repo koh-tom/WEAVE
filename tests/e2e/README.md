@@ -11,6 +11,7 @@
 | `core_restart.sh` | Core を kill -9 しても Supervisor が 1 秒以内に戻し、表示状態と自動非表示が続く |
 | `streamerbot_bridge.sh` | Streamer.bot (モック) のチャットがブリッジ経由で kusa に届き、WEAVE から DoAction を呼べる |
 | `howling.sh` | 反響し合う 2 プラグインを因果の深さ 16 で止め、`loop_detected` を記録する。他のプラグインは巻き込まれない |
+| `infinite_loop.sh` | `!freeze` で無限ループに入る loop_node を命令数上限で止め、毒メッセージを DLQ に隔離し、予備インスタンスで数 ms で戻す。同じ時間の草ラッシュで kusa_node は OBS を操作できる |
 | `streamlabs.sh` | Streamlabs Socket API (モック, socket.io 2.x) のアラートが届く。サーバー指定の間隔で ping を送る。不正なトークンは拒否され、トークンはログに出ない |
 | `streamelements.sh` | StreamElements Astro (モック) の channel.activities が届く。PING に PONG を返す。不正な JWT は拒否され、JWT はログに出ない |
 
