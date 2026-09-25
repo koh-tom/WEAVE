@@ -24,65 +24,68 @@
   onMount(() => connect());
 </script>
 
-<main class="flex h-screen bg-white text-slate-800 font-sans overflow-hidden">
-  <aside class="w-72 border-r border-slate-200 flex flex-col bg-slate-50 shrink-0">
-    <div class="p-4 border-b border-slate-200">
-      <h1 class="font-bold text-xl tracking-tight text-[#0A1C56]">WEAVE</h1>
-      <div class="text-xs text-slate-800 mt-1 uppercase font-semibold tracking-wider">Inspector</div>
-    </div>
-
-    <div class="p-4 flex-1 flex flex-col gap-5 overflow-y-auto">
-      <div>
-        <div class="text-[10px] font-bold text-slate-800 uppercase tracking-widest mb-2">接続</div>
-        <div class="flex items-center gap-2 text-sm font-bold">
-          {#if $connection === 'open'}
-            <div class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-            <span class="text-[#0A1C56]">Core に接続中</span>
-          {:else if $connection === 'unauthorized'}
-            <div class="w-2 h-2 bg-red-500 rounded-full"></div>
-            <span class="text-red-700">トークンが必要です (起動ログの URL を開く)</span>
-          {:else}
-            <div class="w-2 h-2 bg-amber-500 rounded-full animate-pulse"></div>
-            <span class="text-amber-700">再接続中...</span>
-          {/if}
+<main class="flex h-screen text-[var(--t-hi)] overflow-hidden">
+  <aside class="w-[268px] border-r border-[var(--line)] flex flex-col bg-[var(--bg)] shrink-0">
+    <div class="px-5 pt-5 pb-4 border-b border-[var(--line)]">
+      <div class="flex items-center gap-2.5">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M3 6h4l2.5 12L12 8l2.5 10L17 6h4" stroke="var(--live)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div>
+          <div class="font-bold text-[17px] tracking-[0.06em] leading-none">WEAVE</div>
+          <div class="text-[10px] text-[var(--t-lo)] mt-1 uppercase tracking-[0.22em]">Inspector</div>
         </div>
       </div>
+    </div>
 
+    <nav class="px-3 pt-3 flex flex-col gap-0.5">
+      {#each TABS as t}
+        <button
+          class="text-left px-3 py-2 rounded-lg text-[13px] font-medium transition-colors cursor-pointer flex items-center gap-2.5 {activeTab === t.id ? 'bg-[var(--surface-2)] text-[var(--t-hi)] ring-1 ring-[var(--line)]' : 'text-[var(--t-mid)] hover:bg-[var(--surface-2)]/60 hover:text-[var(--t-hi)]'}"
+          onclick={() => (activeTab = t.id)}
+        >
+          <span class="w-1 h-4 rounded-full {activeTab === t.id ? 'bg-[var(--live)]' : 'bg-transparent'}"></span>
+          {t.label}
+        </button>
+      {/each}
+    </nav>
+
+    <div class="px-4 pt-5 flex-1 flex flex-col gap-5 overflow-y-auto pb-4">
       <ChatSimulator />
 
       <div class="flex flex-col gap-2">
-        <div class="text-[10px] font-bold text-slate-800 uppercase tracking-widest mb-1">メトリクス</div>
+        <div class="card-t mb-0.5">メトリクス</div>
         <MetricCard label="処理速度" unit="EPS" />
-        <div class="border border-slate-200 bg-white p-3 flex flex-col gap-1 shadow-sm rounded">
-          <div class="text-[10px] font-bold text-slate-800 uppercase">累計イベント数</div>
-          <div class="text-xl font-mono text-[#0A1C56] font-bold">{$metrics.totalEvents.toLocaleString()}</div>
+        <div class="card p-3 flex flex-col gap-1">
+          <div class="text-[10px] font-bold text-[var(--t-lo)] uppercase tracking-wider">累計イベント</div>
+          <div class="text-xl mono tnum text-[var(--t-hi)] font-bold">{$metrics.totalEvents.toLocaleString()}</div>
         </div>
       </div>
 
       <IntrospectionToggle />
+    </div>
 
-      <div>
-        <div class="text-[10px] font-bold text-slate-800 uppercase tracking-widest mb-2">メニュー</div>
-        <nav class="flex flex-col gap-1 text-sm">
-          {#each TABS as t}
-            <button
-              class="text-left px-3 py-2 rounded font-medium transition-all cursor-pointer {activeTab === t.id ? 'bg-[#0A1C56] text-white shadow-sm' : 'text-slate-800 hover:bg-slate-200'}"
-              onclick={() => (activeTab = t.id)}
-            >
-              {t.label}
-            </button>
-          {/each}
-        </nav>
-      </div>
+    <div class="px-5 py-3.5 border-t border-[var(--line)] flex items-center gap-2 text-[12px] font-semibold">
+      {#if $connection === 'open'}
+        <span class="dot pulse text-[var(--live)]" style="background:var(--live)"></span>
+        <span class="text-[var(--t-mid)]">Core に接続中</span>
+      {:else if $connection === 'unauthorized'}
+        <span class="dot" style="background:var(--danger)"></span>
+        <span class="text-[var(--danger)]">トークンが必要です</span>
+      {:else}
+        <span class="dot pulse text-[var(--warn)]" style="background:var(--warn)"></span>
+        <span class="text-[var(--warn)]">再接続中…</span>
+      {/if}
     </div>
   </aside>
 
-  <section class="flex-1 flex flex-col min-w-0 bg-white overflow-hidden">
-    <header class="p-4 border-b border-slate-200 flex justify-between items-center bg-white shrink-0">
-      <h2 class="font-bold text-[#0A1C56]">{TABS.find((t) => t.id === activeTab)?.title}</h2>
+  <section class="flex-1 flex flex-col min-w-0 overflow-hidden">
+    <header class="px-5 h-[52px] border-b border-[var(--line)] flex justify-between items-center shrink-0">
+      <h2 class="font-semibold text-[15px] text-[var(--t-hi)] tracking-tight">{TABS.find((t) => t.id === activeTab)?.title}</h2>
+      <div class="text-[11px] mono text-[var(--t-lo)]">core.weave · localhost</div>
     </header>
 
-    <div class="flex-1 p-4 overflow-auto bg-slate-50/50">
+    <div class="flex-1 p-5 overflow-auto bg-[var(--bg)]">
       {#if activeTab === 'inspector'}
         <div class="grid grid-cols-1 lg:grid-cols-5 gap-4">
           <div class="lg:col-span-2 flex flex-col gap-4">

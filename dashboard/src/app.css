@@ -1,8 +1,116 @@
 @import "tailwindcss";
 
-body {
-  background-color: #FFFFFF;
-  color: #1e293b; /* slate-800 */
-  margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+/* WEAVE Inspector — 配信のコントロールルーム風のデザインシステム
+   汎用の管理画面テンプレートに見えないよう、色・書体・階層を作り込む。 */
+@font-face { font-family: 'Space Grotesk'; font-display: swap; }
+
+:root {
+  /* 面 (奥→手前) */
+  --bg:        #0b0d12;
+  --surface:   #12151d;
+  --surface-2: #171b25;
+  --raised:    #1c212d;
+  --line:      #262c3a;
+  --line-soft: #1d2230;
+
+  /* 文字 */
+  --t-hi:  #eef1f6;
+  --t-mid: #9aa4b6;
+  --t-lo:  #5c6678;
+
+  /* 信号色 (放送のトーン) */
+  --live:   #34e2a4;  /* 安全・稼働・LIVE */
+  --live-d: #0f2a22;
+  --danger: #ff5d73;  /* 侵害・拒否・落ちた */
+  --danger-d:#2c1119;
+  --warn:   #ffb454;  /* 隔離・縮退 */
+  --warn-d: #2a2012;
+  --info:   #5aa9ff;  /* 起動・観測 */
+  --accent: #7c8bff;  /* ブランド */
+
+  --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
+  --sans: 'Space Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
+
+html, body {
+  background: var(--bg);
+  color: var(--t-hi);
+  margin: 0;
+  font-family: var(--sans);
+  font-feature-settings: 'ss01', 'cv01';
+  -webkit-font-smoothing: antialiased;
+}
+
+/* かすかな走査線のテクスチャ (放送機材の質感)。うるさくならない程度に */
+body::before {
+  content: '';
+  position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(1200px 600px at 78% -10%, rgba(124,139,255,0.06), transparent 60%),
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0 1px, transparent 1px 3px);
+}
+#app { position: relative; z-index: 1; }
+
+::selection { background: color-mix(in oklab, var(--accent) 40%, transparent); }
+
+/* スクロールバーも作り込む */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+*::-webkit-scrollbar-thumb:hover { background: #333b4d; }
+
+.font-mono, code, .mono { font-family: var(--mono); }
+
+/* カード */
+.card {
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.card-h {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; border-bottom: 1px solid var(--line-soft);
+}
+.card-t {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--t-mid);
+}
+
+/* 状態バッジ */
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; }
+.badge.live   { color: var(--live);   background: var(--live-d);   border: 1px solid color-mix(in oklab, var(--live) 30%, transparent); }
+.badge.danger { color: var(--danger); background: var(--danger-d); border: 1px solid color-mix(in oklab, var(--danger) 30%, transparent); }
+.badge.warn   { color: var(--warn);   background: var(--warn-d);   border: 1px solid color-mix(in oklab, var(--warn) 30%, transparent); }
+
+.dot { width: 7px; height: 7px; border-radius: 999px; box-shadow: 0 0 0 0 currentColor; }
+.dot.pulse { animation: pulse 1.8s ease-out infinite; }
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 60%, transparent); }
+  70% { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* ボタン */
+.btn {
+  font: inherit; cursor: pointer; border-radius: 9px; padding: 9px 12px; font-weight: 600;
+  border: 1px solid var(--line); background: var(--raised); color: var(--t-hi);
+  transition: border-color .15s, background .15s, transform .05s;
+}
+.btn:hover { border-color: #38415a; background: #222839; }
+.btn:active { transform: translateY(1px); }
+.btn-primary {
+  border-color: color-mix(in oklab, var(--live) 45%, transparent);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--live) 22%, var(--raised)), var(--raised));
+  color: var(--live);
+}
+.btn-primary:hover { background: color-mix(in oklab, var(--live) 16%, var(--raised)); }
+
+input, select {
+  font: inherit; background: var(--bg); color: var(--t-hi);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+}
+input:focus, select:focus { outline: none; border-color: color-mix(in oklab, var(--accent) 55%, var(--line)); }
+
+/* 数字 (メトリクス) は等幅で桁を揃える */
+.tnum { font-variant-numeric: tabular-nums; }

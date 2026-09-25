@@ -19,27 +19,28 @@
   let recent = $derived(latest !== undefined && now - latest.ts < 5000);
 </script>
 
-<div class="border border-slate-200 rounded bg-white shadow-sm flex flex-col min-h-0">
-  <div class="px-3 py-2 border-b border-slate-200 flex items-center justify-between">
-    <div class="text-[10px] font-bold uppercase tracking-widest text-slate-800">強制点 (Host API / 各入口) で止めたもの</div>
-    <div class="text-[10px] text-slate-600">{$securityEvents.length} 件</div>
+<div class="card flex flex-col min-h-0">
+  <div class="card-h">
+    <div class="card-t">強制点 (Host API / 各入口) で止めたもの</div>
+    <div class="text-[10px] text-[var(--t-mid)]">{$securityEvents.length} 件</div>
   </div>
   {#if recent && latest}
-    <div class="mx-3 mt-2 rounded bg-red-600 text-white px-3 py-2 text-xs font-bold flex items-center justify-between">
-      <span>DENIED — {KIND_LABEL[latest.kind] ?? latest.kind}</span>
-      <span class="font-mono">{latest.node} → {latest.detail}</span>
+    <div class="mx-3 mt-3 rounded-lg px-3 py-2.5 text-xs font-bold flex items-center justify-between gap-3"
+         style="background: var(--danger-d); border:1px solid color-mix(in oklab, var(--danger) 40%, transparent); color: var(--danger)">
+      <span class="flex items-center gap-2"><span class="dot pulse" style="background:var(--danger)"></span>DENIED — {KIND_LABEL[latest.kind] ?? latest.kind}</span>
+      <span class="mono text-[var(--t-hi)]">{latest.node} → {latest.detail}</span>
     </div>
   {/if}
-  <div class="overflow-auto p-2 flex flex-col gap-1 max-h-56">
+  <div class="overflow-auto p-2 flex flex-col max-h-56">
     {#each $securityEvents as e, i (e.ts + ':' + i)}
-      <div class="flex gap-2 text-[11px] font-mono items-baseline">
-        <span class="text-slate-500 w-16 shrink-0">{new Date(e.ts).toLocaleTimeString([], { hour12: false })}</span>
-        <span class="text-red-700 font-bold w-36 shrink-0">{KIND_LABEL[e.kind] ?? e.kind}</span>
-        <span class="text-[#0A1C56] truncate">{e.node}</span>
-        <span class="text-slate-700 truncate">{e.detail}</span>
+      <div class="flex gap-2.5 text-[11px] mono items-baseline px-1.5 py-1 rounded hover:bg-[var(--surface-2)]/60">
+        <span class="text-[var(--t-lo)] w-16 shrink-0 tnum">{new Date(e.ts).toLocaleTimeString([], { hour12: false })}</span>
+        <span class="text-[var(--danger)] font-semibold w-40 shrink-0">{KIND_LABEL[e.kind] ?? e.kind}</span>
+        <span class="text-[var(--t-hi)] shrink-0">{e.node}</span>
+        <span class="text-[var(--t-mid)] truncate">{e.detail}</span>
       </div>
     {:else}
-      <div class="text-xs text-slate-500 italic p-1">まだ何も拒否していません</div>
+      <div class="text-xs text-[var(--t-lo)] italic p-2">まだ何も拒否していません</div>
     {/each}
   </div>
 </div>

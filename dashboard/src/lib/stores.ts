@@ -96,13 +96,13 @@ export const obsState = writable<ObsState>({
 export const sessionStart = Date.now();
 
 const STATUS_COLOR: Record<string, string> = {
-  active: '#059669',
-  degraded: '#d97706',
-  starting: '#2563eb',
-  restarting: '#dc2626',
-  quarantined: '#7c3aed',
-  stopped: '#475569',
-  disconnected: '#94a3b8',
+  active: '#34e2a4',
+  degraded: '#ffb454',
+  starting: '#5aa9ff',
+  restarting: '#ff5d73',
+  quarantined: '#c084fc',
+  stopped: '#5c6678',
+  disconnected: '#5c6678',
 };
 
 export function statusColor(s: string): string {
@@ -186,13 +186,13 @@ export const systemGraph = derived([nodes, edges, blast], ([$nodes, $edges, $bla
 
 function nodeStyle(n: NodeView, b: BlastView | null): string {
   const base = 'border-radius: 6px; padding: 8px; font-weight: 700; white-space: pre-line; font-size: 11px;';
-  if (b == null) return `${base} border: 2px solid ${statusColor(n.status)}; background: white;`;
-  if (n.id === b.origin) return `${base} border: 3px solid #ea580c; background: #ffedd5;`;
+  if (b == null) return `${base} border: 2px solid ${statusColor(n.status)}; background: #12151d; color:#eef1f6;`;
+  if (n.id === b.origin) return `${base} border: 3px solid #ffb454; background: #2a2012; color:#eef1f6;`;
   if (b.reach.has(n.id)) {
     const sink = n.cell === 'egress';
-    return `${base} border: 3px solid ${sink ? '#dc2626' : '#f97316'}; background: ${sink ? '#fee2e2' : '#fff7ed'};`;
+    return `${base} border: 3px solid ${sink ? '#ff5d73' : '#ffb454'}; background: ${sink ? '#2c1119' : '#2a2012'}; color:#eef1f6;`;
   }
-  return `${base} border: 2px solid ${statusColor(n.status)}; background: white; opacity: 0.25;`;
+  return `${base} border: 2px solid ${statusColor(n.status)}; background: #12151d; color:#eef1f6; opacity: 0.25;`;
 }
 
 function pushCapped<T>(list: T[], item: T, max: number): T[] {
