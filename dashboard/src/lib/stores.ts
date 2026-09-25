@@ -81,6 +81,7 @@ export const nodes = writable<Record<number, NodeView>>({});
 export const edges = writable<GraphEdge[]>([]);
 export const metrics = writable<SystemMetrics>({ eps: 0, totalEvents: 0 });
 export const epsHistory = writable<number[]>([]);
+export const obsText = writable<Record<string, string>>({});
 export const eventLogs = writable<EventMessage[]>([]);
 export const securityEvents = writable<SecurityEvent[]>([]);
 export const faultTimeline = writable<FaultEntry[]>([]);

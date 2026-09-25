@@ -37,6 +37,19 @@ weave demo before_after        # または ./demo/run_before_after_demo.sh
 | `weave demo signature` | 改ざんしたプラグインが署名検証で起動拒否される |
 | `weave demo kusa` | チャットの盛り上がりを OBS のオーバーレイに反映する基本形 |
 
+## 実用プラグイン (配信者が実際に使うツール)
+
+デモの「ふだんの配信」役は、配信者が実際に使うツールを SDK で書いたもの:
+
+| プラグイン | 何をする | 操作 |
+|---|---|---|
+| `subgoal` | サブスク目標バー「サブ N / 50」を配信画面に出し、新しいサブでお祝い | チャット `!sub` / `!goal 100`、`ext.subgoal.cmd` |
+| `shoutout` | `!so <名前>` で配信者紹介カードを数秒出す (Nightbot/Streamer.bot 系) | チャット `!so <名前>` |
+| `countdown` | OBS 同梱 Countdown スクリプトの振る舞いを移植したタイマー | `ext.countdown.cmd` |
+
+どれも OBS へのテキスト更新 (`SetInputSettings`) と表示切替 (`SetSceneItemEnabled`) を、manifest で宣言した
+権限の中だけで行う。`weave audit <名前>` で「乗っ取られても OBS のこの操作まで」を起動前に確認できる。
+
 ## e2e (CI で毎回まわる、動く証拠)
 
 `tests/e2e/` に、この主張をテストにしたものが並んでいる (`tests/e2e/README.md`)。

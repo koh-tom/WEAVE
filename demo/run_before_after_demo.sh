@@ -69,7 +69,7 @@ c_dim "WEAVE を起動し、同じ攻撃コード (malicious_plugin) を載せ�
 "$BIN/WEAVE" --no-twitch --mock-obs --mock-obs-file "$DIR/obs.jsonl" \
   --dash-port "$PORT_DASH" --node-port "$PORT_NODE" \
   --audit-log "$DIR/audit.log" --state-dir "$DIR/state" --dashboard-token demo \
-  wasm-apps/kusa_node.wasm wasm-apps/malicious_plugin.wasm > "$DIR/weave.log" 2>&1 &
+  wasm-apps/subgoal.wasm wasm-apps/malicious_plugin.wasm > "$DIR/weave.log" 2>&1 &
 WEAVE=$!
 for _ in $(seq 1 80); do grep -q "Running" "$DIR/weave.log" 2>/dev/null && break; sleep 0.05; done
 c_af "  → Inspector: http://127.0.0.1:$PORT_DASH/?token=demo"
@@ -90,7 +90,7 @@ echo
 c_dim "受信役 (C&C) 側のログ — WEAVE 実行中に新たな受信があったか:"
 if [ "$(wc -l < "$DIR/cnc.log")" -le "$CNC_BEFORE" ]; then c_af "    (新たな受信なし。外部へは 1 バイトも出ていない)"; else sed 's/^/    /' "$DIR/cnc.log"; fi
 echo
-c_dim "配信は? kusa_node は同じ WEAVE 上で普通に動き続けている:"
+c_dim "配信は? 実用プラグイン (サブ目標バー) は同じ WEAVE 上で普通に動き続けている:"
 kill -0 "$WEAVE" 2>/dev/null && c_af "    WEAVE プロセス: 生存 (配信は 1 度も止まっていない)"
 echo
 c_af "結果: ファイル読み取りは物理的に不可能 (fopen が無い)、"

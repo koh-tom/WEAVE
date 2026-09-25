@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { obsState, sessionStart } from '../stores';
+  import { obsState, obsText, sessionStart } from '../stores';
 
   // 「配信は止まっていない」ことを見せるための経過時間
   let now = $state(Date.now());
@@ -25,7 +25,10 @@
       shown: $obsState.actual[k] ?? $obsState.requested[k] ?? false,
     }));
   });
-  let grassOn = $derived(items.some((i) => i.key === 'Overlay#1' && i.shown));
+  // オーバーレイ (Overlay#1 = サブのお祝い / Overlay#2 = シャウトアウト) が出ているか、その文言
+  let overlayOn = $derived(items.some((i) => (i.key === 'Overlay#1' || i.key === 'Overlay#2') && i.shown));
+  let overlayText = $derived($obsText['Overlay'] ?? '');
+  let subGoal = $derived($obsText['SubGoal'] ?? '');
 </script>
 
 <div class="panel">
@@ -50,9 +53,14 @@
         配信中 {fmt(now - sessionStart)}
       </div>
       <div class="absolute inset-0 flex items-center justify-center dim text-[12px]">ゲーム画面</div>
-      {#if grassOn}
-        <div class="absolute inset-x-0 bottom-0 py-2 text-center bg-[var(--ok)] text-white text-[20px] font-bold">
-          草 草 草 ｗｗｗ
+      <!-- 配信画面に常に出しておくウィジェット (サブ目標バー) -->
+      {#if subGoal}
+        <div class="absolute top-1.5 right-1.5 px-2 py-0.5 text-[12px] font-bold mono bg-white border border-[var(--line)]">{subGoal}</div>
+      {/if}
+      <!-- サブのお祝い / シャウトアウトのカード (数秒だけ) -->
+      {#if overlayOn}
+        <div class="absolute inset-x-0 bottom-0 py-2 text-center bg-[var(--ok)] text-white text-[19px] font-bold">
+          {overlayText || '🎉'}
         </div>
       {/if}
     </div>
