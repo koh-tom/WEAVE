@@ -13,6 +13,7 @@ import {
   type NodeView,
   nodes,
   obsState,
+  obsText,
 } from './stores';
 
 let socket: WebSocket | null = null;
@@ -210,6 +211,13 @@ function route(msg: EventMessage) {
 
   if (t === 'core.obs.link') {
     return obsState.update((s) => ({ ...s, link: !!p?.connected, reconnects: p?.reconnects ?? s.reconnects }));
+  }
+
+  if (t === 'core.obs.request.SetInputSettings') {
+    const name = p?.inputName;
+    const text = p?.inputSettings?.text;
+    if (name && typeof text === 'string') obsText.update((m) => ({ ...m, [name]: text }));
+    return;
   }
 
   if (t === 'core.obs.request.SetSceneItemEnabled') {

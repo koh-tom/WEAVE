@@ -87,10 +87,13 @@ async function point(id, targetText, boxXY, text, color) {
 await band('WEAVE Inspector — 配信ソフトのプラグインを安全に動かす基盤');
 await wait(3200); await band('');
 
-// ---- ふだんの配信 ----
-await band('まず、ふだんの配信。チャットが盛り上がると画面に草が出る');
-await grass(); await wait(1200); await grass(); await wait(1500);
-await point('air', '配信中', [300, 560], '配信は普通に動いてる（左上が配信時間）', '#1a7f37');
+// ---- ふだんの配信 (実用ツール) ----
+await band('まず、ふだんの配信。配信でよく使うツールがそのまま動く');
+await chat('!sub'); await wait(900); await chat('!sub'); await wait(900);
+await point('bar', 'サブ', [300, 560], 'サブ目標バー：新しいサブで数が増える（実際の配信ウィジェット）', '#1a7f37');
+await wait(3000); await clear();
+await chat('!so StreamerTaro'); await wait(1200);
+await point('so', 'チェック', [300, 560], '「!so 名前」で配信者を紹介するコマンド（Nightbot 等でおなじみ）', '#1a7f37');
 await wait(3200); await clear(); await band('');
 
 // ---- 悪意あるプラグイン ----

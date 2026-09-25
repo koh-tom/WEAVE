@@ -1,0 +1,12 @@
+{
+    "abi_version": 1,
+    "name": "subgoal",
+    "version": "1.0.0",
+    "description": "Subscriber goal bar: shows サブ N/50 on stream and celebrates each new sub",
+    "permissions": {
+        "publish": ["core.obs.request.SetInputSettings", "core.obs.request.SetSceneItemEnabled"],
+        "subscribe": ["ext.twitch.chat.message", "ext.subgoal.cmd", "core.system.tick"],
+        "data_access": ["pii"]
+    },
+    "rate_limit_eps": 30
+}

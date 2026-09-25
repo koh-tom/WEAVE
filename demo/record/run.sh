@@ -31,7 +31,7 @@ trap cleanup EXIT INT TERM
 # --- 2. WEAVE (白 UI) を起動。kusa / malicious / loop ---
 ./zig-out/bin/WEAVE --no-twitch --mock-obs --mock-obs-file "$D/o" \
   --dash-port $DASH --node-port $NODE --audit-log "$D/a.log" --state-dir "$D/st" --dashboard-token $TOK \
-  wasm-apps/kusa_node.wasm wasm-apps/malicious_plugin.wasm wasm-apps/loop_node.wasm \
+  wasm-apps/subgoal.wasm wasm-apps/shoutout.wasm wasm-apps/malicious_plugin.wasm wasm-apps/loop_node.wasm \
   > "$D/w.log" 2>&1 &
 WEAVE=$!
 for _ in $(seq 1 100); do grep -q "Running" "$D/w.log" 2>/dev/null && break; sleep 0.05; done
