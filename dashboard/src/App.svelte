@@ -15,84 +15,53 @@
   type Tab = 'inspector' | 'stream' | 'topology';
   let activeTab: Tab = $state('inspector');
 
-  const TABS: { id: Tab; label: string; title: string }[] = [
-    { id: 'inspector', label: 'Inspector', title: '現実世界 と WEAVE 内部' },
-    { id: 'stream', label: 'イベントストリーム', title: 'リアルタイム・イベントストリーム' },
-    { id: 'topology', label: 'トポロジー', title: 'システムノード・トポロジー' },
+  const TABS: { id: Tab; label: string }[] = [
+    { id: 'inspector', label: '状態' },
+    { id: 'stream', label: 'イベント' },
+    { id: 'topology', label: 'つながり' },
   ];
 
   onMount(() => connect());
 </script>
 
-<main class="flex h-screen text-[var(--t-hi)] overflow-hidden">
-  <aside class="w-[268px] border-r border-[var(--line)] flex flex-col bg-[var(--bg)] shrink-0">
-    <div class="px-5 pt-5 pb-4 border-b border-[var(--line)]">
-      <div class="flex items-center gap-2.5">
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M3 6h4l2.5 12L12 8l2.5 10L17 6h4" stroke="var(--live)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <div>
-          <div class="font-bold text-[17px] tracking-[0.06em] leading-none">WEAVE</div>
-          <div class="text-[10px] text-[var(--t-lo)] mt-1 uppercase tracking-[0.22em]">Inspector</div>
-        </div>
-      </div>
-    </div>
-
-    <nav class="px-3 pt-3 flex flex-col gap-0.5">
+<div class="h-screen flex flex-col overflow-hidden">
+  <header class="flex items-center gap-4 px-3 h-9 border-b border-[var(--line)] shrink-0">
+    <b>WEAVE Inspector</b>
+    <nav class="flex gap-1">
       {#each TABS as t}
-        <button
-          class="text-left px-3 py-2 rounded-lg text-[13px] font-medium transition-colors cursor-pointer flex items-center gap-2.5 {activeTab === t.id ? 'bg-[var(--surface-2)] text-[var(--t-hi)] ring-1 ring-[var(--line)]' : 'text-[var(--t-mid)] hover:bg-[var(--surface-2)]/60 hover:text-[var(--t-hi)]'}"
-          onclick={() => (activeTab = t.id)}
-        >
-          <span class="w-1 h-4 rounded-full {activeTab === t.id ? 'bg-[var(--live)]' : 'bg-transparent'}"></span>
-          {t.label}
-        </button>
+        <button class="btn {activeTab === t.id ? 'on' : ''}" onclick={() => (activeTab = t.id)}>{t.label}</button>
       {/each}
     </nav>
-
-    <div class="px-4 pt-5 flex-1 flex flex-col gap-5 overflow-y-auto pb-4">
-      <ChatSimulator />
-
-      <div class="flex flex-col gap-2">
-        <div class="card-t mb-0.5">メトリクス</div>
-        <MetricCard label="処理速度" unit="EPS" />
-        <div class="card p-3 flex flex-col gap-1">
-          <div class="text-[10px] font-bold text-[var(--t-lo)] uppercase tracking-wider">累計イベント</div>
-          <div class="text-xl mono tnum text-[var(--t-hi)] font-bold">{$metrics.totalEvents.toLocaleString()}</div>
-        </div>
-      </div>
-
-      <IntrospectionToggle />
-    </div>
-
-    <div class="px-5 py-3.5 border-t border-[var(--line)] flex items-center gap-2 text-[12px] font-semibold">
+    <span class="ml-auto text-[12px]">
       {#if $connection === 'open'}
-        <span class="dot pulse text-[var(--live)]" style="background:var(--live)"></span>
-        <span class="text-[var(--t-mid)]">Core に接続中</span>
+        <span class="ok">● Core に接続中</span>
       {:else if $connection === 'unauthorized'}
-        <span class="dot" style="background:var(--danger)"></span>
-        <span class="text-[var(--danger)]">トークンが必要です</span>
+        <span class="bad">● トークンが必要です (URL に ?token=)</span>
       {:else}
-        <span class="dot pulse text-[var(--warn)]" style="background:var(--warn)"></span>
-        <span class="text-[var(--warn)]">再接続中…</span>
+        <span class="warn">● 再接続中…</span>
       {/if}
-    </div>
-  </aside>
+    </span>
+  </header>
 
-  <section class="flex-1 flex flex-col min-w-0 overflow-hidden">
-    <header class="px-5 h-[52px] border-b border-[var(--line)] flex justify-between items-center shrink-0">
-      <h2 class="font-semibold text-[15px] text-[var(--t-hi)] tracking-tight">{TABS.find((t) => t.id === activeTab)?.title}</h2>
-      <div class="text-[11px] mono text-[var(--t-lo)]">core.weave · localhost</div>
-    </header>
+  <div class="flex-1 flex min-h-0">
+    <aside class="w-[240px] shrink-0 border-r border-[var(--line)] p-2 flex flex-col gap-2 overflow-y-auto">
+      <ChatSimulator />
+      <MetricCard label="処理速度" unit="件/秒" />
+      <div class="panel">
+        <div class="panel-h"><span class="panel-t">累計イベント</span></div>
+        <div class="px-2 py-1 mono tnum text-[15px]">{$metrics.totalEvents.toLocaleString()}</div>
+      </div>
+      <IntrospectionToggle />
+    </aside>
 
-    <div class="flex-1 p-5 overflow-auto bg-[var(--bg)]">
+    <main class="flex-1 min-w-0 overflow-auto p-2">
       {#if activeTab === 'inspector'}
-        <div class="grid grid-cols-1 lg:grid-cols-5 gap-4">
-          <div class="lg:col-span-2 flex flex-col gap-4">
+        <div class="grid grid-cols-1 lg:grid-cols-5 gap-2">
+          <div class="lg:col-span-2 flex flex-col gap-2">
             <ObsPreview />
             <FaultTimeline />
           </div>
-          <div class="lg:col-span-3 flex flex-col gap-4">
+          <div class="lg:col-span-3 flex flex-col gap-2">
             <CellMap />
             <SecurityFeed />
           </div>
@@ -102,6 +71,6 @@
       {:else}
         <div class="h-full flex flex-col min-h-0"><NodeGraph /></div>
       {/if}
-    </div>
-  </section>
-</main>
+    </main>
+  </div>
+</div>

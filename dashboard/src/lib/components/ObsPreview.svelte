@@ -28,79 +28,50 @@
   let grassOn = $derived(items.some((i) => i.key === 'Overlay#1' && i.shown));
 </script>
 
-<div class="card flex flex-col">
-  <div class="card-h">
-    <div class="card-t">現実世界 — 配信画面 (OBS)</div>
-    <div class="flex items-center gap-2 text-[10px] font-bold">
+<div class="panel">
+  <div class="panel-h">
+    <span class="panel-t">配信画面 (OBS)</span>
+    <span class="panel-note">
       {#if $obsState.link === true}
-        <span class="badge live">OBS 接続中</span>
+        <span class="ok">OBS に接続中</span>
       {:else if $obsState.link === false}
-        <span class="badge warn">OBS 再接続待ち · 状態は保持</span>
+        <span class="warn">OBS の再起動を待っています (表示したい状態は覚えています)</span>
       {:else}
-        <span class="badge" style="background:var(--surface-2);color:var(--t-lo);border:1px solid var(--line)">mock OBS</span>
+        模擬 OBS
       {/if}
-      {#if $obsState.reconnects > 0}
-        <span class="badge" style="background:var(--surface-2);color:var(--t-mid);border:1px solid var(--line)">再接続 {$obsState.reconnects} 回 · 自動再適用</span>
-      {/if}
-    </div>
+      {#if $obsState.reconnects > 0} · 再接続 {$obsState.reconnects} 回 (そのたびに表示を戻しました){/if}
+    </span>
   </div>
 
-  <!-- 16:9 の仮想プレビュー -->
-  <div class="relative m-3 rounded overflow-hidden bg-[var(--bg)]" style="aspect-ratio: 16 / 9;">
-    <div class="absolute top-2.5 left-2.5 flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded" style="background:var(--danger);color:#0b0d12">
-      <span class="w-1.5 h-1.5 rounded-full bg-[#0b0d12] animate-pulse"></span>
-      ON AIR {fmt(now - sessionStart)}
-    </div>
-    <div class="absolute inset-0 flex items-center justify-center text-[var(--t-mid)] text-xs font-mono">GAME CAPTURE</div>
-    {#if grassOn}
-      <div class="absolute inset-x-0 bottom-0 h-1/3 flex items-end justify-center pb-3 grass">
-        <span class="text-[var(--live)] text-2xl font-black tracking-widest" style="text-shadow:0 0 20px rgba(52,226,164,.6)">ｗｗｗ 草 草 草 ｗｗｗ</span>
+  <div class="p-2">
+    <!-- 16:9 の仮想プレビュー -->
+    <div class="relative border border-[var(--line)] bg-[#e9e9e9]" style="aspect-ratio: 16 / 9;">
+      <div class="absolute top-1.5 left-1.5 px-1.5 text-[11px] font-bold mono bg-[var(--bad)] text-white">
+        配信中 {fmt(now - sessionStart)}
       </div>
-    {/if}
-  </div>
+      <div class="absolute inset-0 flex items-center justify-center dim text-[12px]">ゲーム画面</div>
+      {#if grassOn}
+        <div class="absolute inset-x-0 bottom-0 py-2 text-center bg-[var(--ok)] text-white text-[20px] font-bold">
+          草 草 草 ｗｗｗ
+        </div>
+      {/if}
+    </div>
 
-  <div class="px-3 pb-3">
-    <div class="card-t mb-1">シーンアイテム</div>
-    {#if items.length === 0}
-      <div class="text-xs text-[var(--t-mid)] italic">まだ OBS への要求はありません</div>
-    {:else}
-      <table class="w-full text-[11px] font-mono">
-        <thead>
-          <tr class="text-[var(--t-mid)] text-left">
-            <th class="font-semibold">item</th>
-            <th class="font-semibold">WEAVE の意図</th>
-            <th class="font-semibold">OBS の実状態</th>
+    <table class="tbl mt-2">
+      <thead><tr><th>OBS の部品</th><th>WEAVE が出したい状態</th><th>OBS の実際の状態</th></tr></thead>
+      <tbody>
+        {#each items as i (i.key)}
+          <tr>
+            <td class="mono">{i.key}</td>
+            <td>{i.requested === undefined ? '—' : i.requested ? '表示' : '非表示'}</td>
+            <td class={i.actual === undefined ? 'dim' : i.requested === undefined || i.actual === i.requested ? 'ok' : 'warn'}>
+              {i.actual === undefined ? '(報告なし)' : i.actual ? '表示' : '非表示'}
+            </td>
           </tr>
-        </thead>
-        <tbody>
-          {#each items as i (i.key)}
-            <tr>
-              <td class="text-[var(--t-hi)]">{i.key}</td>
-              <td>{i.requested === undefined ? '—' : i.requested ? 'visible' : 'hidden'}</td>
-              <td class={i.actual === undefined ? 'text-[var(--t-lo)]' : i.actual === i.requested ? 'text-[var(--live)]' : 'text-[var(--warn)]'}>
-                {i.actual === undefined ? '(報告なし)' : i.actual ? 'visible' : 'hidden'}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
+        {:else}
+          <tr><td colspan="3" class="dim">まだ OBS への指示はありません</td></tr>
+        {/each}
+      </tbody>
+    </table>
   </div>
 </div>
-
-<style>
-  .grass {
-    background: linear-gradient(to top, rgba(52, 226, 164, 0.35), transparent);
-    animation: grow 0.35s ease-out;
-  }
-  @keyframes grow {
-    from {
-      transform: translateY(40%);
-      opacity: 0;
-    }
-    to {
-      transform: translateY(0);
-      opacity: 1;
-    }
-  }
-</style>
