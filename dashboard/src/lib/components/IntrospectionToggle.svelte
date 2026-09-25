@@ -3,23 +3,21 @@
   import { send } from '../websocket';
 
   const LEVELS = [
-    { id: 'off', label: 'OFF', hint: 'システムイベントのみ' },
-    { id: 'metadata', label: 'META', hint: 'チャット本文などの中身は隠す (既定)' },
-    { id: 'contents', label: 'FULL', hint: '中身まで表示 (開発時のみ)' },
+    { id: 'off', label: '出さない', hint: 'システムのイベントだけ' },
+    { id: 'metadata', label: '中身を隠す', hint: 'チャット本文などは隠す (既定)' },
+    { id: 'contents', label: '全部', hint: '中身まで表示 (開発時だけ)' },
   ] as const;
 </script>
 
-<div>
-  <div class="card-t mb-1.5">観測レベル</div>
-  <div class="flex rounded border border-[var(--line)] overflow-hidden">
+<div class="panel">
+  <div class="panel-h"><span class="panel-t">イベントの見せ方</span></div>
+  <div class="p-2 flex flex-col gap-1">
     {#each LEVELS as l}
-      <button
-        class="flex-1 py-1 text-[11px] font-bold cursor-pointer transition-colors {$introspection === l.id ? 'bg-[var(--surface-2)] text-[var(--live)] ring-1 ring-inset ring-[color-mix(in_oklab,var(--live)_40%,transparent)]' : 'bg-[var(--surface)] text-[var(--t-lo)] hover:bg-[var(--surface-2)]'}"
-        title={l.hint}
-        onclick={() => send('core.system.introspection', l.id)}
-      >
-        {l.label}
-      </button>
+      <label class="flex items-start gap-1.5 text-[12px] cursor-pointer">
+        <input type="radio" name="introspection" class="mt-0.5" checked={$introspection === l.id}
+          onchange={() => send('core.system.introspection', l.id)} />
+        <span>{l.label}<br /><span class="dim text-[11px]">{l.hint}</span></span>
+      </label>
     {/each}
   </div>
 </div>

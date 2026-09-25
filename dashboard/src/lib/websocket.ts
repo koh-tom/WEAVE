@@ -141,6 +141,14 @@ function sceneKey(d: any): string | null {
   return `${d.sceneName}#${d.sceneItemId}`;
 }
 
+/** 障害の中身を、読んで分かることばにする (元の表記は括弧で残す) */
+function faultText(raw: string): string {
+  if (raw.includes('instruction limit')) return `処理が終わらない (命令数の上限で打ち切り)`;
+  if (raw.includes('unreachable')) return `プラグインがクラッシュ (${raw.replace(/^Exception:\s*/, '')})`;
+  if (raw.includes('out_of_memory') || raw.includes('out of memory')) return 'メモリの上限を超えた';
+  return raw;
+}
+
 function route(msg: EventMessage) {
   const p = msg.payload;
   const t = msg.topic;
@@ -178,7 +186,7 @@ function route(msg: EventMessage) {
       ts: p?.ts ?? msg.ts,
       node: p?.name ?? nodeName(p?.node_id),
       kind: 'recovered',
-      detail: `${p?.from} → active`,
+      detail: p?.from === 'restarting' ? '自動で作り直して復帰' : `${p?.from} から復帰`,
       downtimeMs: p?.down_ms,
     });
   }
@@ -188,7 +196,7 @@ function route(msg: EventMessage) {
       const n = all[p?.node_id];
       return n ? { ...all, [n.id]: { ...n, faults: n.faults + 1 } } : all;
     });
-    return addFault({ ts: msg.ts, node: nodeName(p?.node_id), kind: 'fault', detail: String(p?.exception ?? 'trap') });
+    return addFault({ ts: msg.ts, node: nodeName(p?.node_id), kind: 'fault', detail: faultText(String(p?.exception ?? 'trap')) });
   }
 
   if (t.startsWith('core.security.')) {

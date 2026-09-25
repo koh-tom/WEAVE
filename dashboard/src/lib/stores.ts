@@ -97,17 +97,17 @@ export const obsState = writable<ObsState>({
 export const sessionStart = Date.now();
 
 const STATUS_COLOR: Record<string, string> = {
-  active: '#34e2a4',
-  degraded: '#ffb454',
-  starting: '#5aa9ff',
-  restarting: '#ff5d73',
-  quarantined: '#c084fc',
-  stopped: '#5c6678',
-  disconnected: '#5c6678',
+  active: '#1a7f37',
+  degraded: '#a15c00',
+  starting: '#1a7f37',
+  restarting: '#c62828',
+  quarantined: '#a15c00',
+  stopped: '#c62828',
+  disconnected: '#c62828',
 };
 
 export function statusColor(s: string): string {
-  return STATUS_COLOR[s] ?? '#475569';
+  return STATUS_COLOR[s] ?? '#555555';
 }
 
 /** Inspector でクリックしたノード (影響範囲の起点) */
@@ -171,29 +171,26 @@ export const systemGraph = derived([nodes, edges, blast], ([$nodes, $edges, $bla
   const sfEdges: Edge[] = $edges.map((e) => {
     const hot = $blast?.edgeKeys.has(edgeKey(e)) ?? false;
     const dim = $blast != null && !hot;
-    const color = hot ? '#ea580c' : '#0A1C56';
+    const color = hot ? '#c62828' : '#555555';
     return {
       id: `e-${edgeKey(e)}`,
       source: String(e.source),
       target: String(e.target),
-      animated: !dim,
+      animated: false,
       label: e.topic,
-      style: `stroke: ${color}; stroke-width: ${hot ? 3 : 2}px; opacity: ${dim ? 0.15 : 1};`,
-      labelStyle: `font-size: 9px; fill: ${color}; font-weight: 700; opacity: ${dim ? 0.2 : 1};`,
+      style: `stroke: ${color}; stroke-width: ${hot ? 2 : 1}px; opacity: ${dim ? 0.15 : 1};`,
+      labelStyle: `font-size: 10px; fill: ${color}; opacity: ${dim ? 0.2 : 1};`,
     };
   });
   return { nodes: sfNodes, edges: sfEdges };
 });
 
 function nodeStyle(n: NodeView, b: BlastView | null): string {
-  const base = 'border-radius: 6px; padding: 8px; font-weight: 700; white-space: pre-line; font-size: 11px;';
-  if (b == null) return `${base} border: 2px solid ${statusColor(n.status)}; background: #12151d; color:#eef1f6;`;
-  if (n.id === b.origin) return `${base} border: 3px solid #ffb454; background: #2a2012; color:#eef1f6;`;
-  if (b.reach.has(n.id)) {
-    const sink = n.cell === 'egress';
-    return `${base} border: 3px solid ${sink ? '#ff5d73' : '#ffb454'}; background: ${sink ? '#2c1119' : '#2a2012'}; color:#eef1f6;`;
-  }
-  return `${base} border: 2px solid ${statusColor(n.status)}; background: #12151d; color:#eef1f6; opacity: 0.25;`;
+  const base = 'border-radius: 0; padding: 6px; white-space: pre-line; font-size: 11px; background: #fff; color: #111; box-shadow: none;';
+  if (b == null) return `${base} border: 1px solid ${statusColor(n.status)};`;
+  if (n.id === b.origin) return `${base} border: 2px solid #111; font-weight: 700;`;
+  if (b.reach.has(n.id)) return `${base} border: 2px solid ${n.cell === 'egress' ? '#c62828' : '#a15c00'};`;
+  return `${base} border: 1px solid #ccc; color: #999;`;
 }
 
 function pushCapped<T>(list: T[], item: T, max: number): T[] {

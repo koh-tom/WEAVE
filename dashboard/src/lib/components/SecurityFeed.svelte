@@ -3,12 +3,13 @@
   import { securityEvents } from '../stores';
 
   const KIND_LABEL: Record<string, string> = {
-    acl_denied: '権限外の操作を拒否',
-    rate_limited: '流量上限でドロップ',
-    signature_invalid: '署名検証に失敗',
+    acl_denied: '許可されていない操作を拒否',
+    rate_limited: '送りすぎを止めた',
+    signature_invalid: '署名が合わない',
     auth_failed: '認証に失敗',
-    manifest_rejected: 'manifest を拒否',
-    loop_detected: '無限反響 (ハウリング) を遮断',
+    manifest_rejected: '申告内容を拒否',
+    loop_detected: 'ツール同士の無限反応を止めた',
+    limit_exceeded: '暴走を上限で止めた',
   };
 
   let now = $state(Date.now());
@@ -19,28 +20,31 @@
   let recent = $derived(latest !== undefined && now - latest.ts < 5000);
 </script>
 
-<div class="card flex flex-col min-h-0">
-  <div class="card-h">
-    <div class="card-t">強制点 (Host API / 各入口) で止めたもの</div>
-    <div class="text-[10px] text-[var(--t-mid)]">{$securityEvents.length} 件</div>
+<div class="panel">
+  <div class="panel-h">
+    <span class="panel-t">WEAVE が止めた操作</span>
+    <span class="panel-note">{$securityEvents.length} 件</span>
   </div>
   {#if recent && latest}
-    <div class="mx-3 mt-3 rounded-lg px-3 py-2.5 text-xs font-bold flex items-center justify-between gap-3"
-         style="background: var(--danger-d); border:1px solid color-mix(in oklab, var(--danger) 40%, transparent); color: var(--danger)">
-      <span class="flex items-center gap-2"><span class="dot pulse" style="background:var(--danger)"></span>DENIED — {KIND_LABEL[latest.kind] ?? latest.kind}</span>
-      <span class="mono text-[var(--t-hi)]">{latest.node} → {latest.detail}</span>
+    <div class="px-2 py-1 border-b border-[var(--line)] bad font-bold">
+      いま止めました: {KIND_LABEL[latest.kind] ?? latest.kind} — <span class="mono">{latest.node}</span> → <span class="mono">{latest.detail}</span>
     </div>
   {/if}
-  <div class="overflow-auto p-2 flex flex-col max-h-56">
-    {#each $securityEvents as e, i (e.ts + ':' + i)}
-      <div class="flex gap-2.5 text-[11px] mono items-baseline px-1.5 py-1 rounded hover:bg-[var(--surface-2)]/60">
-        <span class="text-[var(--t-lo)] w-16 shrink-0 tnum">{new Date(e.ts).toLocaleTimeString([], { hour12: false })}</span>
-        <span class="text-[var(--danger)] font-semibold w-40 shrink-0">{KIND_LABEL[e.kind] ?? e.kind}</span>
-        <span class="text-[var(--t-hi)] shrink-0">{e.node}</span>
-        <span class="text-[var(--t-mid)] truncate">{e.detail}</span>
-      </div>
-    {:else}
-      <div class="text-xs text-[var(--t-lo)] italic p-2">まだ何も拒否していません</div>
-    {/each}
+  <div class="max-h-64 overflow-auto">
+    <table class="tbl">
+      <thead><tr><th>時刻</th><th>内容</th><th>プラグイン</th><th>やろうとしたこと</th></tr></thead>
+      <tbody>
+        {#each $securityEvents as e, i (e.ts + ':' + i)}
+          <tr>
+            <td class="mono dim whitespace-nowrap">{new Date(e.ts).toLocaleTimeString([], { hour12: false })}</td>
+            <td class="bad whitespace-nowrap">{KIND_LABEL[e.kind] ?? e.kind}</td>
+            <td class="mono">{e.node}</td>
+            <td class="mono dim">{e.detail}</td>
+          </tr>
+        {:else}
+          <tr><td colspan="4" class="dim">まだ何も止めていません</td></tr>
+        {/each}
+      </tbody>
+    </table>
   </div>
 </div>

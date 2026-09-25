@@ -1,33 +1,30 @@
 <script lang="ts">
   import { faultTimeline } from '../stores';
-
-  let recoveries = $derived($faultTimeline.filter((f) => f.kind === 'recovered' && f.downtimeMs !== undefined));
-  let last = $derived(recoveries[0]?.downtimeMs);
 </script>
 
-<div class="card flex flex-col min-h-0">
-  <div class="card-h">
-    <div class="card-t">障害と自動復帰</div>
-    {#if last !== undefined}
-      <div class="text-[10px] font-bold text-[var(--live)]">直近の復帰: {last} ms</div>
-    {/if}
-  </div>
-  <div class="overflow-auto p-2 flex flex-col gap-1 max-h-56">
-    {#each $faultTimeline as f, i (f.ts + ':' + i)}
-      <div class="flex gap-2 text-[11px] font-mono items-baseline">
-        <span class="text-[var(--t-mid)] w-16 shrink-0">{new Date(f.ts).toLocaleTimeString([], { hour12: false })}</span>
-        {#if f.kind === 'fault'}
-          <span class="text-[var(--danger)] font-bold w-14 shrink-0">障害</span>
-        {:else if f.kind === 'recovered'}
-          <span class="text-[var(--live)] font-bold w-14 shrink-0">復帰</span>
+<div class="panel">
+  <div class="panel-h"><span class="panel-t">障害と自動復帰</span></div>
+  <div class="max-h-56 overflow-auto">
+    <table class="tbl">
+      <thead><tr><th>時刻</th><th>できごと</th><th>プラグイン</th><th>内容</th></tr></thead>
+      <tbody>
+        {#each $faultTimeline as f, i (f.ts + ':' + i)}
+          <tr>
+            <td class="mono dim whitespace-nowrap">{new Date(f.ts).toLocaleTimeString([], { hour12: false })}</td>
+            {#if f.kind === 'fault'}
+              <td class="bad">障害</td>
+            {:else if f.kind === 'recovered'}
+              <td class="ok">復帰</td>
+            {:else}
+              <td class="dim">停止</td>
+            {/if}
+            <td class="mono">{f.node}</td>
+            <td>{f.detail}{#if f.downtimeMs !== undefined}<b class="ok"> (止まっていた時間 {f.downtimeMs} ms)</b>{/if}</td>
+          </tr>
         {:else}
-          <span class="text-[var(--t-mid)] font-bold w-14 shrink-0">停止</span>
-        {/if}
-        <span class="text-[var(--t-hi)] shrink-0">{f.node}</span>
-        <span class="text-[var(--t-mid)] truncate">{f.detail}{f.downtimeMs !== undefined ? ` (停止 ${f.downtimeMs} ms)` : ''}</span>
-      </div>
-    {:else}
-      <div class="text-xs text-[var(--t-mid)] italic p-1">障害はまだ起きていません</div>
-    {/each}
+          <tr><td colspan="4" class="dim">障害はまだ起きていません</td></tr>
+        {/each}
+      </tbody>
+    </table>
   </div>
 </div>

@@ -1,65 +1,57 @@
 <script lang="ts">
-  import { SvelteFlow, Controls, Background, BackgroundVariant } from '@xyflow/svelte';
+  import { SvelteFlow, Controls } from '@xyflow/svelte';
   import { systemGraph, selectedNode, blast, nodes } from '../stores';
-  
-  // Svelte Flow の基本スタイルをインポート
   import '@xyflow/svelte/dist/style.css';
 </script>
 
-<div class="flex-1 w-full h-full card overflow-hidden relative">
+<div class="panel flex-1 w-full h-full flex flex-col min-h-0">
+  <div class="panel-h">
+    <span class="panel-t">プラグインのつながり</span>
+    <span class="panel-note">プラグインをクリックすると、そこが乗っ取られたり落ちたりしたときに影響する範囲を表示</span>
+  </div>
+  <div class="flex-1 relative min-h-0">
     <SvelteFlow
-        nodes={$systemGraph.nodes}
-        edges={$systemGraph.edges}
-        fitView
-        colorMode="light"
-        minZoom={0.2}
-        maxZoom={2}
-        onnodeclick={({ node }) => selectedNode.update((cur) => (cur === Number(node.id) ? null : Number(node.id)))}
-        onpaneclick={() => selectedNode.set(null)}
+      nodes={$systemGraph.nodes}
+      edges={$systemGraph.edges}
+      fitView
+      colorMode="light"
+      minZoom={0.2}
+      maxZoom={2}
+      onnodeclick={({ node }) => selectedNode.update((cur) => (cur === Number(node.id) ? null : Number(node.id)))}
+      onpaneclick={() => selectedNode.set(null)}
     >
-        <Background variant={BackgroundVariant.Dots} patternColor="#cbd5e1" gap={20} size={1} />
-        <Controls />
+      <Controls showLock={false} />
     </SvelteFlow>
-    
+
     {#if $blast}
-        <div class="absolute top-3 left-3 max-w-xs card px-3.5 py-3 text-xs text-[var(--t-hi)]" style="box-shadow:0 8px 30px rgba(0,0,0,.4)" data-testid="blast-panel">
-            <div class="font-bold text-[var(--warn)] flex items-center gap-1.5"><span class="dot" style="background:var(--warn)"></span>影響範囲: {$nodes[$blast.origin]?.name}</div>
-            <div class="mt-1.5 text-[var(--t-mid)]">乗っ取られた / 落ちたときに届きうるノード: <b class="text-[var(--t-hi)] tnum">{$blast.reach.size}</b></div>
-            {#if $blast.reach.size > 0}
-                <div class="mt-0.5 text-[var(--t-mid)]">{[...$blast.reach].map((id) => $nodes[id]?.name ?? id).join(', ')}</div>
-            {/if}
-            <div class="mt-1 font-bold {$blast.sinks.length > 0 ? 'text-[var(--danger)]' : 'text-[var(--live)]'}">
-                実世界 (OBS) への到達: {$blast.sinks.length > 0 ? `あり (${$blast.sinks.join(', ')})` : 'なし'}
-            </div>
-            <div class="mt-2 pt-2 border-t border-[var(--line-soft)] text-[10px] text-[var(--t-lo)]">ノードをもう一度クリック / 背景クリックで解除。起動前の予測は weave audit</div>
+      <div class="absolute top-2 left-2 max-w-xs panel text-[12px]" data-testid="blast-panel">
+        <div class="panel-h"><span class="panel-t">影響範囲: {$nodes[$blast.origin]?.name}</span></div>
+        <div class="p-2 flex flex-col gap-1">
+          <div>届きうるプラグイン: <b class="tnum">{$blast.reach.size}</b>
+            {#if $blast.reach.size > 0}<span class="dim"> ({[...$blast.reach].map((id) => $nodes[id]?.name ?? id).join(', ')})</span>{/if}
+          </div>
+          <div class={$blast.sinks.length > 0 ? 'bad' : 'ok'}>
+            配信画面 (OBS) まで届くか: {$blast.sinks.length > 0 ? `届く (${$blast.sinks.join(', ')})` : '届かない'}
+          </div>
+          <div class="dim text-[11px]">もう一度クリックか背景のクリックで解除。起動前の確認は weave audit</div>
         </div>
-    {:else if $systemGraph.nodes.length > 0}
-        <div class="absolute top-2 left-2 rounded bg-[var(--surface)]/80 px-2 py-1 text-[10px] text-[var(--t-mid)] pointer-events-none">ノードをクリックすると影響範囲を表示</div>
+      </div>
     {/if}
 
     {#if $systemGraph.nodes.length === 0}
-        <div class="absolute inset-0 flex items-center justify-center pointer-events-none text-[var(--t-lo)] italic text-sm">
-            トポロジを待機中…
-        </div>
+      <div class="absolute inset-0 flex items-center justify-center dim">Core からの情報を待っています…</div>
     {/if}
+  </div>
 </div>
 
 <style>
-    /* Svelte Flow のテーマカスタマイズ */
-    :global(.xyflow__node) {
-        border-radius: 10px !important;
-        font-weight: 600 !important;
-        font-size: 12px !important;
-        font-family: var(--mono) !important;
-    }
-    :global(.xyflow) { background: transparent !important; }
-    :global(.xyflow__edge-textbg) { fill: var(--surface) !important; }
-    :global(.xyflow__controls) { box-shadow: none !important; }
-    :global(.xyflow__controls-button) {
-        background: var(--surface-2) !important;
-        border-bottom: 1px solid var(--line) !important;
-        fill: var(--t-mid) !important;
-    }
-    :global(.xyflow__controls-button:hover) { background: var(--raised) !important; }
-    :global(.xyflow__attribution) { display: none !important; }
+  :global(.xyflow) { background: #fff !important; }
+  :global(.xyflow__node) { font-family: var(--mono) !important; font-size: 11px !important; }
+  :global(.xyflow__edge-textbg) { fill: #fff !important; }
+  :global(.xyflow__controls) { border: 1px solid var(--line); }
+  :global(.xyflow__controls-button) { background: #f3f3f3 !important; border-bottom: 1px solid var(--line) !important; }
+  :global(.xyflow__attribution), :global(.svelte-flow__attribution) { display: none !important; }
+  :global(.svelte-flow) { background: #fff !important; }
+  :global(.svelte-flow__edge-textbg) { fill: #fff !important; }
+  :global(.svelte-flow__controls) { border: 1px solid var(--line); box-shadow: none !important; }
 </style>
