@@ -10,11 +10,11 @@
 </script>
 
 <div>
-  <div class="text-[10px] font-bold text-slate-800 uppercase tracking-widest mb-1.5">観測レベル</div>
-  <div class="flex rounded border border-slate-200 overflow-hidden">
+  <div class="card-t mb-1.5">観測レベル</div>
+  <div class="flex rounded border border-[var(--line)] overflow-hidden">
     {#each LEVELS as l}
       <button
-        class="flex-1 py-1 text-[11px] font-bold cursor-pointer transition-colors {$introspection === l.id ? 'bg-[#0A1C56] text-white' : 'bg-white text-slate-700 hover:bg-slate-100'}"
+        class="flex-1 py-1 text-[11px] font-bold cursor-pointer transition-colors {$introspection === l.id ? 'bg-[var(--surface-2)] text-[var(--live)] ring-1 ring-inset ring-[color-mix(in_oklab,var(--live)_40%,transparent)]' : 'bg-[var(--surface)] text-[var(--t-lo)] hover:bg-[var(--surface-2)]'}"
         title={l.hint}
         onclick={() => send('core.system.introspection', l.id)}
       >

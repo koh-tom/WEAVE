@@ -46,3 +46,7 @@ wasm-apps/*.sig
 # AssemblyScript SDK の依存 (bun install で入る)
 sdk/assemblyscript/node_modules/
 sdk/assemblyscript/plugins/
+
+# デモ動画などの生成物 (再生成: ./demo/record/run.sh)
+demo/output/*.mp4
+demo/output/*.webm

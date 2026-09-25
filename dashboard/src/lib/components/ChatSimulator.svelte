@@ -31,51 +31,33 @@
   }
 </script>
 
-<div class="border border-slate-200 bg-white p-3 rounded flex flex-col gap-3 shadow-sm">
+<div class="card p-3 flex flex-col gap-2.5">
   <div class="flex items-center justify-between">
-    <div class="text-[10px] font-bold text-slate-800 uppercase tracking-widest flex items-center gap-1.5">
-      <span>💬</span>
-      <span>ライブデモ・シミュレータ</span>
-    </div>
-    <span class="text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-mono">Twitch Chat</span>
+    <div class="card-t">ライブデモ</div>
+    <span class="text-[9px] badge" style="background:var(--surface-2);color:var(--t-lo);border:1px solid var(--line)">Twitch Chat</span>
   </div>
 
-  <!-- 10連発ボタン -->
   <button
     onclick={triggerGrassBurst}
     disabled={isSendingBurst}
-    class="w-full py-2 px-3 rounded font-bold text-xs bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white transition-all shadow-sm flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+    class="btn btn-primary w-full text-[13px] flex items-center justify-center gap-2 disabled:opacity-50"
   >
     {#if isSendingBurst}
-      <span class="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-      <span>送信中 (10連発)...</span>
+      <span class="w-3 h-3 border-2 border-[var(--live)] border-t-transparent rounded-full animate-spin"></span>
+      <span>送信中 (10連発)…</span>
     {:else}
-      <span>🌱 草ラッシュ (10連発) を送信</span>
+      <span>草ラッシュ (10連発) を送る</span>
     {/if}
   </button>
 
-  <!-- 単発メッセージ送信 -->
-  <div class="flex flex-col gap-1.5 pt-1 border-t border-slate-100">
+  <div class="flex flex-col gap-1.5 pt-2 border-t border-[var(--line-soft)]">
     <div class="flex gap-1.5">
-      <input
-        type="text"
-        bind:value={customUser}
-        placeholder="ユーザー名"
-        class="w-1/3 px-2 py-1 text-xs border border-slate-200 rounded font-mono focus:outline-none focus:border-[#0A1C56]"
-      />
-      <input
-        type="text"
-        bind:value={customMessage}
-        placeholder="メッセージ (例: 草)"
+      <input type="text" bind:value={customUser} placeholder="ユーザー名"
+        class="w-1/3 text-xs mono !py-1.5" />
+      <input type="text" bind:value={customMessage} placeholder="メッセージ"
         onkeydown={(e) => e.key === 'Enter' && handleSingleSend()}
-        class="flex-1 px-2 py-1 text-xs border border-slate-200 rounded focus:outline-none focus:border-[#0A1C56]"
-      />
+        class="flex-1 text-xs !py-1.5" />
     </div>
-    <button
-      onclick={handleSingleSend}
-      class="py-1 px-2 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition-colors cursor-pointer text-center"
-    >
-      メッセージ送信
-    </button>
+    <button onclick={handleSingleSend} class="btn text-xs !py-1.5">メッセージ送信</button>
   </div>
 </div>
