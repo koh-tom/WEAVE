@@ -6,7 +6,7 @@
   import '@xyflow/svelte/dist/style.css';
 </script>
 
-<div class="flex-1 w-full h-full bg-[var(--surface)] border border-[var(--line)] shadow-inner overflow-hidden relative">
+<div class="flex-1 w-full h-full card overflow-hidden relative">
     <SvelteFlow
         nodes={$systemGraph.nodes}
         edges={$systemGraph.edges}
@@ -22,16 +22,16 @@
     </SvelteFlow>
     
     {#if $blast}
-        <div class="absolute top-2 left-2 max-w-xs rounded-md border border-orange-300 bg-orange-50/95 px-3 py-2 text-xs text-[var(--t-hi)] shadow" data-testid="blast-panel">
-            <div class="font-bold text-orange-700">影響範囲: {$nodes[$blast.origin]?.name}</div>
-            <div class="mt-1">乗っ取られた / 落ちたときに届きうるノード: <b>{$blast.reach.size}</b></div>
+        <div class="absolute top-3 left-3 max-w-xs card px-3.5 py-3 text-xs text-[var(--t-hi)]" style="box-shadow:0 8px 30px rgba(0,0,0,.4)" data-testid="blast-panel">
+            <div class="font-bold text-[var(--warn)] flex items-center gap-1.5"><span class="dot" style="background:var(--warn)"></span>影響範囲: {$nodes[$blast.origin]?.name}</div>
+            <div class="mt-1.5 text-[var(--t-mid)]">乗っ取られた / 落ちたときに届きうるノード: <b class="text-[var(--t-hi)] tnum">{$blast.reach.size}</b></div>
             {#if $blast.reach.size > 0}
                 <div class="mt-0.5 text-[var(--t-mid)]">{[...$blast.reach].map((id) => $nodes[id]?.name ?? id).join(', ')}</div>
             {/if}
             <div class="mt-1 font-bold {$blast.sinks.length > 0 ? 'text-[var(--danger)]' : 'text-[var(--live)]'}">
                 実世界 (OBS) への到達: {$blast.sinks.length > 0 ? `あり (${$blast.sinks.join(', ')})` : 'なし'}
             </div>
-            <div class="mt-1 text-[10px] text-[var(--t-mid)]">ノードをもう一度クリック / 背景クリックで解除。起動前の予測は weave audit</div>
+            <div class="mt-2 pt-2 border-t border-[var(--line-soft)] text-[10px] text-[var(--t-lo)]">ノードをもう一度クリック / 背景クリックで解除。起動前の予測は weave audit</div>
         </div>
     {:else if $systemGraph.nodes.length > 0}
         <div class="absolute top-2 left-2 rounded bg-[var(--surface)]/80 px-2 py-1 text-[10px] text-[var(--t-mid)] pointer-events-none">ノードをクリックすると影響範囲を表示</div>
@@ -39,7 +39,7 @@
 
     {#if $systemGraph.nodes.length === 0}
         <div class="absolute inset-0 flex items-center justify-center pointer-events-none text-[var(--t-lo)] italic text-sm">
-            Waiting for topology data...
+            トポロジを待機中…
         </div>
     {/if}
 </div>
@@ -47,20 +47,19 @@
 <style>
     /* Svelte Flow のテーマカスタマイズ */
     :global(.xyflow__node) {
-        border-radius: 4px !important;
-        border: 2px solid var(--accent) !important;
-        background: white !important;
-        color: var(--accent) !important;
-        font-weight: bold !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
         font-size: 12px !important;
+        font-family: var(--mono) !important;
     }
-    :global(.xyflow__edge-path) {
-        stroke: var(--accent) !important;
-        stroke-width: 2px !important;
-    }
+    :global(.xyflow) { background: transparent !important; }
+    :global(.xyflow__edge-textbg) { fill: var(--surface) !important; }
+    :global(.xyflow__controls) { box-shadow: none !important; }
     :global(.xyflow__controls-button) {
-        background: white !important;
-        border-bottom: 1px solid #e2e8f0 !important;
-        fill: var(--accent) !important;
+        background: var(--surface-2) !important;
+        border-bottom: 1px solid var(--line) !important;
+        fill: var(--t-mid) !important;
     }
+    :global(.xyflow__controls-button:hover) { background: var(--raised) !important; }
+    :global(.xyflow__attribution) { display: none !important; }
 </style>
