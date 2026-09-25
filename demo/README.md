@@ -19,11 +19,14 @@ weave demo before_after        # または ./demo/run_before_after_demo.sh
 ## デモ動画
 
 ```bash
-./demo/record/run.sh           # demo/output/weave_demo.mp4 (約 37 秒) を作る
+./demo/record/run.sh           # demo/output/weave_demo.mp4 (約 44 秒) を作る
 ```
 
-Inspector を録画しながら、ふだんの配信 → 悪意プラグインの拒否 → 暴走からの数 ms 復帰、を字幕付きで流す。
+普段の Inspector をそのまま全画面で録画し、その上に「雑な動画編集」風の文字と矢印を後付けする。
+ふだんの配信 → 悪意プラグインの拒否 (「今までの世界ならここでトークンが盗まれてた」と矢印で指す) →
+暴走からの数 ms 復帰 (「配信は止まらない」) を、実際の画面の行を指しながら見せる。
 必要なもの: `bun` (playwright-core を自動で入れる)、`chromium`、`ffmpeg`。静止画は `demo/output/still_*.png`。
+実物の Before (偽トークン窃取→送信→クラッシュ) を実行して見たいときは `weave demo before_after`。
 
 ## その他の台本
 
