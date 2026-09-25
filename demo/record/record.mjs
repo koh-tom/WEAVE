@@ -120,8 +120,58 @@ await wait(4200); await clear(); await band('');
 
 // ---- 締め ----
 await band('侵害されてもここまで / 落ちてもここまで — 起動前に計算でき、実行時に強制され、事後に監査できる');
-await wait(4500); await band('');
+await wait(4200); await band('');
+await wait(700);
+
+// ---- 開発者向け: プラグインはこれだけ ----
+// 本物の Inspector を暗く落として、その上に「作り方」のカードを重ねる。
+// コードは weave init が生成する雛形に沿った内容、コマンドは実在するものだけ。
+await page.evaluate(() => {
+  const dim = document.createElement('div');
+  dim.id = 'devdim';
+  dim.style.cssText = 'position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.62);';
+  const card = document.createElement('div');
+  card.style.cssText = 'position:absolute;left:50%;top:52%;transform:translate(-50%,-50%);width:1040px;background:#fff;border:2.5px solid #111;box-shadow:3px 4px 0 rgba(0,0,0,.25);padding:20px 26px;font-family:system-ui,sans-serif;';
+  const g = '#1a7f37', r = '#c81616', c = '#6b7280';
+  card.innerHTML = `
+    <div style="font-size:22px;font-weight:900;margin-bottom:4px;">プラグインを作るのは、これだけ</div>
+    <div style="font-size:14px;color:${c};margin-bottom:14px;">できることを宣言する json と、ロジックの zig。書いていない操作は、実行時に全部止まる。</div>
+
+    <div style="font-size:13px;font-weight:800;color:${c};margin:2px 0 4px;">① hello.json — できることの宣言</div>
+    <pre style="margin:0 0 14px;padding:12px 14px;background:#f6f7f8;border:1px solid #dcdfe3;font-size:15px;line-height:1.55;font-family:ui-monospace,Menlo,Consolas,monospace;color:#111;overflow:hidden;">{
+  "name": "hello",
+  "permissions": {
+    "subscribe": ["ext.twitch.chat.message"],   <span style="color:${g};font-weight:700;">// 受け取るイベント</span>
+    "publish":   ["ext.hello.greeting"]          <span style="color:${g};font-weight:700;">// 出せるイベント</span> <span style="color:${r};font-weight:800;">← これ以外は全部拒否</span>
+  },
+  "rate_limit_eps": 20                           <span style="color:${g};font-weight:700;">// 1 秒あたりの上限</span>
+}</pre>
+
+    <div style="font-size:13px;font-weight:800;color:${c};margin:2px 0 4px;">② hello.zig — ロジック</div>
+    <pre style="margin:0 0 14px;padding:12px 14px;background:#f6f7f8;border:1px solid #dcdfe3;font-size:15px;line-height:1.55;font-family:ui-monospace,Menlo,Consolas,monospace;color:#111;overflow:hidden;">export fn on_message(topic, payload) void {
+    if (topic != "ext.twitch.chat.message") return;
+    const chat = parseJson(Chat, payload);
+    if (startsWith(chat.message, "!hello"))
+        publish("ext.hello.greeting", .{ .to = chat.user });   <span style="color:${g};font-weight:800;">← 書くのはここだけ</span>
+}</pre>
+
+    <pre style="margin:0;padding:12px 14px;background:#111;color:#eaeaea;font-size:14px;line-height:1.6;font-family:ui-monospace,Menlo,Consolas,monospace;overflow:hidden;">$ weave init hello                          <span style="color:#8a8f98;"># 雛形 (.zig + .json) を作る</span>
+$ zig build                                 <span style="color:#8a8f98;"># → wasm-apps/hello.wasm</span>
+$ weave audit hello                         <span style="color:#8a8f98;"># 乗っ取られたら何ができるかを起動前に確認</span>
+$ weave run --mock-obs wasm-apps/hello.wasm <span style="color:#8a8f98;"># 起動して Inspector で確認</span></pre>
+
+    <div style="font-size:12px;color:${c};margin-top:10px;">※ 上のコードは表示用に簡略化。実体は <b>weave init hello</b> が生成する雛形そのまま。</div>
+  `;
+  dim.appendChild(card);
+  document.body.appendChild(dim);
+});
 await wait(800);
+await band('開発者へ — プラグインは「宣言 (json)」と「ロジック (zig)」だけ。乗っ取られても、宣言の外には 1 バイトも出られない');
+await wait(6500);
+await band('weave init で雛形 → zig build → weave run。今ある Bot も、この安全な枠の中で動かせる');
+await wait(6000);
+await band('');
+await wait(700);
 
 await context.close();
 await browser.close();
