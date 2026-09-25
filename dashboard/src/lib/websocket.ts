@@ -8,6 +8,7 @@ import {
   type EventMessage,
   introspection,
   metrics,
+  epsHistory,
   type NodeStatus,
   type NodeView,
   nodes,
@@ -222,6 +223,8 @@ function route(msg: EventMessage) {
 }
 
 setInterval(() => {
-  metrics.update((m) => ({ ...m, eps: epsCounter }));
+  const v = epsCounter;
+  metrics.update((m) => ({ ...m, eps: v }));
+  epsHistory.update((h) => { const n = [...h, v]; return n.length > 40 ? n.slice(-40) : n; });
   epsCounter = 0;
 }, 1000);
