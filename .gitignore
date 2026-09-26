@@ -50,3 +50,6 @@ sdk/assemblyscript/plugins/
 # デモ動画などの生成物 (再生成: ./demo/record/run.sh)
 demo/output/*.mp4
 demo/output/*.webm
+
+# 本物の OBS 版デモの実行物 (OBS の録画・ログ・状態)
+demo/output/obs/

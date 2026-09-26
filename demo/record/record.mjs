@@ -10,6 +10,7 @@ const W = 1440, H = 810;
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/usr/bin/chromium', args: ['--no-sandbox', '--force-color-profile=srgb'] });
 const context = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: 1, recordVideo: { dir: outDir, size: { width: W, height: H } } });
 const page = await context.newPage();
+console.log('T0', Date.now()); // 録画開始の壁時計 (本物の OBS の録画と並べるときの位置合わせに使う)
 await page.goto(inspectorUrl);
 await page.waitForSelector('.panel', { timeout: 15000 });
 await page.waitForTimeout(1500);

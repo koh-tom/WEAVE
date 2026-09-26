@@ -6,7 +6,8 @@ pub const panic = sdk.panic;
 // shoutout — 配信者コマンド Bot。チャットの "!so <名前>" に反応して、
 // 「▶ <名前> さんをチェック！」を配信画面に数秒だけ出す。Nightbot / Streamer.bot でおなじみの実用機能。
 //
-//   - 表示文言は core.obs.request.SetInputSettings (input "Overlay")
+//   - 表示文言は core.obs.request.SetInputSettings (input "ShoutoutText"。subgoal のお祝い "OverlayText" とは別の入力にして、
+//     両方が同時に出ても文言が混ざらないようにする。シーン "Overlay" と同名の入力は本物の OBS では作れない)
 //   - 表示/非表示は core.obs.request.SetSceneItemEnabled (Overlay#2)
 //   - 時刻は各メッセージのタイムスタンプで数える → 記録の再生でも同じ表示
 //
@@ -34,7 +35,7 @@ fn shout(name: []const u8, now: i64) void {
     const n = name[0..@min(name.len, MAX_NAME)];
     var buf: [128]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "▶ {s} さんをチェック！", .{n}) catch return;
-    _ = sdk.publishJson("core.obs.request.SetInputSettings", .{ .inputName = "Overlay", .inputSettings = .{ .text = text } }, .Reliable) catch {};
+    _ = sdk.publishJson("core.obs.request.SetInputSettings", .{ .inputName = "ShoutoutText", .inputSettings = .{ .text = text } }, .Reliable) catch {};
     _ = sdk.publishJson("core.obs.request.SetSceneItemEnabled", .{ .sceneName = "Overlay", .sceneItemId = 2, .sceneItemEnabled = true }, .Reliable) catch {};
     state.showing = true;
     state.show_until = now + SHOW_MS;

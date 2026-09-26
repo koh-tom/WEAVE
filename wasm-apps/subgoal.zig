@@ -7,7 +7,8 @@ pub const panic = sdk.panic;
 // 新しいサブが来たら数を 1 増やし、OBS のテキストソースを更新し、数秒だけお祝いのオーバーレイを出す。
 //
 //   - テキストの更新は core.obs.request.SetInputSettings (input "SubGoal")
-//   - お祝いの表示/非表示は core.obs.request.SetSceneItemEnabled (Overlay#1) と、その文言 (input "Overlay")
+//   - お祝いの表示/非表示は core.obs.request.SetSceneItemEnabled (Overlay#1) と、その文言 (input "OverlayText")
+//     ※ 本物の OBS ではシーン名と入力名が同じ名前空間なので、シーン "Overlay" と同名の入力は作れない
 //   - 数は sdk.exportState に預ける → trap や Core の再起動をまたいでも数が続く
 //   - 時刻は各メッセージのタイムスタンプで数える → 記録の再生でも同じ表示
 //
@@ -43,8 +44,9 @@ fn pushBar() void {
 
 fn celebrate(user: []const u8, now: i64) void {
     var buf: [160]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "🎉 {s} さんが新規サブ！  ({d}/{d})", .{ user, state.count, state.goal }) catch return;
-    _ = sdk.publishJson("core.obs.request.SetInputSettings", .{ .inputName = "Overlay", .inputSettings = .{ .text = text } }, .Reliable) catch {};
+    // 絵文字は本物の OBS のテキストソース (Noto Sans CJK) で豆腐になるので、CJK フォントにある記号にする
+    const text = std.fmt.bufPrint(&buf, "★ {s} さんが新規サブ！  ({d}/{d})", .{ user, state.count, state.goal }) catch return;
+    _ = sdk.publishJson("core.obs.request.SetInputSettings", .{ .inputName = "OverlayText", .inputSettings = .{ .text = text } }, .Reliable) catch {};
     _ = sdk.publishJson("core.obs.request.SetSceneItemEnabled", .{ .sceneName = "Overlay", .sceneItemId = 1, .sceneItemEnabled = true }, .Reliable) catch {};
     state.showing = true;
     state.show_until = now + OVERLAY_MS;
