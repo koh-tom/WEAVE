@@ -26,8 +26,11 @@
     }));
   });
   // オーバーレイ (Overlay#1 = サブのお祝い / Overlay#2 = シャウトアウト) が出ているか、その文言
-  let overlayOn = $derived(items.some((i) => (i.key === 'Overlay#1' || i.key === 'Overlay#2') && i.shown));
-  let overlayText = $derived($obsText['Overlay'] ?? '');
+  // Overlay#1 = お祝い (文言は入力 OverlayText) / Overlay#2 = シャウトアウト (入力 ShoutoutText)。両方出ていれば新しい #2 を優先
+  let card1On = $derived(items.some((i) => i.key === 'Overlay#1' && i.shown));
+  let card2On = $derived(items.some((i) => i.key === 'Overlay#2' && i.shown));
+  let overlayOn = $derived(card1On || card2On);
+  let overlayText = $derived(card2On ? ($obsText['ShoutoutText'] ?? '') : ($obsText['OverlayText'] ?? ''));
   let subGoal = $derived($obsText['SubGoal'] ?? '');
 </script>
 

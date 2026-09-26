@@ -54,3 +54,20 @@ weave demo before_after        # または ./demo/run_before_after_demo.sh
 
 `tests/e2e/` に、この主張をテストにしたものが並んでいる (`tests/e2e/README.md`)。
 たとえば `plugin_isolation.sh` (別プロセス隔離)、`infinite_loop.sh` (暴走の遮断と復帰)、`egress_isolation.sh` (OBS 送信の別プロセス化)。
+
+## 本物の OBS で見せる (画面分割 / 動画)
+
+`--mock-obs` の代わりに、本物の OBS Studio (obs-websocket v5) に繋いで、プラグインの出力が**実際の配信画面**に出るところを見せる版。
+
+```bash
+./demo/real_obs/run.sh            # ライブ: OBS を専用シーンで起動 → WEAVE を実接続。左 OBS / 右 Inspector の画面分割
+./demo/real_obs/run.sh --record   # 同上 + OBS が自分の出力を demo/output/obs/ に録画
+./demo/real_obs/record.sh         # 動画版: 左 OBS の実出力 / 右 Inspector(注釈つき) を開始時刻で揃えて横に並べる
+                                  #   → demo/output/weave_demo_real_obs.mp4 (約 63 秒, 2560x720)
+```
+
+- 専用のシーンコレクション/プロファイル **WEAVE-demo** を `demo/real_obs/make_obs_collection.py` が作る (無ければ `run.sh` が自動で作る)。
+  既存のシーンは触らない。scene `Overlay` の item 1 = お祝い (subgoal / kusa_node)、item 2 = シャウトアウト (shoutout)、
+  入力 `SubGoal` / `OverlayText` / `ShoutoutText` = プラグインが `SetInputSettings` で書くテキスト。
+- obs-websocket のパスワードは OBS の設定ファイルから読む (表示・保存はしない)。OBS の既定コレクション/プロファイルは終了時に元に戻す。
+- Inspector の「OBS の実際の状態」は、本物の OBS からの `SceneItemEnableStateChanged` で埋まる (mock は自前でイベントを流す)。

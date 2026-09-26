@@ -274,9 +274,12 @@ pub const ObsEgressNode = struct {
             if (challenge_v != .string or salt_v != .string) return error.InvalidHello;
             const password = self.password orelse return error.PasswordRequired;
             const secret = authString(password, salt_v.string, challenge_v.string);
-            msg = try std.fmt.bufPrint(&buf, "{{\"op\":1,\"d\":{{\"rpcVersion\":1,\"authentication\":\"{s}\",\"eventSubscriptions\":33}}}}", .{secret});
+            // eventSubscriptions = 173 = General(1) | Scenes(4) | Inputs(8) | Filters(32) | SceneItems(128)。
+            // SceneItems が無いと本物の OBS は SceneItemEnableStateChanged を送ってこず、Inspector の
+            // 「OBS の実際の状態」が (報告なし) のままになる (mock はイベントを自前で流すので気づかなかった)
+            msg = try std.fmt.bufPrint(&buf, "{{\"op\":1,\"d\":{{\"rpcVersion\":1,\"authentication\":\"{s}\",\"eventSubscriptions\":173}}}}", .{secret});
         } else {
-            msg = "{\"op\":1,\"d\":{\"rpcVersion\":1,\"eventSubscriptions\":33}}";
+            msg = "{\"op\":1,\"d\":{\"rpcVersion\":1,\"eventSubscriptions\":173}}";
         }
         try self.sendRaw(msg);
     }
