@@ -62,7 +62,7 @@ weave demo before_after        # または ./demo/run_before_after_demo.sh
 ```bash
 ./demo/real_obs/run.sh            # ライブ: OBS を専用シーンで起動 → WEAVE を実接続。左 OBS / 右 Inspector の画面分割
 ./demo/real_obs/run.sh --record   # 同上 + OBS が自分の出力を demo/output/obs/ に録画
-./demo/real_obs/record.sh         # 動画版: 左 OBS の実出力 / 右 Inspector(注釈つき) を開始時刻で揃えて横に並べる
+./demo/real_obs/record.sh         # 動画版: 左 OBS のアプリ画面そのもの (wf-recorder) / 右 Inspector(注釈つき) を横に並べる
                                   #   → demo/output/weave_demo_real_obs.mp4 (約 63 秒, 2560x720)
 ```
 
