@@ -10,13 +10,16 @@ const W = 1440, H = 810;
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/usr/bin/chromium', args: ['--no-sandbox', '--force-color-profile=srgb'] });
 const context = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: 1, recordVideo: { dir: outDir, size: { width: W, height: H } } });
 const page = await context.newPage();
-console.log('T0', Date.now()); // 録画開始の壁時計 (本物の OBS の録画と並べるときの位置合わせに使う)
+const T0 = Date.now();
+console.log('T0', T0); // 録画開始の壁時計 (本物の OBS の録画と並べるときの位置合わせに使う)
+// 分割版 (demo/real_obs/record.sh): 字幕帯はページに描かず時刻つきで出力し、合成時に左右をまたぐ全幅で焼く。注釈は 1.5 倍
+const SPLIT = process.env.WEAVE_REC_SPLIT === '1';
 await page.goto(inspectorUrl);
 await page.waitForSelector('.panel', { timeout: 15000 });
 await page.waitForTimeout(1500);
 
 // 注釈レイヤー (画面の上に重ねる。手書き風の文字箱と矢印)
-await page.evaluate(() => {
+await page.evaluate((S) => {
   const NS = 'http://www.w3.org/2000/svg';
   const layer = document.createElement('div');
   layer.id = 'anno';
@@ -41,7 +44,7 @@ await page.evaluate(() => {
   window.__note = (id, x, y, text, color, rot) => {
     let n = document.getElementById(id);
     if (!n) { n = document.createElement('div'); n.id = id; n.className = 'note'; document.getElementById('anno').appendChild(n); }
-    n.style.cssText = `position:absolute;left:${x}px;top:${y}px;max-width:340px;transform:rotate(${rot||0}deg);background:#fffce8;border:2.5px solid ${color};color:#111;font-weight:800;font-size:16px;line-height:1.35;padding:7px 11px;box-shadow:2px 3px 0 rgba(0,0,0,.15);`;
+    n.style.cssText = `position:absolute;left:${x}px;top:${y}px;max-width:${Math.round(340*S)}px;transform:rotate(${rot||0}deg);background:#fffce8;border:${2.5*S}px solid ${color};color:#111;font-weight:800;font-size:${Math.round(16*S)}px;line-height:1.35;padding:${Math.round(7*S)}px ${Math.round(11*S)}px;box-shadow:2px 3px 0 rgba(0,0,0,.15);`;
     n.textContent = text;
   };
   // 矢印: 箱の点(fx,fy)からターゲット(tx,ty)へ、少し曲げて引く
@@ -61,9 +64,11 @@ await page.evaluate(() => {
   band.style.cssText = 'position:absolute;left:0;right:0;bottom:0;padding:12px 20px;background:#111;color:#fff;font-weight:800;font-size:20px;opacity:0;transition:opacity .3s;';
   layer.appendChild(band);
   window.__band = (t) => { band.textContent = t || ''; band.style.opacity = t ? '1' : '0'; };
-});
+}, SPLIT ? 1.5 : 1);
 
-const band = (t) => page.evaluate((t) => window.__band(t), t);
+const band = (t) => SPLIT
+  ? (console.log('BAND', Date.now() - T0, t || ''), Promise.resolve())
+  : page.evaluate((t) => window.__band(t), t);
 const clear = () => page.evaluate(() => window.__clear());
 const note = (id, x, y, text, color, rot) => page.evaluate((a) => window.__note(...a), [id, x, y, text, color, rot || 0]);
 const rect = (s) => page.evaluate((s) => window.__rect(s), s);
