@@ -89,26 +89,48 @@ kill -TERM "$RUN"; wait "$RUN" 2>/dev/null || true; RUN=0
 [ -s "$SCREEN" ] || { echo "画面録画がありません ($SCREEN)"; tail -5 "$OUT/wf.log"; exit 1; }
 
 # --- 6. 位置合わせして横に並べる (左 OBS 画面 1280x720 / 右 Inspector 1280x720) ---
-OFF=$(python3 -c "print(max(0.0, ($T0_MS - $WF_MS)/1000))")
-echo "画面録画開始 → Inspector 録画開始: ${OFF}s ずれ (画面録画側をその分切る)"
 WEBM=$(ls -t "$VID"/*.webm | head -1)
+# playwright の動画は T0 より少し遅れて始まる。遅れ = (T0 から終了までのスクリプト時間) - (動画の長さ)
+# 字幕/ラベル/切り替えの時刻はこの遅れを引き、画面録画側はこの遅れも含めて切る
+WEBM_S=$(ffprobe -v error -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 "$WEBM" | sort -g | tail -1)
 
 # 字幕: record.mjs が出す "BAND <T0 からの ms> <文言>" から ASS を作り、下に足した黒帯に左右をまたぐ全幅で焼く
+#       "MARK <ms> BEFORE|AFTER|''" → 左上のラベル、"MARK <ms> DEV" → 最後の開発者カードの開始 (ここから OBS を外す)
 CAP="$WORK/cap.ass"
-python3 - "$WORK/rec.log" "$CAP" <<'PY2'
+read -r DEV_S LAG_S CROP < <(python3 - "$WORK/rec.log" "$CAP" "$WEBM_S" <<'PY2'
 import sys, re
-log, out = sys.argv[1], sys.argv[2]
-ev = []
+log, out, webm_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+band, mark, dev, box, end_ms = [], [], None, None, None
 for line in open(log, encoding="utf-8"):
-    m = re.match(r"^BAND (\d+) ?(.*)$", line.rstrip("\n"))
-    if m: ev.append((int(m.group(1)), m.group(2).strip()))
+    line = line.rstrip("\n")
+    m = re.match(r"^DEVBOX (\d+) (\d+) (\d+) (\d+)$", line)
+    if m: box = tuple(int(v) for v in m.groups()); continue
+    m = re.match(r"^END (\d+)$", line)
+    if m: end_ms = int(m.group(1)); continue
+    m = re.match(r"^BAND (\d+) ?(.*)$", line)
+    if m: band.append((int(m.group(1)), m.group(2).strip())); continue
+    m = re.match(r"^MARK (\d+) ?(.*)$", line)
+    if m:
+        t, lab = int(m.group(1)), m.group(2).strip()
+        if lab == "DEV": dev = t
+        else: mark.append((t, lab))
+lag = max(0, end_ms - int(webm_s * 1000)) if end_ms else 0
+band = [(max(0, t - lag), x) for t, x in band]
+mark = [(max(0, t - lag), x) for t, x in mark]
+if dev is not None: dev = max(0, dev - lag)
 def ts(ms):
     cs = ms // 10; return f"{cs//360000}:{cs//6000%60:02d}:{cs//100%60:02d}.{cs%100:02d}"
 rows = []
-for i, (t, txt) in enumerate(ev):
+for i, (t, txt) in enumerate(band):
     if not txt: continue
-    end = ev[i+1][0] if i + 1 < len(ev) else t + 5000
+    end = band[i+1][0] if i + 1 < len(band) else t + 5000
     rows.append(f"Dialogue: 0,{ts(t)},{ts(end)},Band,,0,0,0,,{{\\an5\\pos(1280,785)}}{txt}")
+TAG = {"BEFORE": ("Before", "BEFORE  今までの世界"), "AFTER": ("After", "AFTER  WEAVE")}
+for i, (t, lab) in enumerate(mark):
+    if lab not in TAG: continue
+    end = mark[i+1][0] if i + 1 < len(mark) else t + 4000
+    style, txt = TAG[lab]
+    rows.append(f"Dialogue: 1,{ts(t)},{ts(end)},{style},,0,0,0,,{{\\an7\\pos(36,30)}}{txt}")
 head = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 2560
@@ -118,16 +140,29 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Band,Noto Sans CJK JP,46,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,60,60,0,1
+Style: Before,Noto Sans CJK JP,62,&H00FFFFFF,&H00FFFFFF,&H001414D0,&H001414D0,-1,0,0,0,100,100,2,0,3,16,0,7,0,0,0,1
+Style: After,Noto Sans CJK JP,62,&H00FFFFFF,&H00FFFFFF,&H00377F1A,&H00377F1A,-1,0,0,0,100,100,2,0,3,16,0,7,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 open(out, "w", encoding="utf-8").write(head + "\n".join(rows) + "\n")
-print(f"字幕 {len(rows)} 本")
+M = 12   # カードの周りの余白 (px)
+if box:
+    x, y, w, h = box; x0, y0 = max(0, x - M), max(0, y - M)
+    crop = f"{min(1440 - x0, w + 2*M)}:{min(810 - y0, h + 2*M)}:{x0}:{y0}"
+else:
+    crop = "1078:746:181:47"
+print(f"{dev/1000:.3f}" if dev is not None else "99999", f"{lag/1000:.3f}", crop)
+print(f"字幕 {len(band)} / ラベル {len(mark)} / 開発者カード開始 {dev} ms / 動画の遅れ {lag} ms / カード {crop}", file=sys.stderr)
 PY2
+)
+OFF=$(python3 -c "print(max(0.0, ($T0_MS - $WF_MS)/1000 + $LAG_S))")
+echo "画面録画側を ${OFF}s 切って揃える (Inspector 動画の遅れ ${LAG_S}s を含む)"
+# 最後の開発者カード: OBS は外し、Inspector のカード部分 (record.mjs が測った位置) を切り出して中央に大きく
 # shortest=1: 短い方 (Inspector 側) が終わったら終える
 ffmpeg -y -i "$SCREEN" -i "$WEBM" -filter_complex \
-  "[0:v]trim=start=${OFF},setpts=PTS-STARTPTS,fps=30,scale=1280:720:flags=lanczos,setsar=1[l];[1:v]fps=30,scale=1280:720,setsar=1[r];[l][r]hstack=inputs=2:shortest=1,pad=2560:850:0:0:black,subtitles=filename=${CAP},format=yuv420p" \
+  "[0:v]trim=start=${OFF},setpts=PTS-STARTPTS,fps=30,scale=1280:720:flags=lanczos,setsar=1[l];[1:v]fps=30,split=2[ra][rb];[ra]scale=1280:720,setsar=1[r];[rb]crop=${CROP},scale=-2:720:flags=lanczos,setsar=1,pad=2560:720:(ow-iw)/2:0:color=0x1e1e1e[d];[l][r]hstack=inputs=2:shortest=1[s];[s][d]overlay=0:0:enable='gte(t,${DEV_S})':shortest=1,pad=2560:850:0:0:black,subtitles=filename=${CAP},format=yuv420p" \
   -r 30 -c:v libx264 -crf 20 -movflags +faststart demo/output/weave_demo_real_obs.mp4 >/dev/null 2>&1 \
   || { echo "ffmpeg に失敗"; exit 1; }
 echo "できました: demo/output/weave_demo_real_obs.mp4 ($(du -h demo/output/weave_demo_real_obs.mp4 | cut -f1))"

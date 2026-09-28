@@ -70,6 +70,8 @@ const band = (t) => SPLIT
   ? (console.log('BAND', Date.now() - T0, t || ''), Promise.resolve())
   : page.evaluate((t) => window.__band(t), t);
 const clear = () => page.evaluate(() => window.__clear());
+// 分割版: 左上の BEFORE / AFTER ラベル ('' で消す) と、最後の開発者カードの開始時刻を出力 (合成側で使う)
+const mark = (label) => { if (SPLIT) console.log('MARK', Date.now() - T0, label); };
 const note = (id, x, y, text, color, rot) => page.evaluate((a) => window.__note(...a), [id, x, y, text, color, rot || 0]);
 const rect = (s) => page.evaluate((s) => window.__rect(s), s);
 const arrow = (id, fx, fy, tx, ty, color) => page.evaluate((a) => window.__arrow(...a), [id, fx, fy, tx, ty, color]);
@@ -107,22 +109,26 @@ await band('ここで、悪意あるプラグインが 1 個混じっていた�
 await wait(2600);
 for (let i=0;i<6;i++){ await chat('go'); await wait(350); }
 await wait(600);
-await point('den', 'core.system.shutdown', [300, 590], '今までの世界なら、ここでトークンを盗んで外部送信できてた', '#e01414');
+mark('BEFORE');
+await point('den', 'core.system.shutdown', [300, SPLIT ? 545 : 590], '今までの世界なら、ここでトークンを盗んで外部送信できてた', '#e01414');
 await wait(3600);
-await note('den2', 300, 660, 'WEAVE は「宣言した権限」の外を全部拒否 → 1 バイトも出られない', '#1a7f37', -1);
-await wait(3800); await clear(); await band('');
+mark('AFTER');
+await note('den2', 300, SPLIT ? 690 : 660, 'WEAVE は「宣言した権限」の外を全部拒否 → 1 バイトも出られない', '#1a7f37', -1);
+await wait(3800); await clear(); mark(''); await band('');
 
 // ---- 暴走 ----
 await band('プラグインが暴走 (無限ループ) したら？');
 await wait(2200);
 await chat('!freeze'); await wait(1400); await chat('また草');
 await wait(900);
+mark('BEFORE');
 await point('flt', '処理が終わらない', [300, 580], '今までの世界なら、配信ソフトごとフリーズ', '#e01414');
 await wait(3200); await clear();
+mark('AFTER');
 await point('rec', '止まっていた時間', [300, 580], 'WEAVE は、そのプラグインだけ止めて数 ms で復帰。配信は止まらない', '#1a7f37');
 await wait(1200);
-await point('air2', '配信中', [300, 660], '時計は止まっていない（配信は 1 度も途切れていない）', '#1a7f37');
-await wait(4200); await clear(); await band('');
+await point('air2', '配信中', [300, SPLIT ? 695 : 660], '時計は止まっていない（配信は 1 度も途切れていない）', '#1a7f37');
+await wait(4200); await clear(); mark(''); await band('');
 
 // ---- 締め ----
 await band('侵害されてもここまで / 落ちてもここまで — 起動前に計算でき、実行時に強制され、事後に監査できる');
@@ -132,7 +138,8 @@ await wait(700);
 // ---- 開発者向け: プラグインはこれだけ ----
 // 本物の Inspector を暗く落として、その上に「作り方」のカードを重ねる。
 // コードは weave init が生成する雛形に沿った内容、コマンドは実在するものだけ。
-await page.evaluate(() => {
+mark('DEV');
+const devBox = await page.evaluate(() => {
   const dim = document.createElement('div');
   dim.id = 'devdim';
   dim.style.cssText = 'position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.62);';
@@ -170,7 +177,10 @@ $ weave run --mock-obs wasm-apps/hello.wasm <span style="color:#8a8f98;"># 起�
   `;
   dim.appendChild(card);
   document.body.appendChild(dim);
+  const cr = card.getBoundingClientRect();
+  return { x: Math.round(cr.left), y: Math.round(cr.top), w: Math.round(cr.width), h: Math.round(cr.height) };
 });
+if (SPLIT) console.log('DEVBOX', devBox.x, devBox.y, devBox.w, devBox.h);
 await wait(800);
 await band('開発者へ — プラグインは「宣言 (json)」と「ロジック (zig)」だけ。乗っ取られても、宣言の外には 1 バイトも出られない');
 await wait(6500);
@@ -179,6 +189,7 @@ await wait(6000);
 await band('');
 await wait(700);
 
+if (SPLIT) console.log('END', Date.now() - T0);
 await context.close();
 await browser.close();
 console.log('done');
