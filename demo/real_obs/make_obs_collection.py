@@ -5,6 +5,7 @@
 #     scene "Overlay"  item 1 = お祝いカード (subgoal / kusa_node が toggle)   item 2 = シャウトアウトカード (shoutout)
 #     input "SubGoal"      … subgoal が SetInputSettings で「サブ N / 50」を書く (常時表示)
 #     input "OverlayText"  … subgoal のお祝い文言   input "ShoutoutText" … shoutout の文言 (別入力: 同時に出ても混ざらない)
+#     input "Scoreboard"   … scoreboard のスコア表示 (demo/run_health_demo.sh の起動忘れの再現)
 #   ※ OBS ではシーン名と入力名が同じ名前空間なので、scene "Overlay" と同名の入力は作れない (だから OverlayText)
 #
 #   既存の scene collection (ユーザーのもの) は触らない。~/.config/obs-studio/basic/{scenes,profiles}/ に新規作成するだけ。
@@ -88,17 +89,19 @@ def make_collection():
     subgoal = text("SubGoal", "サブ  8 / 50", 56)
     otext = text("OverlayText", "", 64)
     stext = text("ShoutoutText", "", 64)
+    score = text("Scoreboard", "", 60)            # scoreboard が「A 3 - 2 B」を書く (競技のスコア表示)
     c1bg = color("Card1Bg", "1a7f37", 1920, 120)   # お祝い: 緑バー (下)
     c2bg = color("Card2Bg", "1f5fbf", 1200, 120)   # シャウトアウト: 青カード (上。右上の SubGoal に被らない幅/高さ)
     card1 = scene("Card1", [item(1, c1bg, 960, 1010), item(2, otext, 960, 1010)])
     card2 = scene("Card2", [item(1, c2bg, 960, 240), item(2, stext, 960, 240)])
     overlay = scene("Overlay", [item(5, bg, 0, 0, align=5), item(4, label, 960, 540), item(3, subgoal, 1880, 30, align=6),
+                                item(6, score, 960, 70),
                                 item(1, card1, 0, 0, align=5, visible=False), item(2, card2, 0, 0, align=5, visible=False)])
     out = copy.deepcopy(scaffold())
     out["name"] = "WEAVE-demo"
     out["current_scene"] = out["current_program_scene"] = "Overlay"
     out["scene_order"] = [{"name": "Overlay"}, {"name": "Card1"}, {"name": "Card2"}]
-    out["sources"] = [bg, label, subgoal, otext, stext, c1bg, c2bg, card1, card2, overlay]
+    out["sources"] = [bg, label, subgoal, otext, stext, score, c1bg, c2bg, card1, card2, overlay]
     out["groups"] = []
     out["saved_projectors"] = []
     os.makedirs(f"{BASE}/scenes", exist_ok=True)

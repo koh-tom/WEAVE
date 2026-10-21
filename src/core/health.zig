@@ -1,0 +1,371 @@
+//! HealthMonitor — 「いま何が止まっていて、その原因はどれか」を実行中に出す (core.health.summary)。
+//!
+//! 監査 (`weave audit --failure`) と同じ宣言グラフ・同じ規則 (blast.computeFailureSet) を、
+//! 起動前の「もし落ちたら」ではなく、いま実際に止まっているノードの集合に当てはめる。
+//! - 起動時に指定したプラグインと --expect のノードは「本来いるはず」。グラフにいなければ「起動していない」
+//!   (読み込みに失敗した・起動を忘れた外部ツール)
+//! - ビルトイン (Twitch など) は、この構成で起動していなければ「使っていない」とみなし、止まったとは言わない
+//! - 出力は観測専用の端末 (/status) にも渡すので、ノード名とトピック名だけを載せる (メッセージの中身は載せない)
+//! - 中身が変わったときだけ publish する。最新値を保持するトピックなので、後から開いた端末にもすぐ届く
+
+const std = @import("std");
+const event_bus = @import("event_bus.zig");
+const graph_mod = @import("graph.zig");
+const SystemGraph = graph_mod.SystemGraph;
+const blast = @import("../audit/blast.zig");
+const log = @import("../common/log.zig");
+
+pub const NODE_ID: u32 = 11;
+pub const TOPIC = "core.health.summary";
+const MAX_RECENT = 5;
+
+pub const HealthMonitor = struct {
+    allocator: std.mem.Allocator,
+    bus: *event_bus.EventBus,
+    graph: *SystemGraph,
+    /// 宣言 (起動中ずっと使う)
+    decl_arena: std.heap.ArenaAllocator,
+    declared: std.ArrayListUnmanaged(Declared) = .{},
+    lint_issues: []const blast.LintIssue = &.{},
+    started_ms: i64,
+    stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// 計算と publish を 1 つずつにする (tick と状態変化の通知は同じセルだが、start() は別スレッドから呼ぶ)
+    mutex: std.Thread.Mutex = .{},
+    last_body: std.ArrayListUnmanaged(u8) = .{},
+    recent: [MAX_RECENT]Recent = undefined,
+    recent_len: usize = 0,
+
+    pub const Declared = struct {
+        node: blast.Node,
+        /// 起動時に指定された / --expect で宣言された。グラフにいなければ「起動していない」
+        expected: bool,
+        /// ビルトイン。登録されていなければ「この構成では使っていない」
+        builtin: bool,
+    };
+
+    const Recent = struct {
+        name_buf: [64]u8 = undefined,
+        name_len: usize = 0,
+        down_ms: i64 = 0,
+        ts: i64 = 0,
+        fn name(self: *const Recent) []const u8 {
+            return self.name_buf[0..self.name_len];
+        }
+    };
+
+    pub fn create(allocator: std.mem.Allocator, bus: *event_bus.EventBus, graph: *SystemGraph) !*HealthMonitor {
+        const self = try allocator.create(HealthMonitor);
+        self.* = .{
+            .allocator = allocator,
+            .bus = bus,
+            .graph = graph,
+            .decl_arena = std.heap.ArenaAllocator.init(allocator),
+            .started_ms = std.time.milliTimestamp(),
+        };
+        return self;
+    }
+
+    pub fn destroy(self: *HealthMonitor) void {
+        self.stopped.store(true, .release);
+        self.mutex.lock();
+        self.last_body.deinit(self.allocator);
+        self.mutex.unlock();
+        self.decl_arena.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn addBuiltins(self: *HealthMonitor) !void {
+        const nodes = try blast.builtinNodes(self.decl_arena.allocator());
+        for (nodes) |n| try self.declared.append(self.decl_arena.allocator(), .{ .node = n, .expected = false, .builtin = true });
+    }
+
+    /// manifest を「本来いるはずのノード」として加える (起動時に指定したプラグイン / --expect)
+    pub fn addManifest(self: *HealthMonitor, path: []const u8, declared_cells: []const []const u8) !void {
+        const node = try blast.loadManifestNodeIn(self.decl_arena.allocator(), path, declared_cells);
+        for (self.declared.items) |*d| {
+            if (std.mem.eql(u8, d.node.name, node.name)) {
+                d.expected = true;
+                return;
+            }
+        }
+        try self.declared.append(self.decl_arena.allocator(), .{ .node = node, .expected = true, .builtin = false });
+    }
+
+    /// 設定ミス (誰も出していないトピックの購読で、近い名前があるもの) を調べる。結果は summary にも載る
+    pub fn runLint(self: *HealthMonitor) ![]const blast.LintIssue {
+        const a = self.decl_arena.allocator();
+        const nodes = try a.alloc(blast.Node, self.declared.items.len);
+        for (self.declared.items, 0..) |d, i| nodes[i] = d.node;
+        self.lint_issues = try blast.lint(a, nodes);
+        return self.lint_issues;
+    }
+
+    pub fn start(self: *HealthMonitor) !void {
+        const observe = self.bus.getCell("observe") orelse try self.bus.createCell("observe", .{ .trust = .core });
+        const opts: event_bus.EventBus.SubscribeOptions = .{ .cell = observe, .record_graph = false };
+        for ([_][]const u8{ "core.system.tick", "core.node.down", "core.node.recovered", "core.node.registered", "core.system.graph.delta" }) |t| {
+            try self.bus.subscribeEx(t, NODE_ID, onBusMessage, self, opts);
+        }
+        self.recompute();
+    }
+
+    fn onBusMessage(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
+        const self: *HealthMonitor = @ptrCast(@alignCast(ctx orelse return));
+        if (self.stopped.load(.acquire)) return;
+        if (std.mem.eql(u8, msg.topic, "core.node.recovered")) self.noteRecovered(msg.payload);
+        self.recompute();
+    }
+
+    fn noteRecovered(self: *HealthMonitor, payload: []const u8) void {
+        const parsed = std.json.parseFromSlice(struct { name: []const u8 = "", down_ms: i64 = 0, ts: i64 = 0 }, self.allocator, payload, .{ .ignore_unknown_fields = true }) catch return;
+        defer parsed.deinit();
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        // 新しい順に並べる (先頭が最新)
+        if (self.recent_len < MAX_RECENT) self.recent_len += 1;
+        var i: usize = self.recent_len - 1;
+        while (i > 0) : (i -= 1) self.recent[i] = self.recent[i - 1];
+        var r = Recent{ .down_ms = parsed.value.down_ms, .ts = parsed.value.ts };
+        r.name_len = @min(parsed.value.name.len, r.name_buf.len);
+        @memcpy(r.name_buf[0..r.name_len], parsed.value.name[0..r.name_len]);
+        self.recent[0] = r;
+    }
+
+    const Model = struct {
+        nodes: []blast.Node,
+        status: [][]const u8,
+        since: []?i64,
+        expected: []bool,
+    };
+
+    /// 宣言とグラフの写しから、計算に使うノードと状態を組み立てる
+    fn buildModel(self: *HealthMonitor, arena: std.mem.Allocator) !Model {
+        const snap = try self.graph.snapshot(arena);
+        var nodes = std.ArrayListUnmanaged(blast.Node){};
+        var status = std.ArrayListUnmanaged([]const u8){};
+        var since = std.ArrayListUnmanaged(?i64){};
+        var expected = std.ArrayListUnmanaged(bool){};
+        var used = try arena.alloc(bool, snap.len);
+        @memset(used, false);
+
+        for (self.declared.items) |d| {
+            if (std.mem.eql(u8, d.node.name, "Core")) {
+                // Core 自身は止まっていれば何も出せないので、常に動いているものとして扱う
+                try nodes.append(arena, d.node);
+                try status.append(arena, "active");
+                try since.append(arena, null);
+                try expected.append(arena, false);
+                continue;
+            }
+            const found: ?usize = for (snap, 0..) |s, i| {
+                if (!used[i] and std.mem.eql(u8, s.name, d.node.name)) break i;
+            } else null;
+            if (found) |i| {
+                used[i] = true;
+                try nodes.append(arena, d.node);
+                try status.append(arena, @tagName(snap[i].status));
+                try since.append(arena, snap[i].down_since_ms);
+                try expected.append(arena, d.expected);
+            } else if (d.expected) {
+                try nodes.append(arena, d.node);
+                try status.append(arena, "missing");
+                try since.append(arena, self.started_ms);
+                try expected.append(arena, true);
+            }
+            // ビルトインで登録されていないもの (--no-twitch の Twitch など) は、この構成では使っていない
+        }
+
+        // 宣言に無いがグラフにいるノード (外部ノードなど) は、観測した pub/sub で扱う。並びは名前順で固定する
+        var extra = std.ArrayListUnmanaged(usize){};
+        for (snap, 0..) |s, i| {
+            if (!used[i] and !std.mem.endsWith(u8, s.name, ".wasm")) try extra.append(arena, i);
+        }
+        std.mem.sort(usize, extra.items, @as([]const SystemGraph.NodeSnapshot, snap), struct {
+            fn lt(sn: []const SystemGraph.NodeSnapshot, a: usize, b: usize) bool {
+                return std.mem.lessThan(u8, sn[a].name, sn[b].name);
+            }
+        }.lt);
+        for (extra.items) |i| {
+            const s = snap[i];
+            try nodes.append(arena, .{
+                .name = s.name,
+                .kind = @tagName(s.node_type),
+                .pub_patterns = @constCast(s.pub_topics),
+                .sub_patterns = @constCast(s.sub_topics),
+            });
+            try status.append(arena, @tagName(s.status));
+            try since.append(arena, s.down_since_ms);
+            try expected.append(arena, false);
+        }
+        return .{ .nodes = nodes.items, .status = status.items, .since = since.items, .expected = expected.items };
+    }
+
+    fn isDownLabel(s: []const u8) bool {
+        if (std.mem.eql(u8, s, "missing")) return true;
+        const st = std.meta.stringToEnum(@import("../common/types.zig").NodeStatus, s) orelse return false;
+        return graph_mod.isDown(st);
+    }
+
+    /// 本文 (updated を除く) を JSON で書く。テストと publish で共通
+    pub fn writeBody(self: *HealthMonitor, arena: std.mem.Allocator, w: anytype) !void {
+        const m = try self.buildModel(arena);
+
+        var down = std.ArrayListUnmanaged([]const u8){};
+        const JNode = struct { name: []const u8, kind: []const u8, status: []const u8 };
+        const JProblem = struct { node: []const u8, status: []const u8, since: ?i64, expected: bool };
+        var jnodes = std.ArrayListUnmanaged(JNode){};
+        var problems = std.ArrayListUnmanaged(JProblem){};
+        for (m.nodes, 0..) |n, i| {
+            if (std.mem.eql(u8, n.name, "Core")) continue;
+            try jnodes.append(arena, .{ .name = n.name, .kind = n.kind, .status = m.status[i] });
+            if (isDownLabel(m.status[i])) {
+                try down.append(arena, n.name);
+                try problems.append(arena, .{ .node = n.name, .status = m.status[i], .since = m.since[i], .expected = m.expected[i] });
+            }
+        }
+        const report = try blast.computeFailureSet(arena, m.nodes, down.items);
+
+        const JImpact = struct { node: []const u8, effect: []const u8, because: [][]const u8, lost: [][]const u8 };
+        var impacts = try arena.alloc(JImpact, report.impacts.len);
+        for (report.impacts, 0..) |im, i| impacts[i] = .{ .node = im.node, .effect = @tagName(im.effect), .because = im.because, .lost = im.lost };
+
+        const JWarn = struct { node: []const u8, topic: []const u8, suggestion: []const u8, from: []const u8 };
+        var warns = try arena.alloc(JWarn, self.lint_issues.len);
+        for (self.lint_issues, 0..) |l, i| warns[i] = .{ .node = l.node, .topic = l.topic, .suggestion = l.suggestion, .from = l.suggestion_from };
+
+        const JRecent = struct { node: []const u8, down_ms: i64, ts: i64 };
+        var recent = try arena.alloc(JRecent, self.recent_len);
+        for (self.recent[0..self.recent_len], 0..) |*r, i| recent[i] = .{ .node = try arena.dupe(u8, r.name()), .down_ms = r.down_ms, .ts = r.ts };
+
+        const overall: []const u8 = if (problems.items.len > 0 or report.sinks_stopped.len > 0) "trouble" else if (warns.len > 0) "warn" else "ok";
+        try w.print("{f}", .{std.json.fmt(.{
+            .overall = overall,
+            .nodes = jnodes.items,
+            .problems = problems.items,
+            .impacts = impacts,
+            .sinks = report.sink_effects,
+            .sinks_stopped = report.sinks_stopped,
+            .warnings = warns,
+            .recent = recent,
+        }, .{})});
+    }
+
+    pub fn recompute(self: *HealthMonitor) void {
+        if (self.stopped.load(.acquire)) return;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var arena_inst = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_inst.deinit();
+        const arena = arena_inst.allocator();
+
+        var body = std.ArrayListUnmanaged(u8){};
+        self.writeBody(arena, body.writer(arena)) catch |err| {
+            log.warn("Health: failed to compute: {any}", .{err});
+            return;
+        };
+        if (std.mem.eql(u8, body.items, self.last_body.items)) return;
+        self.last_body.clearRetainingCapacity();
+        self.last_body.appendSlice(self.allocator, body.items) catch return;
+
+        // {"updated":<ms>, ...本文} (本文は必ず 1 つ以上のフィールドを持つオブジェクト)
+        var out = std.ArrayListUnmanaged(u8){};
+        out.writer(arena).print("{{\"updated\":{d},", .{std.time.milliTimestamp()}) catch return;
+        out.appendSlice(arena, body.items[1..]) catch return;
+        self.bus.publish(TOPIC, out.items, .Transient, 0) catch |err| log.warn("Health: publish failed: {any}", .{err});
+    }
+};
+
+// ============================================================
+// テスト
+// ============================================================
+
+fn writeManifest(dir: std.fs.Dir, name: []const u8, json: []const u8) !void {
+    try dir.writeFile(.{ .sub_path = name, .data = json });
+}
+
+test "HealthMonitor: a forgotten tool is reported as missing, and the overlay that depends on it as stalled" {
+    const a = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(a, 16);
+    defer bus.deinit();
+    bus.verbose = false;
+    var graph = SystemGraph.init(a);
+    defer graph.deinit();
+    graph.bus = &bus;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeManifest(tmp.dir, "score_tool.json", "{\"name\":\"score_tool\",\"permissions\":{\"publish\":[\"ext.score.update\"],\"subscribe\":[\"ext.twitch.chat.message\"]}}");
+    try writeManifest(tmp.dir, "scoreboard.json", "{\"name\":\"scoreboard\",\"permissions\":{\"publish\":[\"core.obs.request.SetInputSettings\"],\"subscribe\":[\"ext.score.update\"]}}");
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try tmp.dir.realpath(".", &path_buf);
+    var p1: [std.fs.max_path_bytes]u8 = undefined;
+    var p2: [std.fs.max_path_bytes]u8 = undefined;
+
+    const hm = try HealthMonitor.create(a, &bus, &graph);
+    defer hm.destroy();
+    try hm.addBuiltins();
+    try hm.addManifest(try std.fmt.bufPrint(&p1, "{s}/score_tool.json", .{dir_path}), &.{});
+    try hm.addManifest(try std.fmt.bufPrint(&p2, "{s}/scoreboard.json", .{dir_path}), &.{});
+
+    // scoreboard と OBS は動いている。score_tool は起動していない (グラフにいない)
+    try graph.registerNodeIn(100, "scoreboard", .wasm, "plugin.scoreboard");
+    try graph.registerNodeIn(2, "ObsEgress", .native, "egress");
+
+    var arena_inst = std.heap.ArenaAllocator.init(a);
+    defer arena_inst.deinit();
+    var out = std.ArrayListUnmanaged(u8){};
+    try hm.writeBody(arena_inst.allocator(), out.writer(arena_inst.allocator()));
+    const body = out.items;
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"overall\":\"trouble\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "{\"node\":\"score_tool\",\"status\":\"missing\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "{\"node\":\"scoreboard\",\"effect\":\"stalled\",\"because\":[\"score_tool\"]") != null);
+    // Twitch は起動していない (--no-twitch 相当) が、使っていないだけなので問題には出さない
+    try std.testing.expect(std.mem.indexOf(u8, body, "TwitchAdapter") == null);
+}
+
+test "HealthMonitor: everything running → ok, and a plugin that restarts shows up in recent" {
+    const a = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(a, 16);
+    defer bus.deinit();
+    bus.verbose = false;
+    var graph = SystemGraph.init(a);
+    defer graph.deinit();
+    graph.bus = &bus;
+
+    const hm = try HealthMonitor.create(a, &bus, &graph);
+    defer hm.destroy();
+    try hm.addBuiltins();
+    try graph.registerNodeIn(2, "ObsEgress", .native, "egress");
+    hm.noteRecovered("{\"name\":\"loop_node\",\"down_ms\":2,\"ts\":123}");
+
+    var arena_inst = std.heap.ArenaAllocator.init(a);
+    defer arena_inst.deinit();
+    var out = std.ArrayListUnmanaged(u8){};
+    try hm.writeBody(arena_inst.allocator(), out.writer(arena_inst.allocator()));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"overall\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"recent\":[{\"node\":\"loop_node\",\"down_ms\":2,\"ts\":123}]") != null);
+}
+
+test "HealthMonitor: OBS disconnected → the sink is reported as stopped" {
+    const a = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(a, 16);
+    defer bus.deinit();
+    bus.verbose = false;
+    var graph = SystemGraph.init(a);
+    defer graph.deinit();
+    graph.bus = &bus;
+
+    const hm = try HealthMonitor.create(a, &bus, &graph);
+    defer hm.destroy();
+    try hm.addBuiltins();
+    try graph.registerNodeIn(2, "ObsEgress", .native, "egress");
+    graph.updateNodeStatus(2, .degraded);
+
+    var arena_inst = std.heap.ArenaAllocator.init(a);
+    defer arena_inst.deinit();
+    var out = std.ArrayListUnmanaged(u8){};
+    try hm.writeBody(arena_inst.allocator(), out.writer(arena_inst.allocator()));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"overall\":\"trouble\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"sinks_stopped\":[\"ObsEgress\"]") != null);
+}

@@ -13,7 +13,7 @@ import {
   type NodeView,
   nodes,
   obsState,
-  obsText,
+  obsText, health,
 } from './stores';
 
 let socket: WebSocket | null = null;
@@ -211,6 +211,11 @@ function route(msg: EventMessage) {
 
   if (t === 'core.obs.link') {
     return obsState.update((s) => ({ ...s, link: !!p?.connected, reconnects: p?.reconnects ?? s.reconnects }));
+  }
+
+  if (t === 'core.health.summary') {
+    if (p && typeof p === 'object') health.set(p);
+    return;
   }
 
   if (t === 'core.obs.request.SetInputSettings') {

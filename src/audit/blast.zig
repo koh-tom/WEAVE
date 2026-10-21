@@ -336,12 +336,8 @@ fn providedOnlyByFailed(nodes: []const Node, failed: *const std.StringHashMapUnm
     return any;
 }
 
-pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name: []const u8) !FailureReport {
-    if (findNode(nodes, target_name) == null) return error.NodeNotFound;
-    var failed = std.StringHashMapUnmanaged(void){};
-    try failed.put(arena, target_name, {});
-
-    // 沈黙が連鎖しなくなるまで繰り返す
+/// 落ちたノードの集合から、入力が全て途絶えたノードを推移的に加える (沈黙の連鎖)
+fn propagateFailures(arena: std.mem.Allocator, nodes: []const Node, failed: *std.StringHashMapUnmanaged(void)) !void {
     var changed = true;
     while (changed) {
         changed = false;
@@ -352,7 +348,7 @@ pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name
             for (n.sub_patterns) |sp| {
                 if (providers(nodes, sp, n.name) == 0) continue; // 元々外部入力 (tick など) 扱い
                 fed += 1;
-                if (providedOnlyByFailed(nodes, &failed, sp, n.name)) lost += 1;
+                if (providedOnlyByFailed(nodes, failed, sp, n.name)) lost += 1;
             }
             if (fed > 0 and lost == fed) {
                 try failed.put(arena, n.name, {});
@@ -360,6 +356,14 @@ pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name
             }
         }
     }
+}
+
+pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name: []const u8) !FailureReport {
+    if (findNode(nodes, target_name) == null) return error.NodeNotFound;
+    var failed = std.StringHashMapUnmanaged(void){};
+    try failed.put(arena, target_name, {});
+    // 沈黙が連鎖しなくなるまで繰り返す
+    try propagateFailures(arena, nodes, &failed);
 
     var degraded = std.ArrayListUnmanaged(FailureReport.Affected){};
     var stalled = std.ArrayListUnmanaged([]const u8){};
@@ -397,6 +401,161 @@ pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name
         .unaffected = try unaffected.toOwnedSlice(arena),
         .sinks_stopped = try sinks.toOwnedSlice(arena),
     };
+}
+
+// ============================================================
+// 実行時の障害の波及 (HealthMonitor): 「いま止まっているノード」の集合から、
+// 何が止まり、その直接の原因はどれかを出す。computeFailure と同じ規則で、起点が複数になったもの
+// ============================================================
+
+pub const SetReport = struct {
+    impacts: []Impact,
+    /// 止まったノード (起点 + 沈黙したもの) が実世界シンクに出していた要求
+    sink_effects: []SinkEffect,
+    /// 止まった実世界シンク自身 (OBS への送信など)
+    sinks_stopped: [][]const u8,
+
+    pub const Effect = enum { stalled, degraded };
+    pub const Impact = struct {
+        node: []const u8,
+        effect: Effect,
+        /// 失った入力を出していた、止まっているノード (直接の原因)
+        because: [][]const u8,
+        /// 失った入力 (購読パターン)
+        lost: [][]const u8,
+    };
+    pub const SinkEffect = struct {
+        node: []const u8,
+        sink: []const u8,
+        topics: [][]const u8,
+    };
+};
+
+pub fn computeFailureSet(arena: std.mem.Allocator, nodes: []const Node, down: []const []const u8) !SetReport {
+    var failed = std.StringHashMapUnmanaged(void){};
+    for (down) |d| try failed.put(arena, d, {});
+    try propagateFailures(arena, nodes, &failed);
+
+    var impacts = std.ArrayListUnmanaged(SetReport.Impact){};
+    for (nodes) |n| {
+        if (isIn(down, n.name)) continue; // 起点は「問題」として別に出す
+        var lost = std.ArrayListUnmanaged([]const u8){};
+        var because = std.ArrayListUnmanaged([]const u8){};
+        for (n.sub_patterns) |sp| {
+            if (!providedOnlyByFailed(nodes, &failed, sp, n.name)) continue;
+            try lost.append(arena, sp);
+            for (nodes) |p| {
+                if (std.mem.eql(u8, p.name, n.name) or !failed.contains(p.name)) continue;
+                for (p.pub_patterns) |pp| {
+                    if (pattern.intersect(pp, sp)) {
+                        if (!isIn(because.items, p.name)) try because.append(arena, p.name);
+                        break;
+                    }
+                }
+            }
+        }
+        if (lost.items.len == 0) continue;
+        try impacts.append(arena, .{
+            .node = n.name,
+            .effect = if (failed.contains(n.name)) .stalled else .degraded,
+            .because = try because.toOwnedSlice(arena),
+            .lost = try lost.toOwnedSlice(arena),
+        });
+    }
+
+    var effects = std.ArrayListUnmanaged(SetReport.SinkEffect){};
+    var stopped = std.ArrayListUnmanaged([]const u8){};
+    for (nodes) |s| {
+        if (!s.is_sink) continue;
+        if (failed.contains(s.name)) {
+            try stopped.append(arena, s.name);
+            continue;
+        }
+        for (nodes) |n| {
+            if (!failed.contains(n.name) or std.mem.eql(u8, n.name, s.name)) continue;
+            var topics = std.ArrayListUnmanaged([]const u8){};
+            for (n.pub_patterns) |pp| {
+                for (s.sub_patterns) |sp| {
+                    if (pattern.intersect(pp, sp)) {
+                        try topics.append(arena, pp);
+                        break;
+                    }
+                }
+            }
+            if (topics.items.len > 0) try effects.append(arena, .{ .node = n.name, .sink = s.name, .topics = try topics.toOwnedSlice(arena) });
+        }
+    }
+    return .{
+        .impacts = try impacts.toOwnedSlice(arena),
+        .sink_effects = try effects.toOwnedSlice(arena),
+        .sinks_stopped = try stopped.toOwnedSlice(arena),
+    };
+}
+
+fn isIn(list: []const []const u8, name: []const u8) bool {
+    for (list) |x| if (std.mem.eql(u8, x, name)) return true;
+    return false;
+}
+
+// ============================================================
+// 設定ミスの検出 (lint): 誰も出していないトピックを購読している
+// ------------------------------------------------------------
+// 1 文字の typo (ext.twich.chat.message) は、manifest も ACL も通ってしまい、ただ何も届かない。
+// 宣言グラフ上で「提供者がいない購読」を探し、他のノードが出しているパターンに近いものがあれば候補として出す。
+// 提供者がいなくても、近い名前が無いものは外部 (Stream Deck・weave topic pub など) からの入力とみなして警告しない。
+// ============================================================
+
+pub const LintIssue = struct {
+    node: []const u8,
+    /// 提供者のいない購読パターン
+    topic: []const u8,
+    /// 近い名前の、他のノードが出しているパターン
+    suggestion: []const u8,
+    /// その候補を出しているノード
+    suggestion_from: []const u8,
+};
+
+pub fn lint(arena: std.mem.Allocator, nodes: []const Node) ![]LintIssue {
+    var issues = std.ArrayListUnmanaged(LintIssue){};
+    for (nodes) |n| {
+        for (n.sub_patterns) |sp| {
+            if (providers(nodes, sp, n.name) > 0) continue;
+            var best: ?struct { pat: []const u8, from: []const u8, d: usize } = null;
+            for (nodes) |p| {
+                if (std.mem.eql(u8, p.name, n.name)) continue;
+                for (p.pub_patterns) |pp| {
+                    const d = editDistance(sp, pp, 3) orelse continue;
+                    if (d == 0) continue;
+                    if (best == null or d < best.?.d) best = .{ .pat = pp, .from = p.name, .d = d };
+                }
+            }
+            if (best) |b| try issues.append(arena, .{ .node = n.name, .topic = sp, .suggestion = b.pat, .suggestion_from = b.from });
+        }
+    }
+    return issues.toOwnedSlice(arena);
+}
+
+/// 文字単位の編集距離。max を超えたら null (長い名前どうしの無駄な計算をしない)
+pub fn editDistance(a: []const u8, b: []const u8, max: usize) ?usize {
+    const la = a.len;
+    const lb = b.len;
+    if ((if (la > lb) la - lb else lb - la) > max) return null;
+    if (la > 255 or lb > 255) return null;
+    var prev: [256]usize = undefined;
+    var cur: [256]usize = undefined;
+    for (0..lb + 1) |j| prev[j] = j;
+    for (1..la + 1) |i| {
+        cur[0] = i;
+        var row_min = cur[0];
+        for (1..lb + 1) |j| {
+            const cost: usize = if (a[i - 1] == b[j - 1]) 0 else 1;
+            cur[j] = @min(@min(prev[j] + 1, cur[j - 1] + 1), prev[j - 1] + cost);
+            row_min = @min(row_min, cur[j]);
+        }
+        if (row_min > max) return null;
+        @memcpy(prev[0 .. lb + 1], cur[0 .. lb + 1]);
+    }
+    return if (prev[lb] <= max) prev[lb] else null;
 }
 
 pub fn printFailure(writer: anytype, r: FailureReport) !void {
@@ -633,4 +792,85 @@ test "loadManifestNodeIn: a requested cell counts only if the operator declared 
     const path = try tmp.dir.realpathAlloc(a, "m.json");
     try std.testing.expectEqualStrings("plugin.x", (try loadManifestNodeIn(a, path, &.{})).cell);
     try std.testing.expectEqualStrings("plugins.bots", (try loadManifestNodeIn(a, path, &.{"plugins.bots"})).cell);
+}
+
+fn testNode(arena: std.mem.Allocator, name: []const u8, pubs: []const []const u8, subs: []const []const u8, sink: bool) !Node {
+    return .{ .name = name, .kind = "wasm", .is_sink = sink, .pub_patterns = try arena.dupe([]const u8, pubs), .sub_patterns = try arena.dupe([]const u8, subs) };
+}
+
+test "computeFailureSet: a forgotten tool stalls the overlay that depends on it, and names it as the cause" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nodes = [_]Node{
+        try testNode(arena, "ObsEgress", &.{"core.obs.event.*"}, &.{"core.obs.request.*"}, true),
+        try testNode(arena, "score_tool", &.{"ext.score.update"}, &.{"ext.twitch.chat.message"}, false),
+        try testNode(arena, "scoreboard", &.{"core.obs.request.SetInputSettings"}, &.{"ext.score.update"}, false),
+        try testNode(arena, "subgoal", &.{"core.obs.request.SetInputSettings"}, &.{"ext.twitch.chat.message"}, false),
+        try testNode(arena, "TwitchAdapter", &.{"ext.twitch.chat.message"}, &.{}, false),
+    };
+    const r = try computeFailureSet(arena, &nodes, &.{"score_tool"});
+    try std.testing.expectEqual(@as(usize, 1), r.impacts.len);
+    try std.testing.expectEqualStrings("scoreboard", r.impacts[0].node);
+    try std.testing.expectEqual(SetReport.Effect.stalled, r.impacts[0].effect);
+    try std.testing.expectEqualStrings("score_tool", r.impacts[0].because[0]);
+    try std.testing.expectEqualStrings("ext.score.update", r.impacts[0].lost[0]);
+    // scoreboard が OBS に出していた表示が止まる。OBS への送信そのものは止まらない (subgoal は出し続ける)
+    try std.testing.expectEqual(@as(usize, 0), r.sinks_stopped.len);
+    var found = false;
+    for (r.sink_effects) |e| {
+        if (std.mem.eql(u8, e.node, "scoreboard") and std.mem.eql(u8, e.sink, "ObsEgress")) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "computeFailureSet: nothing down → no impact" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nodes = [_]Node{
+        try testNode(arena, "a", &.{"ext.a"}, &.{}, false),
+        try testNode(arena, "b", &.{}, &.{"ext.a"}, false),
+    };
+    const r = try computeFailureSet(arena, &nodes, &.{});
+    try std.testing.expectEqual(@as(usize, 0), r.impacts.len);
+    try std.testing.expectEqual(@as(usize, 0), r.sink_effects.len);
+}
+
+test "lint: a one-letter typo in a subscription is caught with the likely intended topic" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nodes = [_]Node{
+        try testNode(arena, "TwitchAdapter", &.{"ext.twitch.chat.message"}, &.{}, false),
+        try testNode(arena, "greeter", &.{"ext.greeter.out"}, &.{ "ext.twich.chat.message", "ext.greeter.cmd" }, false),
+    };
+    const issues = try lint(arena, &nodes);
+    // ext.greeter.cmd も提供者はいないが、近い名前が無いので外部入力とみなして警告しない
+    try std.testing.expectEqual(@as(usize, 1), issues.len);
+    try std.testing.expectEqualStrings("greeter", issues[0].node);
+    try std.testing.expectEqualStrings("ext.twich.chat.message", issues[0].topic);
+    try std.testing.expectEqualStrings("ext.twitch.chat.message", issues[0].suggestion);
+    try std.testing.expectEqualStrings("TwitchAdapter", issues[0].suggestion_from);
+}
+
+test "lint: a typo on the publishing side is caught from the subscriber" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nodes = [_]Node{
+        try testNode(arena, "score_tool", &.{"ext.score.updat"}, &.{}, false),
+        try testNode(arena, "scoreboard", &.{}, &.{"ext.score.update"}, false),
+    };
+    const issues = try lint(arena, &nodes);
+    try std.testing.expectEqual(@as(usize, 1), issues.len);
+    try std.testing.expectEqualStrings("ext.score.updat", issues[0].suggestion);
+    try std.testing.expectEqualStrings("score_tool", issues[0].suggestion_from);
+}
+
+test "editDistance" {
+    try std.testing.expectEqual(@as(?usize, 0), editDistance("abc", "abc", 3));
+    try std.testing.expectEqual(@as(?usize, 1), editDistance("ext.twich.chat", "ext.twitch.chat", 3));
+    try std.testing.expectEqual(@as(?usize, 2), editDistance("abcd", "abdc", 3));
+    try std.testing.expectEqual(@as(?usize, null), editDistance("ext.a", "core.system.tick", 3));
 }

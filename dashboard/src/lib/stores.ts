@@ -82,6 +82,20 @@ export const edges = writable<GraphEdge[]>([]);
 export const metrics = writable<SystemMetrics>({ eps: 0, totalEvents: 0 });
 export const epsHistory = writable<number[]>([]);
 export const obsText = writable<Record<string, string>>({});
+
+/** core.health.summary — いま止まっているノードと、それで影響を受けている機能 (Core の HealthMonitor が計算) */
+export interface Health {
+  updated: number;
+  overall: 'ok' | 'warn' | 'trouble';
+  nodes: { name: string; kind: string; status: string }[];
+  problems: { node: string; status: string; since: number | null; expected: boolean }[];
+  impacts: { node: string; effect: 'stalled' | 'degraded'; because: string[]; lost: string[] }[];
+  sinks: { node: string; sink: string; topics: string[] }[];
+  sinks_stopped: string[];
+  warnings: { node: string; topic: string; suggestion: string; from: string }[];
+  recent: { node: string; down_ms: number; ts: number }[];
+}
+export const health = writable<Health | null>(null);
 export const eventLogs = writable<EventMessage[]>([]);
 export const securityEvents = writable<SecurityEvent[]>([]);
 export const faultTimeline = writable<FaultEntry[]>([]);

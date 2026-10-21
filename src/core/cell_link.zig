@@ -14,6 +14,8 @@ const DesiredState = @import("../builtin/obs.zig").DesiredState;
 const log = @import("../common/log.zig");
 
 pub const CellLink = struct {
+    /// バスにつないだか (attach 済み)
+    attached: bool = false,
     allocator: std.mem.Allocator,
     bus: *event_bus.EventBus,
     node_id: u32,
@@ -58,6 +60,16 @@ pub const CellLink = struct {
         self.allocator.destroy(self);
     }
 
+    /// バスにつなぐ (グラフ登録と購読)。子プロセスより先にプラグインの起動時の要求を受け取り、
+    /// 「意図した状態」として持っておく (子が繋がったら再適用する)。start() は未実行ならこれも行う
+    pub fn attach(self: *CellLink) !void {
+        if (self.attached) return;
+        const cell = self.bus.getCell("egress") orelse try self.bus.createCell("egress", .{ .trust = .core });
+        if (self.bus.graph) |g| try g.registerNodeIn(self.node_id, "ObsEgress", .native, cell.name);
+        try self.bus.subscribeEx("core.obs.request.*", self.node_id, onRequest, self, .{ .cell = cell });
+        self.attached = true;
+    }
+
     pub fn start(self: *CellLink) !void {
         if (std.fs.path.dirname(self.socket_path)) |d| try std.fs.cwd().makePath(d);
         std.fs.cwd().deleteFile(self.socket_path) catch {};
@@ -66,9 +78,7 @@ pub const CellLink = struct {
         // ソケットファイルは自分だけが開ける
         std.posix.fchmodat(std.fs.cwd().fd, self.socket_path, 0o600, 0) catch {};
 
-        const cell = self.bus.getCell("egress") orelse try self.bus.createCell("egress", .{ .trust = .core });
-        if (self.bus.graph) |g| try g.registerNodeIn(self.node_id, "ObsEgress", .native, cell.name);
-        try self.bus.subscribeEx("core.obs.request.*", self.node_id, onRequest, self, .{ .cell = cell });
+        try self.attach();
 
         self.running.store(true, .release);
         self.thread = try std.Thread.spawn(.{}, supervise, .{self});

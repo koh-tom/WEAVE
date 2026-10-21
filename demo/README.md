@@ -71,3 +71,22 @@ weave demo before_after        # または ./demo/run_before_after_demo.sh
   入力 `SubGoal` / `OverlayText` / `ShoutoutText` = プラグインが `SetInputSettings` で書くテキスト。
 - obs-websocket のパスワードは OBS の設定ファイルから読む (表示・保存はしない)。OBS の既定コレクション/プロファイルは終了時に元に戻す。
 - Inspector の「OBS の実際の状態」は、本物の OBS からの `SceneItemEnableStateChanged` で埋まる (mock は自前でイベントを流す)。
+
+## どこが止まっていて、原因はどれか(稼働状態と観測専用画面)
+
+イベント運営で実際に起きた事故の再現です。スコア係のツールを起動し忘れたため、配信画面のスコア表示が 0-0 のまま固まりました。見た目は正常なので誰も気づかず、原因が分からないまま進行が約 30 分遅れました。
+
+```bash
+weave demo health          # 3 幕。各幕で Enter 待ち
+weave demo health --auto   # 通しで自動再生
+```
+
+| 幕 | 状況 | 結果 |
+|---|---|---|
+| 1. 今までの世界 | スコア係(`score_tool`)を起動していない | スコア表示は「A 0 - 0 B」のまま。どこにもエラーは出ない |
+| 2. WEAVE | 本来いるはずの構成を宣言する(`--expect wasm-apps/score_tool.json`) | 「score_tool が起動していません → scoreboard が入力を失って止まっています(原因: score_tool)→ 配信画面の表示が更新されません」と出る |
+| 3. 直す | スコア係を起動する | スコアが更新され、「すべて動いています」に戻る |
+
+- **稼働状態**: Core の HealthMonitor が、止まっているノードの集合から影響を計算し、`core.health.summary` に出します。規則は `weave audit --failure` と同じで、宣言(manifest)の pub/sub だけを使います。Inspector の一番上にも表示されます。
+- **観測専用画面**: `http://<PC の IP>:3030/status?token=<観測専用トークン>`。トークンは起動ログの `[STATUS]` 行に出ます。この画面には稼働状態(`core.health.*`)しか届かず、publish もできません。会場を動き回るスタッフのスマホに渡しても、チャット本文などは漏れません。スマホから見るときは `--bind 0.0.0.0` で起動します。
+- **設定ミスの検出**: 起動時に、誰も出していないトピックを購読しているものを調べます。似た名前があれば、`Did you mean 'ext.twitch.chat.message'?` のように候補を出します。

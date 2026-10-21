@@ -115,6 +115,8 @@ pub const DesiredState = struct {
 };
 
 pub const ObsEgressNode = struct {
+    /// バスにつないだか (attach 済み)
+    attached: bool = false,
     allocator: std.mem.Allocator,
     bus: *event_bus.EventBus,
     node_id: u32,
@@ -172,18 +174,24 @@ pub const ObsEgressNode = struct {
         self.allocator.destroy(self);
     }
 
-    /// OBS への接続をバックグラウンドで開始し、要求トピックを購読する
-    pub fn connect(self: *ObsEgressNode, host: []const u8, port: u16) !void {
-        self.host = try self.allocator.dupe(u8, host);
-        self.port = port;
-        self.running.store(true, .release);
-
+    /// バスにつなぐ (グラフ登録と購読)。プラグインより先に呼ぶと、プラグインが起動時に出した要求も
+    /// 「意図した状態」として受け取り、OBS に接続したあとで送れる。connect() は未実行ならこれも行う
+    pub fn attach(self: *ObsEgressNode) !void {
+        if (self.attached) return;
         // OBS への送信は専用セル "egress" で行う (OBS が遅くても他の配送を待たせない)
         const cell = self.bus.getCell("egress") orelse try self.bus.createCell("egress", .{ .trust = .core });
         // グラフ登録を購読より先に行う (逆順だと購読が記録されず、トポロジから OBS への辺が消える)
         if (self.bus.graph) |g| try g.registerNodeIn(self.node_id, "ObsEgress", .native, cell.name);
         try self.bus.subscribeEx("core.obs.request.*", self.node_id, ObsEgressNode.onMessage, self, .{ .cell = cell });
+        self.attached = true;
+    }
 
+    /// OBS への接続をバックグラウンドで開始する (まだならバスにもつなぐ)
+    pub fn connect(self: *ObsEgressNode, host: []const u8, port: u16) !void {
+        self.host = try self.allocator.dupe(u8, host);
+        self.port = port;
+        self.running.store(true, .release);
+        try self.attach();
         self.thread = try std.Thread.spawn(.{}, runRetryLoop, .{self});
     }
 

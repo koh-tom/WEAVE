@@ -282,6 +282,42 @@ pub const SystemGraph = struct {
         try self.toJson(list.writer(allocator));
         return list.toOwnedSlice(allocator);
     }
+
+    /// ある時点のノードの写し (HealthMonitor 用)。文字列はすべて複製するので、ロックの外で使ってよい
+    pub const NodeSnapshot = struct {
+        id: u32,
+        name: []const u8,
+        node_type: NodeType,
+        status: NodeStatus,
+        down_since_ms: ?i64,
+        pub_topics: []const []const u8,
+        sub_topics: []const []const u8,
+    };
+
+    /// 全ノードの写しを返す。arena で確保する前提 (個別の解放はしない)
+    pub fn snapshot(self: *SystemGraph, arena: std.mem.Allocator) ![]NodeSnapshot {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var out = try arena.alloc(NodeSnapshot, self.nodes.count());
+        var i: usize = 0;
+        var it = self.nodes.valueIterator();
+        while (it.next()) |node| : (i += 1) {
+            const pubs = try arena.alloc([]const u8, node.pub_topics.items.len);
+            for (node.pub_topics.items, 0..) |t, j| pubs[j] = try arena.dupe(u8, t);
+            const subs = try arena.alloc([]const u8, node.sub_topics.items.len);
+            for (node.sub_topics.items, 0..) |t, j| subs[j] = try arena.dupe(u8, t);
+            out[i] = .{
+                .id = node.id,
+                .name = try arena.dupe(u8, node.name),
+                .node_type = node.node_type,
+                .status = node.status,
+                .down_since_ms = node.down_since_ms,
+                .pub_topics = pubs,
+                .sub_topics = subs,
+            };
+        }
+        return out;
+    }
 };
 
 test "SystemGraph: idempotent registerNode" {

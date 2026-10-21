@@ -12,6 +12,7 @@ const MockTwitchAdapter = @import("builtin/mock_twitch.zig").MockTwitchAdapter;
 const Replayer = @import("builtin/replay.zig").Replayer;
 const CellLink = @import("core/cell_link.zig").CellLink;
 const DashboardNode = @import("builtin/dashboard.zig").DashboardNode;
+const HealthMonitor = @import("core/health.zig").HealthMonitor;
 const StreamElementsAdapter = @import("builtin/streamelements.zig").StreamElementsAdapter;
 const streamlabs = @import("builtin/streamlabs.zig");
 
@@ -301,7 +302,7 @@ pub fn main() !void {
     if (config.log_level == .debug) try core.tm.register(log_transport.asTransport());
 
     // トークン: 未設定なら起動時に生成して一度だけ表示する
-    var owned_tokens: [2]?[]u8 = .{ null, null };
+    var owned_tokens: [3]?[]u8 = .{ null, null, null };
     defer for (owned_tokens) |t| if (t) |x| allocator.free(x);
     const node_token = if (config.node_ws_token) |t| t else blk: {
         const hex = try randomToken(allocator);
@@ -312,6 +313,13 @@ pub fn main() !void {
     const dash_token = if (config.dashboard_token) |t| t else blk: {
         const hex = try randomToken(allocator);
         owned_tokens[1] = hex;
+        break :blk hex;
+    };
+
+    // 観測専用 (/status)。これで繋いだ端末には稼働状態 (core.health.*) しか届かない
+    const observer_token = if (config.observer_token) |t| t else blk: {
+        const hex = try randomToken(allocator);
+        owned_tokens[2] = hex;
         break :blk hex;
     };
 
@@ -334,9 +342,56 @@ pub fn main() !void {
         .token = dash_token,
         .allow_loopback_without_token = config.weave_env == .development,
         .simulator = config.weave_env == .development,
+        .observer_token = observer_token,
     });
     try dashboard.start();
     std.debug.print("\x1b[36;1m[INSPECTOR]\x1b[0m http://{s}:{d}/?token={s}\n", .{ if (std.mem.eql(u8, config.bind, "0.0.0.0")) "localhost" else config.bind, config.dashboard_port, dash_token });
+    std.debug.print("\x1b[36;1m[STATUS]\x1b[0m    http://{s}:{d}/status?token={s}  (観測専用: 稼働状態だけ。スマホから見るには --bind 0.0.0.0 と PC の IP で)\n", .{ if (std.mem.eql(u8, config.bind, "0.0.0.0")) "localhost" else config.bind, config.dashboard_port, observer_token });
+
+    // 4b. OBS への送信ノード。プラグインより先にバスにつなぐ (attach)。
+    //     プラグインが起動時 (on_init) に出す OBS への指示 (サブ目標やスコアの初期表示など) を
+    //     「意図した状態」として受け取り、接続後に送るため。以前はプラグインの後に作っていて、
+    //     起動時の指示は購読者がいないまま捨てられていた
+    var maybe_obs: ?*ObsEgressNode = null;
+    var maybe_mock_obs: ?*MockObsEgressNode = null;
+    var maybe_link: ?*CellLink = null;
+    var cell_argv: std.ArrayListUnmanaged([]const u8) = .{};
+    defer cell_argv.deinit(allocator);
+    var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var sock_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var port_buf: [8]u8 = undefined;
+    if (config.isolate_egress) {
+        // egress セルを別プロセスで動かす (ADR-010)。強制と意図した状態は Core に残す
+        const exe_dir = try std.fs.selfExeDirPath(&exe_dir_buf);
+        const cell_exe = try std.fs.path.join(allocator, &.{ exe_dir, "weave-cell" });
+        defer allocator.free(cell_exe);
+        const sock = try std.fmt.bufPrint(&sock_buf, "{s}/egress.sock", .{config.state_dir});
+        try cell_argv.appendSlice(allocator, &.{ try allocator.dupe(u8, cell_exe), "egress", "--socket", sock });
+        if (config.mock_obs) {
+            // 出力ファイルは Core の起動時に 1 回だけ空にする (子の再起動では消さない)
+            std.fs.cwd().deleteFile(config.mock_obs_filepath) catch {};
+            (try std.fs.cwd().createFile(config.mock_obs_filepath, .{})).close();
+            try cell_argv.appendSlice(allocator, &.{ "--mock-obs-file", config.mock_obs_filepath });
+        } else {
+            try cell_argv.appendSlice(allocator, &.{ "--obs-host", config.obs_host, "--obs-port", try std.fmt.bufPrint(&port_buf, "{d}", .{config.obs_port}) });
+        }
+        maybe_link = try CellLink.create(allocator, &core.bus, 2, sock, cell_argv.items, config.obs_password);
+        try maybe_link.?.attach();
+    } else if (config.mock_obs) {
+        maybe_mock_obs = try MockObsEgressNode.init(allocator, &core.bus, 2, config.obs_password, config.mock_obs_filepath);
+        try maybe_mock_obs.?.attach();
+    } else {
+        maybe_obs = try ObsEgressNode.init(allocator, &core.bus, 2, config.obs_password);
+        try maybe_obs.?.attach();
+    }
+    defer {
+        if (maybe_mock_obs) |o| o.deinit();
+        if (maybe_obs) |o| o.deinit();
+        if (maybe_link) |l| {
+            l.destroy();
+            allocator.free(cell_argv.items[0]);
+        }
+    }
 
     // 5. Wasmプラグイン
     var symbols = host_api.getNativeSymbols();
@@ -437,68 +492,58 @@ pub fn main() !void {
     }
     defer if (maybe_sl) |sl| sl.deinit();
 
+    // OBS への送信ノードはプラグインより先に attach 済み。スナップショットの復元はプラグインの状態を
+    // 戻すのでここ (プラグインの後) で行い、OBS への接続もここで始める
     var snapshot: ?Snapshot = null;
     var snap_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const snapshot_path = try std.fmt.bufPrint(&snap_path_buf, "{s}/snapshot.json", .{config.state_dir});
-    var maybe_obs: ?*ObsEgressNode = null;
-    var maybe_mock_obs: ?*MockObsEgressNode = null;
-    var maybe_link: ?*CellLink = null;
-    var cell_argv: std.ArrayListUnmanaged([]const u8) = .{};
-    defer cell_argv.deinit(allocator);
-    var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var sock_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var port_buf: [8]u8 = undefined;
-    if (config.isolate_egress) {
-        // egress セルを別プロセスで動かす (ADR-010)。強制と意図した状態は Core に残す
-        const exe_dir = try std.fs.selfExeDirPath(&exe_dir_buf);
-        const cell_exe = try std.fs.path.join(allocator, &.{ exe_dir, "weave-cell" });
-        defer allocator.free(cell_exe);
-        const sock = try std.fmt.bufPrint(&sock_buf, "{s}/egress.sock", .{config.state_dir});
-        try cell_argv.appendSlice(allocator, &.{ try allocator.dupe(u8, cell_exe), "egress", "--socket", sock });
-        if (config.mock_obs) {
-            // 出力ファイルは Core の起動時に 1 回だけ空にする (子の再起動では消さない)
-            std.fs.cwd().deleteFile(config.mock_obs_filepath) catch {};
-            (try std.fs.cwd().createFile(config.mock_obs_filepath, .{})).close();
-            try cell_argv.appendSlice(allocator, &.{ "--mock-obs-file", config.mock_obs_filepath });
-        } else {
-            try cell_argv.appendSlice(allocator, &.{ "--obs-host", config.obs_host, "--obs-port", try std.fmt.bufPrint(&port_buf, "{d}", .{config.obs_port}) });
-        }
-        maybe_link = try CellLink.create(allocator, &core.bus, 2, sock, cell_argv.items, config.obs_password);
-        try maybe_link.?.start();
-        snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_link.?.desired);
+    if (maybe_link) |l| {
+        try l.start();
+        snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &l.desired);
         snapshot.?.pm = &core.pm;
         snapshot.?.isolated = &core.isolated;
         // 要求としてバスに流し直す → CellLink が記録し、子に (接続後に) 送る
         if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, true);
-    } else if (config.mock_obs) {
-        maybe_mock_obs = try MockObsEgressNode.init(allocator, &core.bus, 2, config.obs_password, config.mock_obs_filepath);
-        try maybe_mock_obs.?.connect(config.obs_host, config.obs_port);
-        snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_mock_obs.?.desired);
+    } else if (maybe_mock_obs) |o| {
+        try o.connect(config.obs_host, config.obs_port);
+        snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &o.desired);
         snapshot.?.pm = &core.pm;
         snapshot.?.isolated = &core.isolated;
         if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, true);
-    } else {
-        maybe_obs = try ObsEgressNode.init(allocator, &core.bus, 2, config.obs_password);
+    } else if (maybe_obs) |o| {
         // 意図した状態を接続前に戻しておく → 接続 (Identified) 時に OBS へ再適用される
-        snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &maybe_obs.?.desired);
+        snapshot = Snapshot.init(allocator, snapshot_path, &core.bus, &o.desired);
         snapshot.?.pm = &core.pm;
         snapshot.?.isolated = &core.isolated;
         if (config.snapshot and config.restore_snapshot) restoreSnapshot(&snapshot.?, false);
-        maybe_obs.?.connect(config.obs_host, config.obs_port) catch |err| {
+        o.connect(config.obs_host, config.obs_port) catch |err| {
             log.warn("Main: OBS connect failed (optional): {any}", .{err});
         };
-    }
-    defer {
-        if (maybe_mock_obs) |o| o.deinit();
-        if (maybe_obs) |o| o.deinit();
-        if (maybe_link) |l| {
-            l.destroy();
-            allocator.free(cell_argv.items[0]);
-        }
     }
 
     if (config.snapshot) {
         if (snapshot) |*sn| sn.start() catch |err| log.warn("Snapshot: failed to start: {any}", .{err});
+    }
+
+    // 稼働状態の監視 (core.health.summary)。本来いるはずのノード = 起動時に指定したプラグイン + --expect
+    const health = try HealthMonitor.create(allocator, &core.bus, &core.graph);
+    {
+        try health.addBuiltins();
+        var cells = std.ArrayListUnmanaged([]const u8){};
+        defer cells.deinit(allocator);
+        for (config.cell_budgets.items) |cb| try cells.append(allocator, cb.name);
+        var mbuf: [std.fs.max_path_bytes]u8 = undefined;
+        for (config.plugins.items) |path| {
+            const mpath = if (std.mem.endsWith(u8, path, ".wasm")) std.fmt.bufPrint(&mbuf, "{s}.json", .{path[0 .. path.len - 5]}) catch continue else continue;
+            health.addManifest(mpath, cells.items) catch |err| log.warn("Health: cannot read manifest '{s}': {any}", .{ mpath, err });
+        }
+        for (config.expect.items) |mpath| {
+            health.addManifest(mpath, cells.items) catch |err| log.warn("Health: cannot read --expect manifest '{s}': {any}", .{ mpath, err });
+        }
+        for (try health.runLint()) |l| {
+            log.warn("Lint: '{s}' subscribes to '{s}', which no node publishes. Did you mean '{s}' (published by {s})?", .{ l.node, l.topic, l.suggestion, l.suggestion_from });
+        }
+        try health.start();
     }
 
     log.info("Status: Ready in {} ms. Running... (Press Ctrl+C to stop)", .{std.time.milliTimestamp() - t_start});
@@ -538,6 +583,7 @@ pub fn main() !void {
     graph_thread.join();
     ticker_thread.join();
     dispatcher_thread.join();
+    health.destroy();
 
     log.info("Status: Shutdown complete.", .{});
 }
@@ -565,6 +611,7 @@ test {
     _ = @import("tests/audit_match_test.zig");
     _ = @import("transport/node_ws.zig");
     _ = @import("builtin/dashboard.zig");
+    _ = @import("core/health.zig");
     _ = @import("builtin/obs.zig");
     _ = @import("builtin/streamelements.zig");
     _ = @import("builtin/streamlabs.zig");

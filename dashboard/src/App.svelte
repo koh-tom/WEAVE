@@ -10,6 +10,7 @@
   import CellMap from './lib/components/CellMap.svelte';
   import SecurityFeed from './lib/components/SecurityFeed.svelte';
   import FaultTimeline from './lib/components/FaultTimeline.svelte';
+  import HealthPanel from './lib/components/HealthPanel.svelte';
   import IntrospectionToggle from './lib/components/IntrospectionToggle.svelte';
 
   type Tab = 'inspector' | 'stream' | 'topology';
@@ -56,6 +57,7 @@
 
     <main class="flex-1 min-w-0 overflow-auto p-2">
       {#if activeTab === 'inspector'}
+        <div class="mb-2"><HealthPanel /></div>
         <div class="grid grid-cols-1 lg:grid-cols-5 gap-2">
           <div class="lg:col-span-2 flex flex-col gap-2">
             <ObsPreview />
