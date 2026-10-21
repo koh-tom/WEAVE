@@ -12,6 +12,8 @@
 //! - WebSocket はトークン必須 (development でループバックからの接続だけは省略可)
 //! - Inspector からの publish は固定の権限 (ALLOW_*) とレート制限を通す。予約名前空間は発行不可
 //! - introspection レベルに応じて、PII を含みうる payload を隠す
+//! - 観測専用トークン (/status) で繋いだ端末には core.health.* だけを送り、publish は受け付けない。
+//!   会場を動き回るスタッフのスマホなどに渡しても、チャット本文やトポロジは漏れない
 
 const std = @import("std");
 const event_bus = @import("../core/event_bus.zig");
@@ -27,6 +29,8 @@ pub const Options = struct {
     dist_dir: []const u8 = "dashboard/dist",
     /// WebSocket 接続に必要なトークン
     token: []const u8,
+    /// 観測専用のトークン。これで繋いだ端末には稼働状態 (core.health.*) しか届かない
+    observer_token: ?[]const u8 = null,
     /// ループバックからの接続はトークンを省略してよいか (development の利便性)
     allow_loopback_without_token: bool = true,
     /// チャットシミュレータ (ext.* への publish) を許可するか
@@ -35,8 +39,17 @@ pub const Options = struct {
     publish_rate_eps: f64 = 200,
 };
 
+/// 接続の権限。full = Inspector (全イベント・publish 可)、observer = 稼働状態だけ (publish 不可)
+pub const Role = enum { full, observer };
+
+/// 観測専用の端末に送ってよいトピック
+pub fn observerMayReceive(topic: []const u8) bool {
+    return pattern.isMatch("core.health.#", topic);
+}
+
 const Client = struct {
     stream: std.net.Stream,
+    role: Role = .full,
     send_mutex: std.Thread.Mutex = .{},
     alive: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 };
@@ -47,6 +60,7 @@ pub const DashboardNode = struct {
     node_id: u32,
     opts: Options,
     token: []u8,
+    observer_token: ?[]u8,
     dist_dir: []u8,
     bind: []u8,
 
@@ -73,6 +87,7 @@ pub const DashboardNode = struct {
             .node_id = node_id,
             .opts = opts,
             .token = try allocator.dupe(u8, opts.token),
+            .observer_token = if (opts.observer_token) |t| try allocator.dupe(u8, t) else null,
             .dist_dir = try allocator.dupe(u8, opts.dist_dir),
             .bind = try allocator.dupe(u8, opts.bind),
             .rate = RateLimiter.init(opts.publish_rate_eps),
@@ -122,6 +137,7 @@ pub const DashboardNode = struct {
         self.clients.deinit(self.allocator);
         self.clients_mutex.unlock();
         self.allocator.free(self.token);
+        if (self.observer_token) |t| self.allocator.free(t);
         self.allocator.free(self.dist_dir);
         self.allocator.free(self.bind);
         self.allocator.destroy(self);
@@ -209,6 +225,8 @@ pub const DashboardNode = struct {
         }
         var rel_buf: [512]u8 = undefined;
         var rel = sanitizePath(req.path, &rel_buf) orelse return ws.writeStatus(stream, 404, "Not Found", "not found");
+        // 観測専用のページ (スマホ向け)。Inspector (SPA) とは別の軽いページ
+        if (std.mem.eql(u8, rel, "status")) rel = "status.html";
         var dir = std.fs.cwd().openDir(self.dist_dir, .{}) catch {
             return ws.writeStatus(stream, 503, "Service Unavailable", "dashboard is not built. Run: cd dashboard && bun install && bun run build");
         };
@@ -238,19 +256,23 @@ pub const DashboardNode = struct {
         };
     }
 
-    fn authorized(self: *DashboardNode, conn: std.net.Server.Connection, req: ws.Request) bool {
-        const presented = req.token_header orelse req.queryParam("token");
-        if (presented) |t| return ws.constantTimeEql(t, self.token);
-        return self.opts.allow_loopback_without_token and isLoopback(conn.address);
+    /// 提示されたトークンから権限を決める。どちらにも合わなければ null (拒否)
+    pub fn roleFor(self: *const DashboardNode, presented: ?[]const u8, loopback: bool) ?Role {
+        if (presented) |t| {
+            if (ws.constantTimeEql(t, self.token)) return .full;
+            if (self.observer_token) |o| if (ws.constantTimeEql(t, o)) return .observer;
+            return null;
+        }
+        return if (self.opts.allow_loopback_without_token and loopback) .full else null;
     }
 
     fn handleWebSocket(self: *DashboardNode, conn: std.net.Server.Connection, req: ws.Request) void {
-        if (!self.authorized(conn, req)) {
+        const role = self.roleFor(req.token_header orelse req.queryParam("token"), isLoopback(conn.address)) orelse {
             ws.writeStatus(conn.stream, 401, "Unauthorized", "token required") catch {};
             conn.stream.close();
             self.emitSecurity("auth_failed", "dashboard websocket");
             return;
-        }
+        };
         self.clients_mutex.lock();
         const full = self.clients.items.len >= self.opts.max_clients;
         self.clients_mutex.unlock();
@@ -269,7 +291,7 @@ pub const DashboardNode = struct {
             conn.stream.close();
             return;
         };
-        client.* = .{ .stream = conn.stream };
+        client.* = .{ .stream = conn.stream, .role = role };
         self.clients_mutex.lock();
         self.clients.append(self.allocator, client) catch {
             self.clients_mutex.unlock();
@@ -278,18 +300,28 @@ pub const DashboardNode = struct {
             return;
         };
         self.clients_mutex.unlock();
-        log.info("Dashboard: Inspector connected from {f}", .{conn.address});
-
-        // 接続直後に現在のトポロジと、保持されている状態 (OBS 接続・観測レベル・ノード状態など) を送る。
-        // 後から開いた Inspector でも「今の状態」が正しく見えるようにするため。
-        self.sendGraph(client);
-        self.sendRetained(client);
+        if (role == .observer) {
+            log.info("Dashboard: status viewer (read-only) connected from {f}", .{conn.address});
+            // 観測専用: トポロジは送らず、保持されている稼働状態だけを渡す
+            self.sendRetainedFiltered(client, observerMayReceive);
+        } else {
+            log.info("Dashboard: Inspector connected from {f}", .{conn.address});
+            // 接続直後に現在のトポロジと、保持されている状態 (OBS 接続・観測レベル・ノード状態など) を送る。
+            // 後から開いた Inspector でも「今の状態」が正しく見えるようにするため。
+            self.sendGraph(client);
+            self.sendRetained(client);
+        }
+        var denied_once = false;
 
         while (self.running.load(.acquire) and client.alive.load(.acquire)) {
             const frame = ws.readMessage(conn.stream, self.allocator, 64 * 1024) catch break;
             defer self.allocator.free(frame.payload);
             switch (frame.opcode) {
-                .text => self.handleInspectorMessage(frame.payload),
+                .text => if (role == .observer) {
+                    // 観測専用の端末からの publish は受け付けない (記録は接続ごとに 1 回)
+                    if (!denied_once) self.emitSecurity("acl_denied", "status viewer cannot publish");
+                    denied_once = true;
+                } else self.handleInspectorMessage(frame.payload),
                 .ping => {
                     client.send_mutex.lock();
                     ws.writeFrame(conn.stream, .pong, frame.payload, false) catch {};
@@ -333,7 +365,11 @@ pub const DashboardNode = struct {
     }
 
     fn sendRetained(self: *DashboardNode, client: *Client) void {
-        var list = self.bus.snapshotRetained(self.allocator, retainedFilter) catch return;
+        self.sendRetainedFiltered(client, retainedFilter);
+    }
+
+    fn sendRetainedFiltered(self: *DashboardNode, client: *Client, filter: *const fn ([]const u8) bool) void {
+        var list = self.bus.snapshotRetained(self.allocator, filter) catch return;
         defer {
             for (list.items) |e| {
                 self.allocator.free(e.topic);
@@ -425,10 +461,14 @@ pub const DashboardNode = struct {
     /// バスの全イベントを Inspector に配信する (observe セルの executor 上)
     fn onBusMessage(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
         const self: *DashboardNode = @ptrCast(@alignCast(ctx orelse return));
+        const for_observers = observerMayReceive(msg.topic);
         self.clients_mutex.lock();
-        const n = self.clients.items.len;
+        var any_wants = false;
+        for (self.clients.items) |c| {
+            if (c.role == .full or for_observers) any_wants = true;
+        }
         self.clients_mutex.unlock();
-        if (n == 0) return;
+        if (!any_wants) return;
 
         const level: event_bus.IntrospectionLevel = @enumFromInt(self.bus.introspection_level.load(.monotonic));
         const is_core = std.mem.startsWith(u8, msg.topic, "core.");
@@ -454,6 +494,7 @@ pub const DashboardNode = struct {
         defer self.clients_mutex.unlock();
         for (self.clients.items) |c| {
             if (!c.alive.load(.acquire)) continue;
+            if (c.role == .observer and !for_observers) continue;
             c.send_mutex.lock();
             ws.writeFrame(c.stream, .text, out.items, false) catch {
                 c.alive.store(false, .release);
@@ -487,4 +528,34 @@ test "Inspector publish permissions" {
     try std.testing.expect(!d.canPublish("core.node.fault"));
     d.opts.simulator = false;
     try std.testing.expect(!d.canPublish("ext.twitch.chat.message"));
+}
+
+test "observer token: read-only role, receives only core.health.*" {
+    const a = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(a, 8);
+    defer bus.deinit();
+    bus.verbose = false;
+    var d = try DashboardNode.init(a, &bus, 10, .{ .token = "full-token", .observer_token = "view-token", .port = 0 });
+    defer d.deinit();
+    try std.testing.expectEqual(@as(?Role, .full), d.roleFor("full-token", false));
+    try std.testing.expectEqual(@as(?Role, .observer), d.roleFor("view-token", false));
+    try std.testing.expectEqual(@as(?Role, null), d.roleFor("wrong", true));
+    // トークン無しは、development のループバックだけ full。外からは拒否
+    try std.testing.expectEqual(@as(?Role, .full), d.roleFor(null, true));
+    try std.testing.expectEqual(@as(?Role, null), d.roleFor(null, false));
+
+    try std.testing.expect(observerMayReceive("core.health.summary"));
+    try std.testing.expect(!observerMayReceive("ext.twitch.chat.message"));
+    try std.testing.expect(!observerMayReceive("core.system.graph.full"));
+    try std.testing.expect(!observerMayReceive("core.security.acl_denied"));
+}
+
+test "observer token not configured: only the Inspector token works" {
+    const a = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(a, 8);
+    defer bus.deinit();
+    bus.verbose = false;
+    var d = try DashboardNode.init(a, &bus, 10, .{ .token = "full-token", .port = 0 });
+    defer d.deinit();
+    try std.testing.expectEqual(@as(?Role, null), d.roleFor("view-token", false));
 }

@@ -49,6 +49,12 @@ pub const Config = struct {
     bind: []const u8 = "127.0.0.1",
     /// Inspector (Dashboard WebSocket) のトークン。未設定なら起動時に生成して表示
     dashboard_token: ?[]const u8 = null,
+    /// 観測専用のトークン (/status)。これで繋いだ端末には稼働状態 (core.health.*) しか届かず、publish もできない。
+    /// 未設定なら起動時に生成して表示
+    observer_token: ?[]const u8 = null,
+    /// 「本来いるはずのノード」の manifest (--expect <manifest.json> / weave.json の "expect")。
+    /// 起動していなければ「起動していない」と判定し、それに依存して止まる機能を core.health.summary に出す
+    expect: std.ArrayListUnmanaged([]const u8) = .{},
     /// 起動時の観測レベル: off | metadata | contents
     introspection: []const u8 = "metadata",
     /// mock Twitch のシナリオを 1 回だけ再生する (e2e テスト用)
@@ -190,6 +196,15 @@ pub const Config = struct {
                     if (self.dashboard_token) |t| allocator.free(t);
                     self.dashboard_token = try allocator.dupe(u8, v.string);
                 }
+                if (obj.get("observer_token")) |v| {
+                    if (self.observer_token) |t| allocator.free(t);
+                    self.observer_token = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("expect")) |v| {
+                    if (v == .array) for (v.array.items) |item| {
+                        if (item == .string) try self.expect.append(allocator, try allocator.dupe(u8, item.string));
+                    };
+                }
                 if (obj.get("introspection")) |v| {
                     allocator.free(self.introspection);
                     self.introspection = try allocator.dupe(u8, v.string);
@@ -218,6 +233,11 @@ pub const Config = struct {
         if (std.process.getEnvVarOwned(allocator, "WEAVE_DASHBOARD_TOKEN")) |val| {
             if (self.dashboard_token) |t| allocator.free(t);
             self.dashboard_token = val;
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_OBSERVER_TOKEN")) |val| {
+            if (self.observer_token) |t| allocator.free(t);
+            self.observer_token = val;
         } else |_| {}
 
         if (std.process.getEnvVarOwned(allocator, "STREAMELEMENTS_JWT")) |val| {
@@ -294,6 +314,15 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 if (self.dashboard_token) |t| allocator.free(t);
                 self.dashboard_token = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--observer-token")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                if (self.observer_token) |t| allocator.free(t);
+                self.observer_token = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--expect")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                try self.expect.append(allocator, try allocator.dupe(u8, args[i]));
             } else if (std.mem.eql(u8, arg, "--introspection")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -334,8 +363,6 @@ pub const Config = struct {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
                 if (self.replay_path) |p| allocator.free(p);
-                for (self.isolate_plugin_names.items) |n| allocator.free(n);
-                self.isolate_plugin_names.deinit(allocator);
                 self.replay_path = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--mock-twitch-once")) {
                 self.mock_twitch_once = true;
@@ -475,6 +502,11 @@ pub const Config = struct {
         allocator.free(self.dashboard_dist);
         allocator.free(self.state_dir);
         if (self.dashboard_token) |t| allocator.free(t);
+        if (self.observer_token) |t| allocator.free(t);
+        for (self.expect.items) |e| allocator.free(e);
+        self.expect.deinit(allocator);
+        for (self.isolate_plugin_names.items) |n| allocator.free(n);
+        self.isolate_plugin_names.deinit(allocator);
         if (self.streamelements_channel) |c| allocator.free(c);
         if (self.streamelements_url) |u| allocator.free(u);
         if (self.streamelements_jwt) |t| {
@@ -519,6 +551,10 @@ fn printHelp() void {
         \\                       Plugins join such a cell with "cell" in their manifest
         \\  --bind <addr>        Listen address for dashboard / node servers (default: 127.0.0.1)
         \\  --dashboard-token <t> Token for the Inspector WebSocket (default: generated)
+        \\  --observer-token <t> Token for the read-only status page /status (default: generated).
+        \\                       Devices using it only receive core.health.* and cannot publish
+        \\  --expect <manifest>  A node that should be running (repeatable). If it is not, the nodes that
+        \\                       depend on it are reported in core.health.summary (e.g. a forgotten tool)
         \\  --streamelements-channel <id>  StreamElements channel id (JWT via env STREAMELEMENTS_JWT)
         \\  --streamelements-url <url>     Astro endpoint (default: wss://astro.streamelements.com/)
         \\  --streamlabs                   Connect to the Streamlabs Socket API (token via env STREAMLABS_SOCKET_TOKEN)

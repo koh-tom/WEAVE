@@ -1,0 +1,12 @@
+{
+    "abi_version": 1,
+    "name": "score_tool",
+    "version": "1.0.0",
+    "description": "demo: the score keeper of a competition. Counts !point A / !point B and publishes ext.score.update",
+    "permissions": {
+        "publish": ["ext.score.update"],
+        "subscribe": ["ext.twitch.chat.message"],
+        "data_access": ["pii"]
+    },
+    "rate_limit_eps": 20
+}

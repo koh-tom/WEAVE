@@ -40,6 +40,8 @@ pub const reserved = [_][]const u8{
     "core.system.#",
     "core.security.#",
     "core.cell.#",
+    // 稼働状態のまとめ (HealthMonitor)。偽造されると「止まっていない」と見せかけられる
+    "core.health.#",
 };
 
 /// 個人情報を含みうるパターン (購読には `data_access: ["pii"]` の宣言が要る)。
@@ -62,6 +64,8 @@ pub const state_topics = [_][]const u8{
     "core.system.introspection.changed",
     "core.obs.event.#",
     "core.obs.link",
+    // 稼働状態のまとめ。後から開いた /status にも今の状態を渡す
+    "core.health.#",
     // プラグイン・外部ノードが自分の状態を公開するための慣例 (例: ext.chat_node.status)
     "ext.+.status",
     "ext.+.state.#",

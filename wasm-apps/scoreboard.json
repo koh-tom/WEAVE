@@ -1,0 +1,11 @@
+{
+    "abi_version": 1,
+    "name": "scoreboard",
+    "version": "1.0.0",
+    "description": "demo: the on-stream score display. Shows ext.score.update in the OBS text source 'Scoreboard'",
+    "permissions": {
+        "publish": ["core.obs.request.SetInputSettings"],
+        "subscribe": ["ext.score.update"]
+    },
+    "rate_limit_eps": 20
+}

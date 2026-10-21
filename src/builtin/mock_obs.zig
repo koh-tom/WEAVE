@@ -4,6 +4,8 @@ const log = @import("../common/log.zig");
 const DesiredState = @import("obs.zig").DesiredState;
 
 pub const MockObsEgressNode = struct {
+    /// バスにつないだか (attach 済み)
+    attached: bool = false,
     allocator: std.mem.Allocator,
     bus: *event_bus.EventBus,
     node_id: u32,
@@ -47,6 +49,14 @@ pub const MockObsEgressNode = struct {
     pub fn connect(self: *MockObsEgressNode, host: []const u8, port: u16) !void {
         _ = host;
         _ = port;
+        try self.attach();
+    }
+
+    /// バスにつなぐ (出力ファイルの初期化・グラフ登録・購読)。プラグインより先に呼ぶと、
+    /// プラグインが起動時に出した要求も取りこぼさない。connect() は未実行ならこれも行う
+    pub fn attach(self: *MockObsEgressNode) !void {
+        if (self.attached) return;
+        self.attached = true;
         self.running = true;
 
         // 起動時にファイルクリア: deleteFile catch {} の後 create

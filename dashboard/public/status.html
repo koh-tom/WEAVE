@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配信の状態 — WEAVE</title>
+<style>
+  :root { --ink:#1b1b1b; --sub:#5f6368; --line:#d9dce0; --bg:#ffffff; --ok:#1a7f37; --bad:#c62828; --warn:#a15c00; --soft:#f4f5f7; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Noto Sans CJK JP", system-ui, sans-serif; }
+  .wrap { max-width: 560px; margin: 0 auto; padding: 14px 16px 40px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  h1 { font-size: 20px; margin: 0; }
+  .conn { font-size: 12px; color: var(--sub); white-space: nowrap; }
+  .conn.off { color: var(--bad); font-weight: 700; }
+  .banner { margin: 12px 0 8px; padding: 16px 14px; border: 2px solid var(--line); font-size: 20px; font-weight: 800; }
+  .banner small { display: block; margin-top: 4px; font-size: 13px; font-weight: 400; color: var(--sub); }
+  .banner.ok { border-color: var(--ok); color: var(--ok); }
+  .banner.trouble { border-color: var(--bad); color: var(--bad); }
+  .banner.warn { border-color: var(--warn); color: var(--warn); }
+  h2 { font-size: 14px; margin: 18px 0 6px; color: var(--sub); font-weight: 700; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li.item { border-left: 4px solid var(--line); background: var(--soft); padding: 9px 11px; margin: 0 0 6px; font-size: 15px; line-height: 1.5; }
+  li.bad { border-left-color: var(--bad); }
+  li.warn { border-left-color: var(--warn); }
+  li.ok { border-left-color: var(--ok); }
+  .name { font-weight: 800; }
+  .mono { font-family: ui-monospace, "Noto Sans Mono CJK JP", Menlo, Consolas, monospace; font-size: 12.5px; color: var(--sub); word-break: break-all; }
+  .when { font-size: 12px; color: var(--sub); }
+  .nodes { display: flex; flex-wrap: wrap; gap: 6px; }
+  .node { font-size: 13px; padding: 4px 8px; border: 1px solid var(--line); background: #fff; }
+  .node::before { content: "●"; margin-right: 5px; color: var(--ok); }
+  .node.down::before { color: var(--bad); }
+  .empty { font-size: 14px; color: var(--sub); }
+  footer { margin-top: 22px; font-size: 12px; color: var(--sub); line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>配信の状態</h1>
+    <span id="conn" class="conn">接続中…</span>
+  </header>
+
+  <div id="banner" class="banner">読み込み中…<small id="updated"></small></div>
+
+  <section id="sec-problems" hidden>
+    <h2>止まっているもの</h2>
+    <ul id="problems"></ul>
+  </section>
+  <section id="sec-impacts" hidden>
+    <h2>そのせいで影響を受けているもの</h2>
+    <ul id="impacts"></ul>
+  </section>
+  <section id="sec-warnings" hidden>
+    <h2>設定の気になる点</h2>
+    <ul id="warnings"></ul>
+  </section>
+  <section id="sec-recent" hidden>
+    <h2>最近の自動復帰</h2>
+    <ul id="recent"></ul>
+  </section>
+  <section>
+    <h2>動いているもの</h2>
+    <div id="nodes" class="nodes"></div>
+  </section>
+
+  <footer>この画面には稼働状態だけが届きます。チャットの本文や配信の操作は、この画面からは見えず、操作もできません。</footer>
+</div>
+
+<script>
+(() => {
+  const STATUS_JA = {
+    missing: '起動していません',
+    restarting: '自動で作り直しています',
+    quarantined: '何度も落ちたため、一時的に止めています',
+    stopped: '停止しています',
+    degraded: '一部が動いていません',
+    disconnected: '接続が切れています',
+  };
+  const DOWN = new Set(Object.keys(STATUS_JA));
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const hhmmss = (ms) => ms ? new Date(ms).toLocaleTimeString('ja-JP', { hour12: false }) : '';
+  // ObsEgress などの内部名を、スタッフにも分かる言葉に
+  const FRIENDLY = { ObsEgress: 'OBS への送信', TwitchAdapter: 'Twitch のチャット受信', StreamElements: 'StreamElements', Streamlabs: 'Streamlabs' };
+  const nm = (n) => FRIENDLY[n] || n;
+
+  function render(h) {
+    const b = $('banner');
+    b.className = 'banner ' + h.overall;
+    b.firstChild.textContent = h.overall === 'ok' ? 'すべて動いています'
+      : h.overall === 'warn' ? '動いていますが、設定に気になる点があります'
+      : '止まっている機能があります';
+    $('updated').textContent = '更新 ' + hhmmss(h.updated);
+
+    const fill = (sec, list, items, make) => {
+      const ul = $(list); ul.replaceChildren();
+      for (const it of items) ul.appendChild(make(it));
+      $(sec).hidden = items.length === 0;
+    };
+
+    fill('sec-problems', 'problems', h.problems || [], (p) => {
+      const li = el('li', 'item bad');
+      li.appendChild(el('span', 'name', nm(p.node)));
+      li.appendChild(document.createTextNode(' — ' + (STATUS_JA[p.status] || p.status)));
+      if (p.since) li.appendChild(el('div', 'when', hhmmss(p.since) + ' から'));
+      return li;
+    });
+
+    const sinkFor = {};
+    for (const s of (h.sinks || [])) (sinkFor[s.node] ||= []).push(s);
+    const impacts = (h.impacts || []).map((i) => ({ ...i, sinks: sinkFor[i.node] || [] }));
+    // 止まったもの自身が OBS に出していた表示も「影響」として見せる
+    for (const p of (h.problems || [])) if (sinkFor[p.node]) impacts.push({ node: p.node, effect: 'self', because: [], lost: [], sinks: sinkFor[p.node] });
+    for (const s of (h.sinks_stopped || [])) impacts.push({ node: s, effect: 'sink', because: [], lost: [], sinks: [] });
+    fill('sec-impacts', 'impacts', impacts, (i) => {
+      const li = el('li', 'item ' + (i.effect === 'degraded' ? 'warn' : 'bad'));
+      li.appendChild(el('span', 'name', nm(i.node)));
+      let text = '';
+      if (i.effect === 'stalled') text = ' — 入力が届かず、止まっています';
+      else if (i.effect === 'degraded') text = ' — 入力の一部が届いていません';
+      else if (i.effect === 'sink') text = ' — 配信画面の操作が止まっています';
+      if (text) li.appendChild(document.createTextNode(text));
+      if (i.because && i.because.length) li.appendChild(el('div', null, '原因: ' + i.because.map(nm).join('、')));
+      for (const s of i.sinks) li.appendChild(el('div', null, '→ ' + nm(i.node) + ' が出していた配信画面の表示が更新されません'));
+      if (i.lost && i.lost.length) li.appendChild(el('div', 'mono', '届いていない入力: ' + i.lost.join(', ')));
+      return li;
+    });
+
+    fill('sec-warnings', 'warnings', h.warnings || [], (w) => {
+      const li = el('li', 'item warn');
+      li.appendChild(el('span', 'name', nm(w.node)));
+      li.appendChild(document.createTextNode(' が待っているイベントを出すものがいません。名前の書き間違いかもしれません'));
+      li.appendChild(el('div', 'mono', w.topic + '  →  もしかして ' + w.suggestion + '(' + nm(w.from) + ' が出しています)'));
+      return li;
+    });
+
+    fill('sec-recent', 'recent', h.recent || [], (r) => {
+      const li = el('li', 'item ok');
+      li.appendChild(el('span', 'name', nm(r.node)));
+      li.appendChild(document.createTextNode(' が ' + r.down_ms + ' ms 止まり、自動で戻りました'));
+      li.appendChild(el('div', 'when', hhmmss(r.ts)));
+      return li;
+    });
+
+    const nodes = $('nodes'); nodes.replaceChildren();
+    for (const n of (h.nodes || [])) nodes.appendChild(el('span', 'node' + (DOWN.has(n.status) ? ' down' : ''), nm(n.name)));
+  }
+
+  const token = new URLSearchParams(location.search).get('token') || '';
+  let wait = 500;
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+    ws.onopen = () => { wait = 500; $('conn').textContent = 'リアルタイム'; $('conn').className = 'conn'; };
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.topic !== 'core.health.summary') return;
+      const h = typeof m.payload === 'string' ? JSON.parse(m.payload) : m.payload;
+      render(h);
+    };
+    ws.onclose = () => {
+      $('conn').textContent = 'WEAVE に接続できません(再接続します)'; $('conn').className = 'conn off';
+      setTimeout(connect, wait); wait = Math.min(wait * 2, 8000);
+    };
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

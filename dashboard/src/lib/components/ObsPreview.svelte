@@ -32,6 +32,7 @@
   let overlayOn = $derived(card1On || card2On);
   let overlayText = $derived(card2On ? ($obsText['ShoutoutText'] ?? '') : ($obsText['OverlayText'] ?? ''));
   let subGoal = $derived($obsText['SubGoal'] ?? '');
+  let scoreboard = $derived($obsText['Scoreboard'] ?? '');
 </script>
 
 <div class="panel">
@@ -56,6 +57,10 @@
         配信中 {fmt(now - sessionStart)}
       </div>
       <div class="absolute inset-0 flex items-center justify-center dim text-[12px]">ゲーム画面</div>
+      <!-- 競技のスコア表示 (scoreboard)。score_tool が止まっていると更新されない -->
+      {#if scoreboard}
+        <div class="absolute top-1.5 left-1/2 -translate-x-1/2 px-3 py-0.5 text-[14px] font-bold mono bg-white border border-[var(--line)]">{scoreboard}</div>
+      {/if}
       <!-- 配信画面に常に出しておくウィジェット (サブ目標バー) -->
       {#if subGoal}
         <div class="absolute top-1.5 right-1.5 px-2 py-0.5 text-[12px] font-bold mono bg-white border border-[var(--line)]">{subGoal}</div>
