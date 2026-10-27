@@ -9,6 +9,7 @@
 //!   weave topic echo [pattern]               イベントを表示 (Ctrl+C で終了)
 //!   weave node ls                            ノード一覧 (セル・状態)
 //!   weave doctor                             環境の自己診断
+//!   weave add <plugin.wasm> [--yes]         プラグインの権限を人の言葉で見て承認する (.weave/approved.json)
 //!   weave init <name>                        プラグインのひな形 (wasm-apps/<name>.zig/.json)
 //!   weave demo [name] [args]                 デモ台本 (demo/run_<name>_demo.sh) を実行。名前なしで一覧
 //!
@@ -18,6 +19,9 @@ const std = @import("std");
 const ws = @import("transport/ws_proto.zig");
 const pattern = @import("core/pattern.zig");
 const Manifest = @import("core/manifest.zig").Manifest;
+const approval = @import("security/approval.zig");
+const signing = @import("security/signing.zig");
+const blast = @import("audit/blast.zig");
 
 const Conn = struct { host: []const u8, port: u16, path: []const u8, token: ?[]const u8 };
 
@@ -34,6 +38,7 @@ fn usage() void {
         \\  weave topic echo [pattern]              イベントを表示
         \\  weave node ls                           ノード一覧
         \\  weave doctor                            自己診断
+        \\  weave add <plugin.wasm> [--yes]         権限を確かめて承認する (--approval-mode strict で必須)
         \\  weave init <name> [--lang zig|as]      プラグインのひな形を作る (as = AssemblyScript)
         \\  weave demo [name] [args]                デモ台本を実行 (名前なしで一覧)
         \\  weave record <file>                     全イベントを JSONL に記録 (weave run --replay <file> で再生)
@@ -435,6 +440,145 @@ fn cmdDemo(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     return err;
 }
 
+/// `weave add` — 入れる前に「このプラグインが何をできるか」を人の言葉で見せて、承認を記録する。
+///   既に承認済みなら、増えた権限だけを見せて再承認を求める (スマホアプリの権限と同じ考え方)。
+fn cmdAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var wasm_path: ?[]const u8 = null;
+    var assume_yes = false;
+    var path: []const u8 = approval.DEFAULT_PATH;
+    var trust_keys: []const u8 = ".weave/trusted_keys";
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--yes") or std.mem.eql(u8, args[i], "-y")) {
+            assume_yes = true;
+        } else if (std.mem.eql(u8, args[i], "--approvals") and i + 1 < args.len) {
+            i += 1;
+            path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--trust-keys") and i + 1 < args.len) {
+            i += 1;
+            trust_keys = args[i];
+        } else wasm_path = args[i];
+    }
+    const wp = wasm_path orelse {
+        std.debug.print("usage: weave add <plugin.wasm> [--yes] [--approvals .weave/approved.json]\n", .{});
+        std.process.exit(2);
+    };
+    if (!std.mem.endsWith(u8, wp, ".wasm")) {
+        std.debug.print("weave add: expected a .wasm file (its manifest is the .json next to it)\n", .{});
+        std.process.exit(2);
+    }
+    const mp = try std.fmt.allocPrint(allocator, "{s}.json", .{wp[0 .. wp.len - 5]});
+    const wasm = std.fs.cwd().readFileAlloc(allocator, wp, 16 * 1024 * 1024) catch |err| {
+        std.debug.print("weave add: cannot read {s}: {any}\n", .{ wp, err });
+        std.process.exit(1);
+    };
+    const manifest = std.fs.cwd().readFileAlloc(allocator, mp, 1024 * 1024) catch |err| {
+        std.debug.print("weave add: cannot read manifest {s}: {any}\n", .{ mp, err });
+        std.process.exit(1);
+    };
+    const m = approval.parseManifest(allocator, manifest) catch |err| {
+        std.debug.print("weave add: invalid manifest {s}: {any}\n", .{ mp, err });
+        std.process.exit(1);
+    };
+    const digest = try approval.digestHex(allocator, wasm, manifest);
+    var store = try approval.Store.load(allocator, path);
+    const verdict = try approval.check(allocator, &store, m, digest);
+
+    var out_buf: [4096]u8 = undefined;
+    var out_w = std.fs.File.stdout().writer(&out_buf);
+    const out = &out_w.interface;
+
+    if (verdict == .approved) {
+        try out.print("'{s}' は承認済みです (変更なし)\n", .{m.name});
+        return out.flush();
+    }
+
+    try out.print("\nプラグイン '{s}' {s}\n", .{ m.name, m.version });
+    switch (verdict) {
+        .not_approved => try out.print("  はじめて入れます。このプラグインができること:\n", .{}),
+        .updated => try out.print("  コードが更新されました。権限は増えていません:\n", .{}),
+        .permissions_increased => try out.print("  更新で権限が増えました。★ が新しく求められている権限です:\n", .{}),
+        .approved => unreachable,
+    }
+    const added: ?approval.Added = if (verdict == .permissions_increased) verdict.permissions_increased else null;
+    try printPerms(out, "受け取る", m.permissions.subscribe, if (added) |a| a.subscribe else &.{}, approval.describeSubscribe);
+    try printPerms(out, "出す", m.permissions.publish, if (added) |a| a.publish else &.{}, approval.describePublish);
+    try printPerms(out, "触れるデータ", m.permissions.data_access, if (added) |a| a.data_access else &.{}, approval.describeDataAccess);
+
+    // 影響範囲: 乗っ取られたとき最悪どこまで届くか (manifest の宣言だけから計算)
+    var nodes = std.ArrayListUnmanaged(blast.Node){};
+    try nodes.appendSlice(allocator, try blast.builtinNodes(allocator));
+    try nodes.append(allocator, try blast.loadManifestNode(allocator, mp));
+    const report = try blast.computeBlast(allocator, nodes.items, m.name);
+    try out.print("\n  乗っ取られた場合に届く外部の出口: ", .{});
+    if (report.reachable_sinks.len == 0) {
+        try out.print("なし (配信や外部には影響しない)\n", .{});
+    } else {
+        for (report.reachable_sinks, 0..) |r, k| try out.print("{s}{s}", .{ if (k == 0) "" else ", ", sinkLabel(r.node_name) });
+        try out.print("\n", .{});
+    }
+
+    // 署名: 誰が作ったか (トラストアンカー Stage 1)
+    try out.print("  署名: {s}\n\n", .{signatureStatus(allocator, wp, wasm, manifest, trust_keys)});
+
+    if (!assume_yes) {
+        try out.print("承認しますか? [y/N] ", .{});
+        try out.flush();
+        var in_buf: [256]u8 = undefined;
+        var in_r = std.fs.File.stdin().reader(&in_buf);
+        const line = in_r.interface.takeDelimiterExclusive('\n') catch "";
+        const ans = std.mem.trim(u8, line, " \t\r");
+        if (!(std.mem.eql(u8, ans, "y") or std.mem.eql(u8, ans, "Y") or std.mem.eql(u8, ans, "yes"))) {
+            try out.print("承認しませんでした (記録は変えていません)\n", .{});
+            try out.flush();
+            std.process.exit(1);
+        }
+    }
+    try store.upsert(allocator, .{
+        .name = m.name,
+        .version = m.version,
+        .digest = digest,
+        .permissions = m.permissions,
+        .approved_at = std.time.timestamp(),
+    });
+    try store.save(allocator, path);
+    try out.print("承認しました → {s}\n", .{path});
+    try out.flush();
+}
+
+fn sinkLabel(node: []const u8) []const u8 {
+    if (std.mem.eql(u8, node, "ObsEgress")) return "OBS (配信画面)";
+    if (std.mem.eql(u8, node, "TwitchAdapter")) return "Twitch (チャット)";
+    return node;
+}
+
+fn printPerms(out: *std.Io.Writer, label: []const u8, items: []const []const u8, added: []const []const u8, describe: fn ([]const u8) approval.Description) !void {
+    if (items.len == 0) return;
+    try out.print("\n  [{s}]\n", .{label});
+    for (items) |t| {
+        const d = describe(t);
+        var is_new = false;
+        for (added) |a| {
+            if (std.mem.eql(u8, a, t)) is_new = true;
+        }
+        const mark: []const u8 = switch (d.weight) {
+            .strong => "  ⚠ 強い権限",
+            .sensitive => "  (要注意)",
+            .normal => "",
+        };
+        try out.print("  {s} {s}{s}\n      {s}\n", .{ if (is_new) "★" else "-", d.text, mark, t });
+    }
+}
+
+fn signatureStatus(allocator: std.mem.Allocator, wasm_path: []const u8, wasm: []const u8, manifest: []const u8, trust_keys: []const u8) []const u8 {
+    const sig_path = std.fmt.allocPrint(allocator, "{s}.sig", .{wasm_path}) catch return "確認できません";
+    const sig_hex = std.fs.cwd().readFileAlloc(allocator, sig_path, 4096) catch return "なし (作者を確かめられません)";
+    const sig = signing.fromHex(64, std.mem.trim(u8, sig_hex, " \t\r\n")) orelse return "形式が不正です";
+    var store = signing.TrustStore.loadFile(allocator, trust_keys) catch return "あり (信頼する鍵が未設定のため作者は未確認)";
+    if (store.verifyAny(sig, wasm, manifest)) return "信頼している作者の署名 (wasm と manifest は改ざんされていない)";
+    return "検証できません (改ざん、または信頼していない作者)";
+}
+
 fn realMain() !void {
     var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_inst.deinit();
@@ -451,6 +595,7 @@ fn realMain() !void {
     if (std.mem.eql(u8, cmd, "obs-sim")) return execSibling(allocator, "weave-obs-sim", rest, null);
     if (std.mem.eql(u8, cmd, "doctor")) return cmdDoctor(allocator);
     if (std.mem.eql(u8, cmd, "init")) return cmdInit(allocator, rest);
+    if (std.mem.eql(u8, cmd, "add")) return cmdAdd(allocator, rest);
     if (std.mem.eql(u8, cmd, "demo")) return cmdDemo(allocator, rest);
     if (std.mem.eql(u8, cmd, "record")) return cmdRecord(allocator, rest);
     if (std.mem.eql(u8, cmd, "topic") and rest.len >= 1) {

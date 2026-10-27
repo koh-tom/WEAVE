@@ -44,6 +44,9 @@ pub const Config = struct {
     // 署名検証 (トラストアンカー Stage 1): "off" | "warn" | "strict"
     signature_mode: []const u8 = "off",
     trust_keys_path: []const u8 = ".weave/trusted_keys",
+    /// 利用者による承認 (トラストアンカー Stage 0): "off" | "warn" | "strict"。`weave add` で承認した権限より増えたものを止める
+    approval_mode: []const u8 = "off",
+    approvals_path: []const u8 = ".weave/approved.json",
     audit_log_path: []const u8 = "audit.log",
     /// 待ち受けアドレス。既定はループバックのみ (外に開くのは --bind 0.0.0.0 で明示)
     bind: []const u8 = "127.0.0.1",
@@ -95,6 +98,7 @@ pub const Config = struct {
 
         errdefer self.deinit(allocator);
         var signature_mode_set = false;
+        var approval_mode_set = false;
 
         // デフォルト文字列を dupe して動的アロケーションに統一 (リテラルとの混在・リーク防止)
         self.twitch_channel = try allocator.dupe(u8, self.twitch_channel);
@@ -103,6 +107,8 @@ pub const Config = struct {
         self.mock_obs_filepath = try allocator.dupe(u8, self.mock_obs_filepath);
         self.signature_mode = try allocator.dupe(u8, self.signature_mode);
         self.trust_keys_path = try allocator.dupe(u8, self.trust_keys_path);
+        self.approval_mode = try allocator.dupe(u8, self.approval_mode);
+        self.approvals_path = try allocator.dupe(u8, self.approvals_path);
         self.audit_log_path = try allocator.dupe(u8, self.audit_log_path);
         self.bind = try allocator.dupe(u8, self.bind);
         self.introspection = try allocator.dupe(u8, self.introspection);
@@ -165,6 +171,15 @@ pub const Config = struct {
                 if (obj.get("trust_keys_path")) |v| {
                     allocator.free(self.trust_keys_path);
                     self.trust_keys_path = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("approval_mode")) |v| {
+                    approval_mode_set = true;
+                    allocator.free(self.approval_mode);
+                    self.approval_mode = try allocator.dupe(u8, v.string);
+                }
+                if (obj.get("approvals_path")) |v| {
+                    allocator.free(self.approvals_path);
+                    self.approvals_path = try allocator.dupe(u8, v.string);
                 }
                 if (obj.get("audit_log_path")) |v| {
                     allocator.free(self.audit_log_path);
@@ -272,6 +287,12 @@ pub const Config = struct {
             self.signature_mode = val;
         } else |_| {}
 
+        if (std.process.getEnvVarOwned(allocator, "WEAVE_APPROVAL_MODE")) |val| {
+            approval_mode_set = true;
+            allocator.free(self.approval_mode);
+            self.approval_mode = val;
+        } else |_| {}
+
         if (std.process.getEnvVarOwned(allocator, "WEAVE_WASM_STACK_SIZE")) |val| {
             defer allocator.free(val);
             self.wasm_stack_size = try std.fmt.parseInt(u32, val, 10);
@@ -289,7 +310,7 @@ pub const Config = struct {
                 try self.plugins.append(allocator, try allocator.dupe(u8, "wasm-apps/chat_node.wasm"));
             }
 
-            try self.applyProductionDefaults(allocator, signature_mode_set);
+            try self.applyProductionDefaults(allocator, signature_mode_set, approval_mode_set);
             return self;
         }
 
@@ -439,6 +460,17 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 allocator.free(self.trust_keys_path);
                 self.trust_keys_path = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--approval-mode")) {
+                approval_mode_set = true;
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.approval_mode);
+                self.approval_mode = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--approvals")) {
+                i += 1;
+                if (i >= args.len) return error.ArgumentMissing;
+                allocator.free(self.approvals_path);
+                self.approvals_path = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "--cell-budget")) {
                 i += 1;
                 if (i >= args.len) return error.ArgumentMissing;
@@ -466,14 +498,14 @@ pub const Config = struct {
             try self.plugins.append(allocator, try allocator.dupe(u8, "wasm-apps/chat_node.wasm"));
         }
 
-        try self.applyProductionDefaults(allocator, signature_mode_set);
+        try self.applyProductionDefaults(allocator, signature_mode_set, approval_mode_set);
         return self;
     }
 
     /// production では安全側の既定値を強制する (P1-9)。
     /// - ノード接続トークン必須
-    /// - 署名モードを明示していなければ strict
-    fn applyProductionDefaults(self: *Config, allocator: std.mem.Allocator, signature_mode_set: bool) !void {
+    /// - 署名モード・承認モードを明示していなければ strict
+    fn applyProductionDefaults(self: *Config, allocator: std.mem.Allocator, signature_mode_set: bool, approval_mode_set: bool) !void {
         if (self.weave_env != .production) return;
         const has_token = if (self.node_ws_token) |t| t.len > 0 else false;
         if (!has_token) {
@@ -484,6 +516,10 @@ pub const Config = struct {
             allocator.free(self.signature_mode);
             self.signature_mode = try allocator.dupe(u8, "strict");
         }
+        if (!approval_mode_set) {
+            allocator.free(self.approval_mode);
+            self.approval_mode = try allocator.dupe(u8, "strict");
+        }
     }
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
@@ -493,6 +529,8 @@ pub const Config = struct {
         allocator.free(self.mock_obs_filepath);
         allocator.free(self.signature_mode);
         allocator.free(self.trust_keys_path);
+        allocator.free(self.approval_mode);
+        allocator.free(self.approvals_path);
         allocator.free(self.audit_log_path);
         for (self.cell_budgets.items) |cb| allocator.free(cb.name);
         if (self.replay_path) |p| allocator.free(p);
@@ -546,6 +584,8 @@ fn printHelp() void {
         \\  --graph-interval <s> Full topology publish interval in seconds (default: 60)
         \\  --signature-mode <m> Plugin signature enforcement: off|warn|strict (default: off)
         \\  --trust-keys <path>  Trusted public keys file (default: .weave/trusted_keys)
+        \\  --approval-mode <m>  User approval of plugin permissions (weave add): off|warn|strict (default: off)
+        \\  --approvals <path>   Approval record (default: .weave/approved.json)
         \\  --audit-log <path>   Security audit log (JSON Lines, default: audit.log)
         \\  --cell-budget <cell>=<eps>  Shared publish budget for a plugin cell (e.g. plugins.bots=50).
         \\                       Plugins join such a cell with "cell" in their manifest
@@ -633,6 +673,8 @@ test "Config: Production mode requirements" {
     try std.testing.expectEqualStrings("prod-secret-token", conf.node_ws_token.?);
     // production では署名モードを明示しなければ strict (P1-9)
     try std.testing.expectEqualStrings("strict", conf.signature_mode);
+    // 承認も同じ: 明示しなければ strict (承認していない・権限が増えたプラグインは動かさない)
+    try std.testing.expectEqualStrings("strict", conf.approval_mode);
 }
 
 test "Config: Wasm stack and heap sizes overrides" {

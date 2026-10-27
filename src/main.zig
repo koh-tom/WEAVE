@@ -294,6 +294,12 @@ pub fn main() !void {
         log.warn("Signature: failed to load trust store: {any}", .{err});
     };
 
+    // 利用者による承認 (トラストアンカー Stage 0)。不明なモードで黙って off にしない
+    core.configureApproval(config.approval_mode, config.approvals_path) catch {
+        log.err("Approval: refusing to start with an unknown --approval-mode '{s}' (off|warn|strict)", .{config.approval_mode});
+        std.process.exit(2);
+    };
+
     // 観測レベル (off / metadata / contents)。metadata では ext.* の payload (PII を含みうる) を隠す
     core.bus.publish("core.system.introspection", config.introspection, .BestEffort, 0) catch {};
 
@@ -403,6 +409,9 @@ pub fn main() !void {
         break :blk try std.fs.path.join(allocator, &.{ d, "weave-cell" });
     } else null;
     defer if (plugin_cell_exe) |p| allocator.free(p);
+    // 承認が無い・権限が増えたために読み込まなかったプラグイン (稼働状態に「承認待ち」と出す)
+    var approval_blocked = std.ArrayListUnmanaged([]const u8){};
+    defer approval_blocked.deinit(allocator);
     for (config.plugins.items) |path| {
         const stem = std.fs.path.stem(path);
         const isolate_this = config.isolate_plugins or for (config.isolate_plugin_names.items) |n| {
@@ -412,11 +421,13 @@ pub fn main() !void {
             const exe = plugin_cell_exe.?;
             core.loadPluginIsolated(path, exe, config.state_dir) catch |err| {
                 log.err("Failed to load plugin '{s}' in its own process: {any}", .{ path, err });
+                if (err == error.ApprovalRequired) approval_blocked.append(allocator, path) catch {};
             };
             continue;
         }
         core.loadPlugin(path) catch |err| {
             log.err("Failed to load plugin '{s}': {any}", .{ path, err });
+            if (err == error.ApprovalRequired) approval_blocked.append(allocator, path) catch {};
         };
     }
 
@@ -535,7 +546,11 @@ pub fn main() !void {
         var mbuf: [std.fs.max_path_bytes]u8 = undefined;
         for (config.plugins.items) |path| {
             const mpath = if (std.mem.endsWith(u8, path, ".wasm")) std.fmt.bufPrint(&mbuf, "{s}.json", .{path[0 .. path.len - 5]}) catch continue else continue;
-            health.addManifest(mpath, cells.items) catch |err| log.warn("Health: cannot read manifest '{s}': {any}", .{ mpath, err });
+            const blocked = for (approval_blocked.items) |b| {
+                if (std.mem.eql(u8, b, path)) break true;
+            } else false;
+            (if (blocked) health.addBlockedManifest(mpath, cells.items, "approval_required") else health.addManifest(mpath, cells.items)) catch |err|
+                log.warn("Health: cannot read manifest '{s}': {any}", .{ mpath, err });
         }
         for (config.expect.items) |mpath| {
             health.addManifest(mpath, cells.items) catch |err| log.warn("Health: cannot read --expect manifest '{s}': {any}", .{ mpath, err });
@@ -597,6 +612,7 @@ test {
     _ = @import("core/rate_limiter.zig");
     _ = @import("core/audit_log.zig");
     _ = @import("security/signing.zig");
+    _ = @import("security/approval.zig");
     _ = @import("common/config.zig");
     _ = @import("tests/oom_test.zig");
     _ = @import("tests/mock_test.zig");

@@ -4,6 +4,7 @@
   // 状態を、配信の現場の言葉で
   const STATUS_JA: Record<string, string> = {
     missing: '起動していません',
+    approval_required: '承認待ちのため止めています (weave add で確認)',
     restarting: '自動で作り直しています',
     quarantined: '何度も落ちたため一時停止中',
     stopped: '停止しています',

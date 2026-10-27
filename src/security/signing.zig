@@ -1,7 +1,7 @@
 //! Ed25519 署名 — トラストアンカー Stage 1 (ADR-008 §3 / dev_policy §1.3)
 //!
 //! トラストアンカーの段階:
-//!   Stage 0 : ローカルユーザーの承認 (TOFU) — 署名なしでも load 時に承認を要求
+//!   Stage 0 : ローカルユーザーの承認 (TOFU) — 署名なしでも load 時に承認を要求 (security/approval.zig, weave add)
 //!   Stage 1 : 開発者 Ed25519 署名 (本モジュール)
 //!   Stage 2 : Registry 鍵をルートにした検証チェーン (将来)
 //!

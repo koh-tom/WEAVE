@@ -6,6 +6,7 @@ const TransportManager = @import("../transport/interface.zig").TransportManager;
 const WasmRuntime = @import("wasm_runtime.zig").WasmRuntime;
 const SystemGraph = @import("graph.zig").SystemGraph;
 const signing = @import("../security/signing.zig");
+const approval = @import("../security/approval.zig");
 const log = @import("../common/log.zig");
 
 const PluginCell = @import("plugin_cell.zig").PluginCell;
@@ -22,6 +23,9 @@ pub const Core = struct {
     /// 運用者が宣言したセルの予算 (名前 → eps)。ここに無い名前のセルにプラグインは自分から入れない
     cell_budgets: std.StringHashMapUnmanaged(f64) = .{},
     trust_store: signing.TrustStore = .{},
+    // 利用者による承認 (トラストアンカー Stage 0)。記録は読み込み時に毎回読む (weave add の直後でも最新)
+    approval_mode: approval.Mode = .off,
+    approvals_path: []const u8 = approval.DEFAULT_PATH,
     /// 別プロセスで動かしているプラグインのセル (ADR-010 段階 2)
     isolated: std.ArrayListUnmanaged(*PluginCell) = .{},
     isolated_metas: std.ArrayListUnmanaged(*@import("plugin_manager.zig").PluginMetadata) = .{},
@@ -113,6 +117,62 @@ pub const Core = struct {
         }
     }
 
+    pub fn configureApproval(self: *Core, mode_str: []const u8, path: []const u8) !void {
+        self.approval_mode = approval.Mode.parse(mode_str) orelse {
+            log.err("Approval: unknown mode '{s}' (expected off|warn|strict)", .{mode_str});
+            return error.InvalidApprovalMode;
+        };
+        self.approvals_path = path;
+        if (self.approval_mode != .off) log.info("Approval: mode={s}, record '{s}' (approve with: weave add <plugin.wasm>)", .{ mode_str, path });
+    }
+
+    /// 利用者が `weave add` で承認した権限から増えていないかを確かめる。strict で未承認・増加なら error を返す。
+    /// 署名の検証と同じく、読み込みに使うのと同じバイト列で判定する。
+    fn verifyApproval(self: *Core, wasm_path: []const u8, wasm_buffer: []const u8, manifest: []const u8) !void {
+        if (self.approval_mode == .off) return;
+        var arena_inst = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_inst.deinit();
+        const a = arena_inst.allocator();
+
+        const m = approval.parseManifest(a, manifest) catch return; // manifest の誤りは registerPlugin が報告する
+        const store = approval.Store.load(a, self.approvals_path) catch |err| {
+            log.err("Approval: cannot read '{s}': {any}", .{ self.approvals_path, err });
+            if (self.approval_mode == .strict) return error.ApprovalRequired;
+            return;
+        };
+        const digest = try approval.digestHex(a, wasm_buffer, manifest);
+        const verdict = try approval.check(a, &store, m, digest);
+        const added: approval.Added = switch (verdict) {
+            .approved => return,
+            .updated => {
+                log.info("Approval: '{s}' code changed since approval, permissions did not grow — allowed", .{m.name});
+                return;
+            },
+            .not_approved => .{ .publish = &.{}, .subscribe = &.{}, .data_access = &.{} },
+            .permissions_increased => |x| x,
+        };
+        const reason = if (verdict == .not_approved) "not_approved" else "permissions_increased";
+
+        var pw = std.io.Writer.Allocating.init(a);
+        pw.writer.print("{f}", .{std.json.fmt(.{ .name = m.name, .plugin = wasm_path, .mode = @tagName(self.approval_mode), .reason = reason, .added = added }, .{})}) catch {};
+        _ = self.bus.publish("core.security.approval_required", pw.written(), .Transient, 0) catch {};
+
+        var detail = std.io.Writer.Allocating.init(a);
+        if (verdict == .not_approved) {
+            detail.writer.writeAll("まだ承認されていません") catch {};
+        } else {
+            detail.writer.writeAll("承認したときから権限が増えています:") catch {};
+            for (added.publish) |t| detail.writer.print(" +publish {s}", .{t}) catch {};
+            for (added.subscribe) |t| detail.writer.print(" +subscribe {s}", .{t}) catch {};
+            for (added.data_access) |t| detail.writer.print(" +data_access {s}", .{t}) catch {};
+        }
+        if (self.approval_mode == .strict) {
+            log.err("Approval: REJECTED '{s}' — {s} [strict: ロードを拒否します。確認して承認: weave add {s}]", .{ m.name, detail.written(), wasm_path });
+            return error.ApprovalRequired;
+        }
+        log.warn("Approval: '{s}' — {s} [warn: ロードは継続します]", .{ m.name, detail.written() });
+    }
+
     /// ゲートウェイ (EventBus -> TransportManager) の ID。グラフには載せないタップ
     pub const GATEWAY_NODE_ID: u32 = 3;
 
@@ -180,6 +240,7 @@ pub const Core = struct {
         const manifest_bytes = try std.fs.cwd().readFileAlloc(self.allocator, manifest_path, 1024 * 1024);
         defer self.allocator.free(manifest_bytes);
         try self.verifyPluginSignature(wasm_path, wasm_buffer, manifest_bytes);
+        try self.verifyApproval(wasm_path, wasm_buffer, manifest_bytes);
 
         const PM = @import("plugin_manager.zig");
         const parsed = try @import("manifest.zig").Manifest.parse(self.allocator, manifest_bytes);
@@ -247,6 +308,7 @@ pub const Core = struct {
 
         // 署名検証 (トラストアンカー Stage 1)。strict では未署名/改ざんをここで拒否。
         try self.verifyPluginSignature(wasm_path, wasm_buffer, manifest_bytes);
+        try self.verifyApproval(wasm_path, wasm_buffer, manifest_bytes);
 
         // 資源上限はインスタンス化の前に必要なので先に読む (権限の検証は registerPlugin で行う)
         const limits = blk: {
@@ -534,4 +596,36 @@ test "ADR-010 stage 2: a plugin in its own process gets the same deliveries and 
         core.stopIsolated();
     }
     std.debug.print("\n[ADR-010 stage 2] {d} messages to counter_node: in-process {d} us/msg, own process {d} us/msg\n", .{ N, elapsed[0] / N / 1000, elapsed[1] / N / 1000 });
+}
+
+test "Core: approval — unapproved and permission growth are rejected in strict, code-only update passes" {
+    const allocator = std.testing.allocator;
+    var core = try Core.init(allocator);
+    defer core.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &buf);
+    const path = try std.fmt.allocPrint(allocator, "{s}/approved.json", .{dir});
+    defer allocator.free(path);
+    try core.configureApproval("strict", path);
+
+    const wasm = "\x00asm\x01\x00\x00\x00";
+    const m1 = "{\"name\":\"p\",\"permissions\":{\"publish\":[\"ext.p.out\"],\"subscribe\":[\"ext.twitch.chat.message\"]}}";
+    const m2 = "{\"name\":\"p\",\"permissions\":{\"publish\":[\"ext.p.out\",\"core.obs.request.StopStream\"],\"subscribe\":[\"ext.twitch.chat.message\"]}}";
+    try std.testing.expectError(error.ApprovalRequired, core.verifyApproval("p.wasm", wasm, m1));
+
+    var arena_inst = std.heap.ArenaAllocator.init(allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    var store = approval.Store{};
+    const mv = try approval.parseManifest(a, m1);
+    try store.upsert(a, .{ .name = "p", .digest = try approval.digestHex(a, wasm, m1), .permissions = mv.permissions });
+    try store.save(a, path);
+
+    try core.verifyApproval("p.wasm", wasm, m1);
+    try core.verifyApproval("p.wasm", "\x00asm\x01\x00\x00\x00\x00\x01\x00", m1); // コードだけ変わった
+    try std.testing.expectError(error.ApprovalRequired, core.verifyApproval("p.wasm", wasm, m2));
+    core.approval_mode = .warn;
+    try core.verifyApproval("p.wasm", wasm, m2);
 }
