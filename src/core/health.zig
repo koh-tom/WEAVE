@@ -41,6 +41,8 @@ pub const HealthMonitor = struct {
         expected: bool,
         /// ビルトイン。登録されていなければ「この構成では使っていない」
         builtin: bool,
+        /// 起動時に読み込みを拒否した理由 (例: "approval_required")。起動していないときは missing の代わりにこれを出す
+        blocked: ?[]const u8 = null,
     };
 
     const Recent = struct {
@@ -89,6 +91,15 @@ pub const HealthMonitor = struct {
             }
         }
         try self.declared.append(self.decl_arena.allocator(), .{ .node = node, .expected = true, .builtin = false });
+    }
+
+    /// 起動時に読み込みを拒否したプラグイン (未承認・権限の増加など)。「起動していない」の代わりに理由を出す
+    pub fn addBlockedManifest(self: *HealthMonitor, path: []const u8, declared_cells: []const []const u8, reason: []const u8) !void {
+        try self.addManifest(path, declared_cells);
+        const node = try blast.loadManifestNodeIn(self.decl_arena.allocator(), path, declared_cells);
+        for (self.declared.items) |*d| {
+            if (std.mem.eql(u8, d.node.name, node.name)) d.blocked = try self.decl_arena.allocator().dupe(u8, reason);
+        }
     }
 
     /// 設定ミス (誰も出していないトピックの購読で、近い名前があるもの) を調べる。結果は summary にも載る
@@ -168,7 +179,7 @@ pub const HealthMonitor = struct {
                 try expected.append(arena, d.expected);
             } else if (d.expected) {
                 try nodes.append(arena, d.node);
-                try status.append(arena, "missing");
+                try status.append(arena, d.blocked orelse "missing");
                 try since.append(arena, self.started_ms);
                 try expected.append(arena, true);
             }
@@ -201,7 +212,7 @@ pub const HealthMonitor = struct {
     }
 
     fn isDownLabel(s: []const u8) bool {
-        if (std.mem.eql(u8, s, "missing")) return true;
+        if (std.mem.eql(u8, s, "missing") or std.mem.eql(u8, s, "approval_required")) return true;
         const st = std.meta.stringToEnum(@import("../common/types.zig").NodeStatus, s) orelse return false;
         return graph_mod.isDown(st);
     }
@@ -322,6 +333,36 @@ test "HealthMonitor: a forgotten tool is reported as missing, and the overlay th
     try std.testing.expect(std.mem.indexOf(u8, body, "{\"node\":\"scoreboard\",\"effect\":\"stalled\",\"because\":[\"score_tool\"]") != null);
     // Twitch は起動していない (--no-twitch 相当) が、使っていないだけなので問題には出さない
     try std.testing.expect(std.mem.indexOf(u8, body, "TwitchAdapter") == null);
+}
+
+test "HealthMonitor: a plugin refused for lack of approval says so, and what stalls because of it" {
+    const a = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(a, 16);
+    defer bus.deinit();
+    bus.verbose = false;
+    var graph = SystemGraph.init(a);
+    defer graph.deinit();
+    graph.bus = &bus;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeManifest(tmp.dir, "scoreboard.json", "{\"name\":\"scoreboard\",\"permissions\":{\"publish\":[\"core.obs.request.SetInputSettings\"],\"subscribe\":[\"ext.score.update\"]}}");
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try tmp.dir.realpath(".", &path_buf);
+    var p1: [std.fs.max_path_bytes]u8 = undefined;
+
+    const hm = try HealthMonitor.create(a, &bus, &graph);
+    defer hm.destroy();
+    try hm.addBuiltins();
+    try hm.addBlockedManifest(try std.fmt.bufPrint(&p1, "{s}/scoreboard.json", .{dir_path}), &.{}, "approval_required");
+    try graph.registerNodeIn(2, "ObsEgress", .native, "egress");
+
+    var arena_inst = std.heap.ArenaAllocator.init(a);
+    defer arena_inst.deinit();
+    var out = std.ArrayListUnmanaged(u8){};
+    try hm.writeBody(arena_inst.allocator(), out.writer(arena_inst.allocator()));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "{\"node\":\"scoreboard\",\"status\":\"approval_required\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"overall\":\"trouble\"") != null);
 }
 
 test "HealthMonitor: everything running → ok, and a plugin that restarts shows up in recent" {

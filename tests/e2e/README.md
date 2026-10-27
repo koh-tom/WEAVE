@@ -16,6 +16,7 @@
 | `assemblyscript_sdk.sh` | `weave init --lang as` で作った AssemblyScript のプラグインをビルドして載せ、チャットに反応することを確かめる (bun が必要) |
 | `record_replay.sh` | `weave record` で全イベントを記録し、`--replay` で外部入力と tick を流し直すと、kusa_node が同じ判断をして OBS への要求の列 (内容と間隔) が一致する |
 | `countdown.sh` | OBS 同梱の Countdown スクリプトの振る舞いを再実装した `countdown` プラグインで、開始 → 毎秒のテキスト更新 → 終了メッセージが OBS (mock) に届く (C3) |
+| `approval.sh` | `--approval-mode strict`: 未承認のプラグインは読み込まず稼働状態に「承認待ち」と出す。`weave add` で権限を人の言葉で見て承認すると動く。更新で権限 (StopStream) が増えたら止め、増えた分だけに ★ を付けて再承認を求める。権限が増えていないコードの更新は通す (トラストアンカー Stage 0) |
 | `egress_isolation.sh` | `--isolate-egress` で OBS への送信役を別プロセス (weave-cell) にし、表示中に kill -9 しても Core は止まらず ~90 ms で子が戻り、意図した表示が送り直され、その後の要求も届く。終了時は子も片付く (ADR-010 段階 1) |
 | `plugin_isolation.sh` | `--isolate-plugins` で Wasm プラグインを 1 つずつ別プロセスに。同じ出力、子の publish も Core が検査 (malicious の core.system.shutdown を拒否)、待機中の kill -9 から状態ごと復帰、処理中に落ちたメッセージは Core で隔離 (ADR-010 段階 2) |
 | `plugin_sandbox.sh` | 別プロセスのプラグインを OS で閉じ込める: seccomp (禁止したシステムコールで SIGSYS)、ネットワーク名前空間の分離、cgroup で CPU 50% の上限 (委譲がある環境)、ループ中でも即終了して片付く (ADR-010 段階 3) |

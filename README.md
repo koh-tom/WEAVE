@@ -115,6 +115,18 @@ kusa_node が OBS のオーバーレイを表示し、5 秒後に自動で消し
 - 既定の待ち受けは `127.0.0.1`。外に開くのは `--bind 0.0.0.0` で明示したときだけ。Inspector とリモートノードはトークン必須。
 - OBS への要求はトピック末尾 = 要求種別が権限の単位です (生の OBS フレームの素通しはしません)。
 
+### 利用者による承認 (トラストアンカー Stage 0)
+
+```bash
+./weave add wasm-apps/subgoal.wasm      # 権限を人の言葉で表示 (「チャットの本文を読む」「配信画面の文字を変える」…) → y で承認
+./weave run --approval-mode strict wasm-apps/subgoal.wasm
+```
+
+承認した権限と wasm+manifest のダイジェストを `.weave/approved.json` に記録します。strict では、承認していないプラグインと、
+更新で **権限が増えた** プラグインを読み込みません (稼働状態には「承認待ち」と出ます)。もう一度 `weave add` すると、
+増えた権限だけに ★ を付けて見せます。権限が増えていないコードの更新はそのまま通します。
+`WEAVE_ENV=production` では承認モードの既定も strict です。
+
 ### 署名 (トラストアンカー Stage 1)
 
 ```bash
@@ -165,12 +177,13 @@ Host API v1 (Wasm から呼べる関数): `os_api_publish` / `os_api_subscribe` 
 | `weave topic pub <topic> <payload>` / `weave topic echo [pattern]` | イベントの発行・表示 |
 | `weave node ls` | ノード一覧 (所属セル・状態) |
 | `weave doctor` | 環境の自己診断 |
+| `weave add <plugin.wasm> [--yes]` | 権限を確かめて承認 (`--approval-mode strict` で必須) |
 | `weave init <name>` | プラグインのひな形 |
 | `weave-bridge [--streamerbot ws://...] [--weave ws://...]` | Streamer.bot ブリッジ (`mock-streamerbot` / `mock-astro` / `mock-streamlabs` でモック) |
 
 主な起動オプション: `--mock-obs` / `--real-obs --obs-port --obs-pass` / `--mock-twitch <scenario> [--mock-twitch-once]` /
 `--no-twitch` / `--bind` / `--dash-port` / `--node-port` / `--introspection off|metadata|contents` /
-`--signature-mode off|warn|strict` / `--audit-log` / `--state-dir` / `--no-snapshot` /
+`--signature-mode off|warn|strict` / `--approval-mode off|warn|strict` / `--audit-log` / `--state-dir` / `--no-snapshot` /
 `--streamelements-channel <id>` (JWT は環境変数 `STREAMELEMENTS_JWT` のみ) / `--streamlabs` (トークンは環境変数 `STREAMLABS_SOCKET_TOKEN` のみ)。`./zig-out/bin/WEAVE --help` で全て表示。
 
 ---
