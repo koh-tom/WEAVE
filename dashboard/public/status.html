@@ -32,7 +32,10 @@
   .node { font-size: 13px; padding: 4px 8px; border: 1px solid var(--line); background: #fff; }
   .node::before { content: "●"; margin-right: 5px; color: var(--ok); }
   .node.down::before { color: var(--bad); }
+  .node.refused::before { color: var(--warn); }
   .empty { font-size: 14px; color: var(--sub); }
+  .todo { margin-top: 4px; font-size: 14px; font-weight: 700; }
+  .todo::before { content: "→ どうすれば: "; color: var(--sub); font-weight: 400; }
   footer { margin-top: 22px; font-size: 12px; color: var(--sub); line-height: 1.6; }
 </style>
 </head>
@@ -48,6 +51,10 @@
   <section id="sec-problems" hidden>
     <h2>止まっているもの</h2>
     <ul id="problems"></ul>
+  </section>
+  <section id="sec-obs" hidden>
+    <h2>OBS に断られている操作</h2>
+    <ul id="obs"></ul>
   </section>
   <section id="sec-impacts" hidden>
     <h2>そのせいで影響を受けているもの</h2>
@@ -73,7 +80,7 @@
 (() => {
   const STATUS_JA = {
     missing: '起動していません',
-    approval_required: '承認待ちのため止めています (weave add で確認)',
+    approval_required: '承認待ちのため止めています',
     restarting: '自動で作り直しています',
     quarantined: '何度も落ちたため、一時的に止めています',
     stopped: '停止しています',
@@ -107,6 +114,17 @@
       li.appendChild(el('span', 'name', nm(p.node)));
       li.appendChild(document.createTextNode(' — ' + (STATUS_JA[p.status] || p.status)));
       if (p.since) li.appendChild(el('div', 'when', hhmmss(p.since) + ' から'));
+      if (p.action) li.appendChild(el('div', 'todo', p.action));
+      return li;
+    });
+
+    // プラグインは動いているが、OBS が操作を断っている (ソース名・シーン名の違いがいちばん多い)
+    fill('sec-obs', 'obs', h.obs_problems || [], (o) => {
+      const li = el('li', 'item bad');
+      li.appendChild(el('span', 'name', nm(o.plugin)));
+      li.appendChild(document.createTextNode(' の操作が配信画面に反映されていません' + (o.count > 1 ? '(' + o.count + ' 回)' : '')));
+      li.appendChild(el('div', 'todo', o.action));
+      li.appendChild(el('div', 'mono', o.request + ' → ' + o.target + ' : ' + o.comment));
       return li;
     });
 
@@ -147,7 +165,8 @@
     });
 
     const nodes = $('nodes'); nodes.replaceChildren();
-    for (const n of (h.nodes || [])) nodes.appendChild(el('span', 'node' + (DOWN.has(n.status) ? ' down' : ''), nm(n.name)));
+    const refused = new Set((h.obs_problems || []).map((o) => o.plugin));
+    for (const n of (h.nodes || [])) nodes.appendChild(el('span', 'node' + (DOWN.has(n.status) ? ' down' : refused.has(n.name) ? ' refused' : ''), nm(n.name)));
   }
 
   const token = new URLSearchParams(location.search).get('token') || '';

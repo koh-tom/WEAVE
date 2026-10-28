@@ -5,6 +5,8 @@
 #   3. 更新で manifest の権限が増えたら (StopStream) 読み込まない。weave add は増えた分に ★ を付けて見せる
 #   4. 再承認すると読み込む
 #   5. 権限が増えていないコードの更新 (wasm に custom section を足す) はそのまま通す
+#   6. weave list で承認したものと今の状態が見え、プラグインを指定しない weave run で承認したものが起動する。
+#      weave remove で取り消すと、もう起動しない
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BIN=$(pwd)/zig-out/bin
@@ -25,7 +27,7 @@ run() {
   : > "$DIR/obs_$1.jsonl"
   "$BIN/WEAVE" --no-twitch --mock-obs --mock-obs-file "$DIR/obs_$1.jsonl" --approval-mode strict --approvals "$A" \
     --dash-port 3071 --node-port 8071 --audit-log "$DIR/audit_$1.log" --state-dir "$DIR/state" --dashboard-token ap \
-    "$P" > "$DIR/$1.log" 2>&1 &
+    ${P:+"$P"} > "$DIR/$1.log" 2>&1 &
   W=$!
   for _ in $(seq 1 60); do grep -q "Running" "$DIR/$1.log" 2>/dev/null && break; sleep 0.05; done
   grep -q "Running" "$DIR/$1.log" || fail "$1: WEAVE did not start"
@@ -87,4 +89,22 @@ loaded codeonly || fail "code-only update was not loaded"
 grep -q "permissions did not grow — allowed" "$DIR/codeonly.log" || fail "code-only update not logged"
 stop
 echo "ok 5: 権限が増えていないコードの更新はそのまま通す"
+
+# 6. 一覧・指定なしの起動・取り消し
+"$BIN/weave" list --approvals "$A" > "$DIR/list.txt"
+grep -q "countdown 1.0.0" "$DIR/list.txt" || fail "weave list does not show the plugin"
+grep -q "状態: 更新されています (権限は増えていないので、そのまま起動します)" "$DIR/list.txt" || fail "weave list does not explain the current state"
+grep -q "$P" "$DIR/list.txt" || fail "weave list does not show where the plugin is"
+P_SAVE=$P; P=""   # 以降の run はプラグインを指定しない
+run noargs
+loaded noargs || fail "weave run without plugins did not start the approved plugin"
+grep -q "starting 1 plugin(s) approved with weave add" "$DIR/noargs.log" || fail "no message about starting approved plugins"
+stop
+"$BIN/weave" remove countdown --approvals "$A" 2> "$DIR/remove.txt"
+grep -q "承認を取り消しました" "$DIR/remove.txt" || fail "weave remove did not confirm"
+run removed
+loaded removed && fail "a removed plugin was started"
+stop
+P=$P_SAVE
+echo "ok 6: weave list で状態が見え、指定なしの weave run で承認済みが起動し、weave remove で止まる"
 echo "PASS"

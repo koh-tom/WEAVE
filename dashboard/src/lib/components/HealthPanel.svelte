@@ -4,7 +4,7 @@
   // 状態を、配信の現場の言葉で
   const STATUS_JA: Record<string, string> = {
     missing: '起動していません',
-    approval_required: '承認待ちのため止めています (weave add で確認)',
+    approval_required: '承認待ちのため止めています',
     restarting: '自動で作り直しています',
     quarantined: '何度も落ちたため一時停止中',
     stopped: '停止しています',
@@ -35,7 +35,8 @@
           {#each $health.problems as p (p.node)}
             <tr>
               <td class="mono bad font-bold">{nm(p.node)}</td>
-              <td class="bad">{STATUS_JA[p.status] ?? p.status}{#if p.since}<span class="dim"> ({time(p.since)} から)</span>{/if}</td>
+              <td class="bad">{STATUS_JA[p.status] ?? p.status}{#if p.since}<span class="dim"> ({time(p.since)} から)</span>{/if}
+                {#if p.action}<div class="todo">→ {p.action}</div>{/if}</td>
               <td>
                 {#each $health.impacts.filter((i) => i.because.includes(p.node)) as i (i.node)}
                   <div>
@@ -55,6 +56,13 @@
           {/each}
         </tbody>
       </table>
+      {#each $health.obs_problems ?? [] as o (o.plugin + o.request + o.target)}
+        <div class="bad mt-1">
+          OBS に断られています: <span class="mono font-bold">{nm(o.plugin)}</span> の <span class="mono">{o.request}</span>
+          → <span class="mono">{o.target}</span>{#if o.count > 1}<span class="dim"> ({o.count} 回)</span>{/if}
+          <div class="todo">→ {o.action}</div>
+        </div>
+      {/each}
       {#each $health.warnings as w (w.node + w.topic)}
         <div class="warn mt-1">
           設定の気になる点: <span class="mono font-bold">{nm(w.node)}</span> が待っている <span class="mono">{w.topic}</span> を出すものがいません。
@@ -64,3 +72,7 @@
     {/if}
   </div>
 </div>
+
+<style>
+  .todo { color: var(--fg, inherit); font-weight: 700; margin-top: 2px; }
+</style>

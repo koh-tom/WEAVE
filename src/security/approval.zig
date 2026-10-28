@@ -37,6 +37,8 @@ pub const Permissions = struct {
 pub const Entry = struct {
     name: []const u8,
     version: []const u8 = "",
+    /// wasm の場所 (絶対パス)。プラグインを指定せずに weave run すると、ここにあるものを起動する
+    path: []const u8 = "",
     /// wasm + manifest の SHA-512 (signing.computeDigest) の 16 進
     digest: []const u8,
     permissions: Permissions,
@@ -79,6 +81,16 @@ pub const Store = struct {
     pub fn find(self: *const Store, name: []const u8) ?Entry {
         for (self.entries.items) |e| if (std.mem.eql(u8, e.name, name)) return e;
         return null;
+    }
+
+    pub fn remove(self: *Store, name: []const u8) bool {
+        for (self.entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.name, name)) {
+                _ = self.entries.orderedRemove(i);
+                return true;
+            }
+        }
+        return false;
     }
 
     pub fn upsert(self: *Store, arena: std.mem.Allocator, e: Entry) !void {

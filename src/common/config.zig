@@ -493,13 +493,34 @@ pub const Config = struct {
             }
         }
 
-        // デフォルトのプラグイン（引数も設定ファイルもない場合）
+        // プラグインの指定が無ければ、weave add で承認したものを起動する (毎回パスを並べなくてよい)
+        if (self.plugins.items.len == 0) try self.appendApprovedPlugins(allocator);
+        // デフォルトのプラグイン（引数も設定ファイルも承認済みのものもない場合）
         if (self.plugins.items.len == 0) {
             try self.plugins.append(allocator, try allocator.dupe(u8, "wasm-apps/chat_node.wasm"));
         }
 
         try self.applyProductionDefaults(allocator, signature_mode_set, approval_mode_set);
         return self;
+    }
+
+    /// 承認の記録 (.weave/approved.json) にあるプラグインのうち、ファイルが今もあるものを起動対象にする。
+    /// 承認の検査そのものは読み込み時に Core が行う (ここで読むのはパスだけ)
+    fn appendApprovedPlugins(self: *Config, allocator: std.mem.Allocator) !void {
+        const bytes = std.fs.cwd().readFileAlloc(allocator, self.approvals_path, 4 * 1024 * 1024) catch return;
+        defer allocator.free(bytes);
+        const Shape = struct { plugins: []const struct { name: []const u8 = "", path: []const u8 = "" } = &.{} };
+        const parsed = std.json.parseFromSlice(Shape, allocator, bytes, .{ .ignore_unknown_fields = true }) catch return;
+        defer parsed.deinit();
+        for (parsed.value.plugins) |p| {
+            if (p.path.len == 0) continue;
+            std.fs.cwd().access(p.path, .{}) catch {
+                std.debug.print("Plugins: '{s}' was approved but {s} is gone (weave remove {s} to forget it)\n", .{ p.name, p.path, p.name });
+                continue;
+            };
+            try self.plugins.append(allocator, try allocator.dupe(u8, p.path));
+        }
+        if (self.plugins.items.len > 0) std.debug.print("Plugins: starting {d} plugin(s) approved with weave add ({s})\n", .{ self.plugins.items.len, self.approvals_path });
     }
 
     /// production では安全側の既定値を強制する (P1-9)。

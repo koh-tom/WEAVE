@@ -12,11 +12,15 @@
 //!   SetSceneItemEnabled しか許可されていないプラグインが任意の要求 (配信停止など) を送れた。
 //! - 自前 WebSocket (ws_proto) を使い、ランダムなキーとマスク・Accept の検証を行う。
 //! - 接続状態を `core.obs.link` で通知し、切断中はノード状態を degraded にする。
+//! - **OBS が断った要求を配信者に伝える**: どのプラグインの・どの名前 (ソース / シーン) への要求だったかと、
+//!   OBS にある近い名前 (「もしかして」) を `core.obs.problem` で出す。同じ要求が後で通れば resolved を出す。
+//!   名前違いは配信の現場でいちばん多い「動かない」の原因で、これまではログに 1 行出るだけだった。
 
 const std = @import("std");
 const event_bus = @import("../core/event_bus.zig");
 const ws = @import("../transport/ws_proto.zig");
 const log = @import("../common/log.zig");
+const blast = @import("../audit/blast.zig");
 
 /// 冪等な (最後の値だけが意味を持つ) 要求。再接続時に再適用する
 const STATEFUL = [_]struct { request: []const u8, keys: []const []const u8 }{
@@ -35,7 +39,8 @@ pub const DesiredState = struct {
     /// key -> { request_type, request_data (JSON) }
     map: std.StringArrayHashMapUnmanaged(Entry) = .{},
 
-    pub const Entry = struct { request_type: []u8, data: []u8 };
+    /// sender = 要求を出したノード (OBS に断られたとき、どのプラグインの要求かを伝えるため)
+    pub const Entry = struct { request_type: []u8, data: []u8, sender: u32 = 0 };
 
     pub fn init(allocator: std.mem.Allocator) DesiredState {
         return .{ .allocator = allocator };
@@ -53,6 +58,10 @@ pub const DesiredState = struct {
 
     /// 要求が状態設定なら記録して true を返す
     pub fn record(self: *DesiredState, request_type: []const u8, data_json: []const u8) !bool {
+        return self.recordFrom(request_type, data_json, 0);
+    }
+
+    pub fn recordFrom(self: *DesiredState, request_type: []const u8, data_json: []const u8, sender: u32) !bool {
         const spec = for (STATEFUL) |s| {
             if (std.mem.eql(u8, s.request, request_type)) break s;
         } else return false;
@@ -76,11 +85,13 @@ pub const DesiredState = struct {
         if (gop.found_existing) {
             self.allocator.free(gop.value_ptr.data);
             gop.value_ptr.data = try self.allocator.dupe(u8, data_json);
+            gop.value_ptr.sender = sender;
         } else {
             gop.key_ptr.* = try self.allocator.dupe(u8, key.items);
             gop.value_ptr.* = .{
                 .request_type = try self.allocator.dupe(u8, request_type),
                 .data = try self.allocator.dupe(u8, data_json),
+                .sender = sender,
             };
         }
         return true;
@@ -100,7 +111,7 @@ pub const DesiredState = struct {
         var i: usize = 0;
         var it = self.map.iterator();
         while (it.next()) |e| : (i += 1) {
-            out[i] = .{ .request_type = try allocator.dupe(u8, e.value_ptr.request_type), .data = try allocator.dupe(u8, e.value_ptr.data) };
+            out[i] = .{ .request_type = try allocator.dupe(u8, e.value_ptr.request_type), .data = try allocator.dupe(u8, e.value_ptr.data), .sender = e.value_ptr.sender };
         }
         return out;
     }
@@ -111,6 +122,169 @@ pub const DesiredState = struct {
             allocator.free(e.data);
         }
         allocator.free(entries);
+    }
+};
+
+/// OBS が断った要求を「誰の・どの名前への要求か」と結びつけ、OBS にある近い名前を探す
+pub const ProblemTracker = struct {
+    allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex = .{},
+    /// 送った要求 (requestId → 送り主と対象)。古いものから上書きするリング
+    ring: [128]Pending = [_]Pending{.{}} ** 128,
+    ring_pos: usize = 0,
+    /// OBS にある入力 (ソース) とシーンの名前 (GetInputList / GetSceneList の応答)
+    inputs: std.ArrayListUnmanaged([]u8) = .{},
+    scenes: std.ArrayListUnmanaged([]u8) = .{},
+    /// いま断られている (送り主|要求|対象)。後で通ったら resolved を出す
+    failing: std.StringHashMapUnmanaged(void) = .{},
+
+    pub const Kind = enum { input, scene, other };
+
+    pub const Pending = struct {
+        id: u64 = 0,
+        sender: u32 = 0,
+        request_buf: [64]u8 = undefined,
+        request_len: usize = 0,
+        target_buf: [128]u8 = undefined,
+        target_len: usize = 0,
+        kind: Kind = .other,
+
+        pub fn request(self: *const Pending) []const u8 {
+            return self.request_buf[0..self.request_len];
+        }
+        pub fn target(self: *const Pending) []const u8 {
+            return self.target_buf[0..self.target_len];
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator) ProblemTracker {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *ProblemTracker) void {
+        freeNames(self.allocator, &self.inputs);
+        freeNames(self.allocator, &self.scenes);
+        var it = self.failing.keyIterator();
+        while (it.next()) |k| self.allocator.free(k.*);
+        self.failing.deinit(self.allocator);
+    }
+
+    fn freeNames(a: std.mem.Allocator, list: *std.ArrayListUnmanaged([]u8)) void {
+        for (list.items) |n| a.free(n);
+        list.deinit(a);
+    }
+
+    /// 要求の対象 (ソース名 / シーン名) を requestData から取り出す
+    pub fn targetOf(data_json: []const u8, buf: []u8) struct { name: []const u8, kind: Kind } {
+        const F = struct { inputName: ?[]const u8 = null, sourceName: ?[]const u8 = null, sceneName: ?[]const u8 = null };
+        var fba = std.heap.FixedBufferAllocator.init(buf);
+        const v = std.json.parseFromSliceLeaky(F, fba.allocator(), data_json, .{ .ignore_unknown_fields = true }) catch return .{ .name = "", .kind = .other };
+        if (v.inputName) |n| return .{ .name = n, .kind = .input };
+        if (v.sourceName) |n| return .{ .name = n, .kind = .input };
+        if (v.sceneName) |n| return .{ .name = n, .kind = .scene };
+        return .{ .name = "", .kind = .other };
+    }
+
+    pub fn noteRequest(self: *ProblemTracker, id: u64, sender: u32, request_type: []const u8, data_json: []const u8) void {
+        var scratch: [2048]u8 = undefined;
+        const t = targetOf(data_json, &scratch);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var p = &self.ring[self.ring_pos % self.ring.len];
+        self.ring_pos += 1;
+        p.* = .{ .id = id, .sender = sender, .kind = t.kind };
+        p.request_len = @min(request_type.len, p.request_buf.len);
+        @memcpy(p.request_buf[0..p.request_len], request_type[0..p.request_len]);
+        p.target_len = @min(t.name.len, p.target_buf.len);
+        @memcpy(p.target_buf[0..p.target_len], t.name[0..p.target_len]);
+    }
+
+    pub fn take(self: *ProblemTracker, id: u64) ?Pending {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (&self.ring) |*p| {
+            if (p.id == id and id != 0) {
+                const out = p.*;
+                p.id = 0;
+                return out;
+            }
+        }
+        return null;
+    }
+
+    pub fn setNames(self: *ProblemTracker, kind: Kind, names: []const []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const list = if (kind == .scene) &self.scenes else &self.inputs;
+        for (list.items) |n| self.allocator.free(n);
+        list.clearRetainingCapacity();
+        for (names) |n| {
+            const d = self.allocator.dupe(u8, n) catch continue;
+            list.append(self.allocator, d) catch self.allocator.free(d);
+        }
+    }
+
+    /// OBS にある近い名前 (大文字小文字・空白の違い、または 1 〜数文字の打ち間違い)。呼び出し側の buf に写して返す
+    pub fn suggest(self: *ProblemTracker, kind: Kind, target: []const u8, buf: []u8) ?[]const u8 {
+        if (target.len == 0) return null;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const lists: []const []const []u8 = switch (kind) {
+            .scene => &.{self.scenes.items},
+            .input => &.{ self.inputs.items, self.scenes.items }, // sourceName はシーンも指せる
+            .other => return null,
+        };
+        var best: ?[]const u8 = null;
+        var best_d: usize = std.math.maxInt(usize);
+        const max_d = @max(@as(usize, 2), target.len / 4);
+        for (lists) |list| for (list) |n| {
+            if (std.mem.eql(u8, n, target)) return null; // 名前は合っている (別の理由で断られた)
+            const d: usize = if (looseEql(n, target)) 0 else (blast.editDistance(n, target, max_d) orelse continue);
+            if (d < best_d) {
+                best_d = d;
+                best = n;
+            }
+        };
+        const b = best orelse return null;
+        const len = @min(b.len, buf.len);
+        @memcpy(buf[0..len], b[0..len]);
+        return buf[0..len];
+    }
+
+    /// 大文字小文字と空白・_ - の違いを無視して同じか
+    fn looseEql(a: []const u8, b: []const u8) bool {
+        var i: usize = 0;
+        var j: usize = 0;
+        while (true) {
+            while (i < a.len and isSep(a[i])) i += 1;
+            while (j < b.len and isSep(b[j])) j += 1;
+            if (i == a.len or j == b.len) return i == a.len and j == b.len;
+            if (std.ascii.toLower(a[i]) != std.ascii.toLower(b[j])) return false;
+            i += 1;
+            j += 1;
+        }
+    }
+    fn isSep(c: u8) bool {
+        return c == ' ' or c == '_' or c == '-';
+    }
+
+    /// 断られた / 通ったを記録する。状態が変わったときだけ true (問題を出す / 解消を出す)
+    pub fn setFailing(self: *ProblemTracker, p: *const Pending, failing: bool) bool {
+        var kbuf: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&kbuf, "{d}|{s}|{s}", .{ p.sender, p.request(), p.target() }) catch return false;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (failing) {
+            if (self.failing.contains(key)) return true; // 同じ問題でも毎回知らせる (直したつもりで直っていない)
+            const owned = self.allocator.dupe(u8, key) catch return true;
+            self.failing.put(self.allocator, owned, {}) catch self.allocator.free(owned);
+            return true;
+        }
+        if (self.failing.fetchRemove(key)) |kv| {
+            self.allocator.free(kv.key);
+            return true;
+        }
+        return false;
     }
 };
 
@@ -136,6 +310,7 @@ pub const ObsEgressNode = struct {
     outbox: std.ArrayListUnmanaged([]u8) = .{},
     outbox_max: usize = 64,
     next_request: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
+    problems: ProblemTracker,
     connections: u64 = 0,
     reconnects: u64 = 0,
     reapplied_total: u64 = 0,
@@ -148,6 +323,7 @@ pub const ObsEgressNode = struct {
             .node_id = node_id,
             .password = if (password) |p| try allocator.dupe(u8, p) else null,
             .desired = DesiredState.init(allocator),
+            .problems = ProblemTracker.init(allocator),
         };
         return self;
     }
@@ -169,6 +345,7 @@ pub const ObsEgressNode = struct {
         self.outbox.deinit(self.allocator);
         self.mutex.unlock();
         self.desired.deinit();
+        self.problems.deinit();
         if (self.password) |p| self.allocator.free(p);
         if (self.host) |h| self.allocator.free(h);
         self.allocator.destroy(self);
@@ -266,7 +443,7 @@ pub const ObsEgressNode = struct {
                 0 => try self.handleHello(d.object),
                 2 => self.onIdentified(),
                 5 => self.onEvent(d.object, frame.payload),
-                7 => onResponse(d.object),
+                7 => self.onResponse(d.object),
                 else => {},
             }
         }
@@ -315,6 +492,8 @@ pub const ObsEgressNode = struct {
         self.identified.store(true, .release);
         self.connections += 1;
         log.info("ObsEgress: identified with OBS", .{});
+        // 名前の一覧を先に取る (この後の再適用が断られたとき「もしかして」を出せるように)
+        self.refreshNames();
         self.reconcile();
         // 未接続中に溜まったコマンドを順に送る
         self.mutex.lock();
@@ -333,7 +512,7 @@ pub const ObsEgressNode = struct {
         const entries = self.desired.copies(self.allocator) catch return;
         defer DesiredState.freeCopies(self.allocator, entries);
         if (entries.len == 0) return;
-        for (entries) |e| self.sendRequest(e.request_type, e.data) catch {};
+        for (entries) |e| self.sendRequestFrom(e.request_type, e.data, e.sender) catch {};
         self.reapplied_total += entries.len;
         if (self.connections > 1) {
             self.reconnects += 1;
@@ -341,23 +520,84 @@ pub const ObsEgressNode = struct {
         }
     }
 
+    fn refreshNames(self: *ObsEgressNode) void {
+        self.sendRaw("{\"op\":6,\"d\":{\"requestType\":\"GetInputList\",\"requestId\":\"weave-names-inputs\",\"requestData\":{}}}") catch {};
+        self.sendRaw("{\"op\":6,\"d\":{\"requestType\":\"GetSceneList\",\"requestId\":\"weave-names-scenes\",\"requestData\":{}}}") catch {};
+    }
+
     fn onEvent(self: *ObsEgressNode, d: std.json.ObjectMap, raw: []const u8) void {
         const et = d.get("eventType") orelse return;
         if (et != .string) return;
+        // 名前が変わりうるイベントで一覧を取り直す
+        for ([_][]const u8{ "InputCreated", "InputRemoved", "InputNameChanged", "SceneCreated", "SceneRemoved", "SceneNameChanged" }) |n| {
+            if (std.mem.eql(u8, et.string, n)) self.refreshNames();
+        }
         var topic_buf: [128]u8 = undefined;
         const topic = std.fmt.bufPrint(&topic_buf, "core.obs.event.{s}", .{et.string}) catch return;
         self.bus.publish(topic, raw, .Transient, self.node_id) catch {};
     }
 
-    fn onResponse(d: std.json.ObjectMap) void {
+    fn onResponse(self: *ObsEgressNode, d: std.json.ObjectMap) void {
         const status = d.get("requestStatus") orelse return;
         if (status != .object) return;
         const result = status.object.get("result") orelse return;
-        if (result == .bool and !result.bool) {
-            const rt = if (d.get("requestType")) |v| (if (v == .string) v.string else "?") else "?";
-            const comment = if (status.object.get("comment")) |c| (if (c == .string) c.string else "") else "";
-            log.err("ObsEgress: OBS rejected {s}: {s}", .{ rt, comment });
+        const ok = !(result == .bool and !result.bool);
+        const rid_v = d.get("requestId") orelse .null;
+        const rid: []const u8 = if (rid_v == .string) rid_v.string else "";
+
+        // 名前の一覧
+        if (std.mem.startsWith(u8, rid, "weave-names-")) {
+            if (ok) self.storeNames(d, std.mem.eql(u8, rid, "weave-names-scenes"));
+            return;
         }
+        const id = if (std.mem.startsWith(u8, rid, "weave-")) std.fmt.parseInt(u64, rid[6..], 10) catch 0 else 0;
+        const p = self.problems.take(id) orelse {
+            if (!ok) log.err("ObsEgress: OBS rejected a request: {s}", .{rid});
+            return;
+        };
+        if (ok) {
+            if (self.problems.setFailing(&p, false)) self.publishProblem(&p, 100, "", true);
+            return;
+        }
+        const code: i64 = if (status.object.get("code")) |c| (if (c == .integer) c.integer else 0) else 0;
+        const comment = if (status.object.get("comment")) |c| (if (c == .string) c.string else "") else "";
+        log.err("ObsEgress: OBS rejected {s} ({s}) from node {d}: {s}", .{ p.request(), p.target(), p.sender, comment });
+        _ = self.problems.setFailing(&p, true);
+        self.publishProblem(&p, code, comment, false);
+    }
+
+    fn storeNames(self: *ObsEgressNode, d: std.json.ObjectMap, scenes: bool) void {
+        const rd = d.get("responseData") orelse return;
+        if (rd != .object) return;
+        const arr = rd.object.get(if (scenes) "scenes" else "inputs") orelse return;
+        if (arr != .array) return;
+        var names = std.ArrayListUnmanaged([]const u8){};
+        defer names.deinit(self.allocator);
+        for (arr.array.items) |it| {
+            if (it != .object) continue;
+            const n = it.object.get(if (scenes) "sceneName" else "inputName") orelse continue;
+            if (n == .string) names.append(self.allocator, n.string) catch {};
+        }
+        self.problems.setNames(if (scenes) .scene else .input, names.items);
+    }
+
+    fn publishProblem(self: *ObsEgressNode, p: *const ProblemTracker.Pending, code: i64, comment: []const u8, resolved: bool) void {
+        var sbuf: [128]u8 = undefined;
+        // 600 = ResourceNotFound (名前が見つからない)
+        const suggestion: ?[]const u8 = if (!resolved and code == 600) self.problems.suggest(p.kind, p.target(), &sbuf) else null;
+        var out = std.io.Writer.Allocating.init(self.allocator);
+        defer out.deinit();
+        out.writer.print("{f}", .{std.json.fmt(.{
+            .node_id = p.sender,
+            .request = p.request(),
+            .target = p.target(),
+            .target_kind = @tagName(p.kind),
+            .code = code,
+            .comment = comment,
+            .suggestion = suggestion,
+            .resolved = resolved,
+        }, .{})}) catch return;
+        self.bus.publish("core.obs.problem", out.written(), .Transient, self.node_id) catch {};
     }
 
     fn sendRaw(self: *ObsEgressNode, data: []const u8) !void {
@@ -367,19 +607,24 @@ pub const ObsEgressNode = struct {
         try ws.writeFrame(s, .text, data, true);
     }
 
-    fn buildRequest(self: *ObsEgressNode, request_type: []const u8, data_json: []const u8) ![]u8 {
+    fn buildRequest(self: *ObsEgressNode, request_type: []const u8, data_json: []const u8, sender: u32) ![]u8 {
         const id = self.next_request.fetchAdd(1, .monotonic);
+        self.problems.noteRequest(id, sender, request_type, data_json);
         return std.fmt.allocPrint(self.allocator, "{{\"op\":6,\"d\":{{\"requestType\":\"{s}\",\"requestId\":\"weave-{d}\",\"requestData\":{s}}}}}", .{ request_type, id, data_json });
     }
 
-    fn sendRequest(self: *ObsEgressNode, request_type: []const u8, data_json: []const u8) !void {
-        const req = try self.buildRequest(request_type, data_json);
+    fn sendRequestFrom(self: *ObsEgressNode, request_type: []const u8, data_json: []const u8, sender: u32) !void {
+        const req = try self.buildRequest(request_type, data_json, sender);
         defer self.allocator.free(req);
         try self.sendRaw(req);
     }
 
     /// 要求を処理する (egress セルの executor 上)
     pub fn handleRequest(self: *ObsEgressNode, request_type: []const u8, payload: []const u8) void {
+        self.handleRequestFrom(request_type, payload, 0);
+    }
+
+    pub fn handleRequestFrom(self: *ObsEgressNode, request_type: []const u8, payload: []const u8, sender: u32) void {
         // 要求種別はトピックの一部なので英数字のみ (validTopic 済み)。requestData は JSON オブジェクトに限る
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch {
             log.warn("ObsEgress: {s}: requestData must be a JSON object", .{request_type});
@@ -388,13 +633,13 @@ pub const ObsEgressNode = struct {
         defer parsed.deinit();
         if (parsed.value != .object) return;
 
-        const stateful = self.desired.record(request_type, payload) catch false;
+        const stateful = self.desired.recordFrom(request_type, payload, sender) catch false;
         if (self.identified.load(.acquire)) {
-            self.sendRequest(request_type, payload) catch |err| log.warn("ObsEgress: send failed: {any}", .{err});
+            self.sendRequestFrom(request_type, payload, sender) catch |err| log.warn("ObsEgress: send failed: {any}", .{err});
             return;
         }
         if (stateful) return; // 状態は接続後の reconcile で送られる
-        const req = self.buildRequest(request_type, payload) catch return;
+        const req = self.buildRequest(request_type, payload, sender) catch return;
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.outbox.items.len >= self.outbox_max) {
@@ -407,7 +652,7 @@ pub const ObsEgressNode = struct {
         const self: *ObsEgressNode = @ptrCast(@alignCast(context orelse return));
         const prefix = "core.obs.request.";
         if (!std.mem.startsWith(u8, msg.topic, prefix)) return;
-        self.handleRequest(msg.topic[prefix.len..], msg.payload);
+        self.handleRequestFrom(msg.topic[prefix.len..], msg.payload, msg.source_node_id);
     }
 };
 
@@ -435,4 +680,31 @@ test "DesiredState keeps the last value per target" {
         if (std.mem.indexOf(u8, e.data, "\"sceneItemId\":1") != null and std.mem.indexOf(u8, e.data, "false") != null) found_false = true;
     }
     try std.testing.expect(found_false);
+}
+
+test "ProblemTracker: who sent a refused request, and the closest name OBS actually has" {
+    const a = std.testing.allocator;
+    var t = ProblemTracker.init(a);
+    defer t.deinit();
+    t.setNames(.input, &.{ "Score Board", "SubGoal", "ゲーム画面ラベル" });
+    t.setNames(.scene, &.{ "Overlay", "Card1" });
+
+    t.noteRequest(7, 105, "SetInputSettings", "{\"inputName\":\"Scoreboard\",\"inputSettings\":{\"text\":\"A 0 - 0 B\"}}");
+    const p = t.take(7).?;
+    try std.testing.expectEqual(@as(u32, 105), p.sender);
+    try std.testing.expectEqualStrings("Scoreboard", p.target());
+    try std.testing.expect(t.take(7) == null);
+
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("Score Board", t.suggest(.input, "Scoreboard", &buf).?); // 空白と大文字小文字
+    try std.testing.expectEqualStrings("SubGoal", t.suggest(.input, "SubGaol", &buf).?); // 打ち間違い
+    try std.testing.expectEqualStrings("Overlay", t.suggest(.scene, "overlay", &buf).?);
+    try std.testing.expect(t.suggest(.input, "SubGoal", &buf) == null); // 名前は合っている
+    try std.testing.expect(t.suggest(.input, "TotallyDifferent", &buf) == null);
+
+    // 断られた → (同じものがまた断られても知らせる) → 通った (一度だけ解消を知らせる)
+    try std.testing.expect(t.setFailing(&p, true));
+    try std.testing.expect(t.setFailing(&p, true));
+    try std.testing.expect(t.setFailing(&p, false));
+    try std.testing.expect(!t.setFailing(&p, false));
 }
