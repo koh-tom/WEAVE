@@ -8,8 +8,10 @@
 //! 対応: ハンドシェイク / Hello / Identify (パスワード認証あり・なし) / Identified /
 //!       SetSceneItemEnabled / SetCurrentProgramScene / SetInputMute / その他の要求は成功応答のみ
 //!       状態変更時に SceneItemEnableStateChanged などのイベントを送る
+//!       --inputs / --scenes を渡すと、その名前だけが「OBS にある」ことにする。無い名前への要求は
+//!       本物と同じく code 600 (ResourceNotFound) で断り、GetInputList / GetSceneList に一覧を返す
 //!
-//! Usage: weave-obs-sim [--port 4455] [--password <pw>] [--state-file <path>] [--quiet]
+//! Usage: weave-obs-sim [--port 4455] [--password <pw>] [--state-file <path>] [--inputs A,B] [--scenes X,Y] [--quiet]
 
 const std = @import("std");
 const ws = @import("transport/ws_proto.zig");
@@ -24,6 +26,27 @@ const State = struct {
     requests: u64 = 0,
     state_file: ?[]const u8 = null,
     quiet: bool = false,
+    /// null = 名前を確かめない (どの名前でも成功)
+    inputs: ?[]const []const u8 = null,
+    scenes: ?[]const []const u8 = null,
+
+    fn has(list: ?[]const []const u8, name: []const u8) bool {
+        const l = list orelse return true;
+        for (l) |n| if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+
+    /// 要求の対象が OBS に無ければ、本物の obs-websocket と同じ文言を返す
+    fn missing(self: *State, data: std.json.Value, buf: []u8) ?[]const u8 {
+        if (data != .object) return null;
+        if (data.object.get("inputName")) |v| if (v == .string and !has(self.inputs, v.string))
+            return std.fmt.bufPrint(buf, "No source was found by the name of `{s}`.", .{v.string}) catch "not found";
+        if (data.object.get("sourceName")) |v| if (v == .string and !has(self.inputs, v.string) and !has(self.scenes, v.string))
+            return std.fmt.bufPrint(buf, "No source was found by the name of `{s}`.", .{v.string}) catch "not found";
+        if (data.object.get("sceneName")) |v| if (v == .string and !has(self.scenes, v.string))
+            return std.fmt.bufPrint(buf, "No scene was found by the name of `{s}`.", .{v.string}) catch "not found";
+        return null;
+    }
 
     fn writeFile(self: *State) void {
         const path = self.state_file orelse return;
@@ -111,6 +134,18 @@ fn handleClient(allocator: std.mem.Allocator, state: *State, password: ?[]const 
         const data = d.object.get("requestData") orelse .null;
         if (rt != .string) continue;
 
+        const rid_s: []const u8 = if (rid == .string) rid.string else "";
+        if (std.mem.eql(u8, rt.string, "GetInputList") or std.mem.eql(u8, rt.string, "GetSceneList")) {
+            sendList(conn.stream, &send_mutex, allocator, rt.string, rid_s, state) catch return;
+            continue;
+        }
+        var miss_buf: [256]u8 = undefined;
+        if (state.missing(data, &miss_buf)) |comment| {
+            if (!state.quiet) std.debug.print("[OBS-SIM] {s} rejected: {s}\n", .{ rt.string, comment });
+            sendJson(conn.stream, &send_mutex, .{ .op = 7, .d = .{ .requestType = rt.string, .requestId = rid_s, .requestStatus = .{ .result = false, .code = 600, .comment = comment } } }) catch return;
+            continue;
+        }
+
         state.mutex.lock();
         state.requests += 1;
         var event_sent = false;
@@ -148,9 +183,22 @@ fn handleClient(allocator: std.mem.Allocator, state: *State, password: ?[]const 
             state.writeFile();
             state.mutex.unlock();
         }
-        const rid_s: []const u8 = if (rid == .string) rid.string else "";
         sendJson(conn.stream, &send_mutex, .{ .op = 7, .d = .{ .requestType = rt.string, .requestId = rid_s, .requestStatus = .{ .result = true, .code = 100 } } }) catch return;
     }
+}
+
+fn sendList(stream: std.net.Stream, mutex: *std.Thread.Mutex, allocator: std.mem.Allocator, rt: []const u8, rid: []const u8, state: *State) !void {
+    const scenes = std.mem.eql(u8, rt, "GetSceneList");
+    const names = (if (scenes) state.scenes else state.inputs) orelse &.{};
+    var out = std.io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    const w = &out.writer;
+    try w.print("{{\"op\":7,\"d\":{{\"requestType\":{f},\"requestId\":{f},\"requestStatus\":{{\"result\":true,\"code\":100}},\"responseData\":{{\"{s}\":[", .{ std.json.fmt(rt, .{}), std.json.fmt(rid, .{}), if (scenes) "scenes" else "inputs" });
+    for (names, 0..) |n, i| try w.print("{s}{{\"{s}\":{f}}}", .{ if (i == 0) "" else ",", if (scenes) "sceneName" else "inputName", std.json.fmt(n, .{}) });
+    try w.writeAll("]}}}");
+    mutex.lock();
+    defer mutex.unlock();
+    try ws.writeFrame(stream, .text, out.written(), false);
 }
 
 fn onSignal(_: i32) callconv(.c) void {
@@ -182,10 +230,17 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, a, "--state-file") and i + 1 < args.len) {
             i += 1;
             state.state_file = args[i];
+        } else if ((std.mem.eql(u8, a, "--inputs") or std.mem.eql(u8, a, "--scenes")) and i + 1 < args.len) {
+            i += 1;
+            var list = std.ArrayListUnmanaged([]const u8){};
+            var it = std.mem.splitScalar(u8, args[i], ',');
+            while (it.next()) |n| if (n.len > 0) try list.append(allocator, n);
+            const owned = try list.toOwnedSlice(allocator);
+            if (std.mem.eql(u8, a, "--inputs")) state.inputs = owned else state.scenes = owned;
         } else if (std.mem.eql(u8, a, "--quiet")) {
             state.quiet = true;
         } else if (std.mem.eql(u8, a, "--help")) {
-            std.debug.print("Usage: weave-obs-sim [--port 4455] [--password <pw>] [--state-file <path>] [--quiet]\n", .{});
+            std.debug.print("Usage: weave-obs-sim [--port 4455] [--password <pw>] [--state-file <path>] [--inputs A,B] [--scenes X,Y] [--quiet]\n", .{});
             return;
         }
     }
@@ -194,6 +249,8 @@ pub fn main() !void {
         while (it.next()) |e| allocator.free(e.key_ptr.*);
         state.items.deinit(allocator);
         if (state.current_scene) |c| allocator.free(c);
+        if (state.inputs) |l| allocator.free(l);
+        if (state.scenes) |l| allocator.free(l);
     }
 
     const act = std.os.linux.Sigaction{ .handler = .{ .handler = onSignal }, .mask = std.mem.zeroes(std.os.linux.sigset_t), .flags = 0 };

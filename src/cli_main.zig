@@ -10,6 +10,7 @@
 //!   weave node ls                            ノード一覧 (セル・状態)
 //!   weave doctor                             環境の自己診断
 //!   weave add <plugin.wasm> [--yes]         プラグインの権限を人の言葉で見て承認する (.weave/approved.json)
+//!   weave list / weave remove <name>         承認したプラグインの一覧 (今の状態つき) / 承認の取り消し
 //!   weave init <name>                        プラグインのひな形 (wasm-apps/<name>.zig/.json)
 //!   weave demo [name] [args]                 デモ台本 (demo/run_<name>_demo.sh) を実行。名前なしで一覧
 //!
@@ -38,7 +39,9 @@ fn usage() void {
         \\  weave topic echo [pattern]              イベントを表示
         \\  weave node ls                           ノード一覧
         \\  weave doctor                            自己診断
-        \\  weave add <plugin.wasm> [--yes]         権限を確かめて承認する (--approval-mode strict で必須)
+        \\  weave add <plugin.wasm> [--yes]         権限を確かめて承認する (承認したものは weave run だけで起動)
+        \\  weave list                              承認したプラグインと今の状態
+        \\  weave remove <name>                     承認を取り消す
         \\  weave init <name> [--lang zig|as]      プラグインのひな形を作る (as = AssemblyScript)
         \\  weave demo [name] [args]                デモ台本を実行 (名前なしで一覧)
         \\  weave record <file>                     全イベントを JSONL に記録 (weave run --replay <file> で再生)
@@ -534,16 +537,106 @@ fn cmdAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
             std.process.exit(1);
         }
     }
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real = std.fs.cwd().realpath(wp, &real_buf) catch wp;
     try store.upsert(allocator, .{
         .name = m.name,
         .version = m.version,
+        .path = try allocator.dupe(u8, real),
         .digest = digest,
         .permissions = m.permissions,
         .approved_at = std.time.timestamp(),
     });
     try store.save(allocator, path);
-    try out.print("承認しました → {s}\n", .{path});
+    try out.print("承認しました → {s}\n  次からは weave run だけで起動します (一覧: weave list)\n", .{path});
     try out.flush();
+}
+
+fn approvalsPathArg(args: []const []const u8, rest: *std.ArrayListUnmanaged([]const u8), allocator: std.mem.Allocator) ![]const u8 {
+    var path: []const u8 = approval.DEFAULT_PATH;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--approvals") and i + 1 < args.len) {
+            i += 1;
+            path = args[i];
+        } else try rest.append(allocator, args[i]);
+    }
+    return path;
+}
+
+/// `weave list` — 承認したプラグインと、今のファイルがその承認のままか
+fn cmdList(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var rest = std.ArrayListUnmanaged([]const u8){};
+    const path = try approvalsPathArg(args, &rest, allocator);
+    const store = try approval.Store.load(allocator, path);
+    var out_buf: [4096]u8 = undefined;
+    var out_w = std.fs.File.stdout().writer(&out_buf);
+    const out = &out_w.interface;
+    if (store.entries.items.len == 0) {
+        try out.print("承認したプラグインはまだありません。weave add <plugin.wasm> で追加します\n", .{});
+        return out.flush();
+    }
+    try out.print("weave add で承認したプラグイン ({s})\n", .{path});
+    for (store.entries.items) |e| {
+        const day = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(e.approved_at, 0)) };
+        const yd = day.getEpochDay().calculateYearDay();
+        const md = yd.calculateMonthDay();
+        try out.print("\n  {s} {s}   承認 {d}-{d:0>2}-{d:0>2}\n", .{ e.name, e.version, yd.year, md.month.numeric(), md.day_index + 1 });
+
+        // できることのうち、注意が要るものだけを短く
+        var shown: usize = 0;
+        var others: usize = 0;
+        try out.print("    ", .{});
+        inline for (.{ .{ "subscribe", approval.describeSubscribe }, .{ "publish", approval.describePublish }, .{ "data_access", approval.describeDataAccess } }) |pair| {
+            for (@field(e.permissions, pair[0])) |t| {
+                const d = pair[1](t);
+                if (d.weight == .normal) {
+                    others += 1;
+                } else {
+                    try out.print("{s}{s}{s}", .{ if (shown == 0) "" else " / ", d.text, if (d.weight == .strong) " ⚠" else "" });
+                    shown += 1;
+                }
+            }
+        }
+        if (shown == 0) try out.print("注意が要る権限はありません", .{});
+        if (others > 0) try out.print("  (ほか {d} 件)", .{others});
+        try out.print("\n    {s}\n    状態: {s}\n", .{ e.path, try currentState(allocator, &store, e) });
+    }
+    try out.print("\nweave run (プラグインの指定なし) で、ファイルがあるものをすべて起動します\n", .{});
+    try out.flush();
+}
+
+fn currentState(allocator: std.mem.Allocator, store: *const approval.Store, e: approval.Entry) ![]const u8 {
+    if (e.path.len == 0) return "場所の記録がありません (weave add し直すと記録されます)";
+    const wasm = std.fs.cwd().readFileAlloc(allocator, e.path, 16 * 1024 * 1024) catch return "ファイルがありません (weave remove で承認を消せます)";
+    if (!std.mem.endsWith(u8, e.path, ".wasm")) return "OK";
+    const mp = try std.fmt.allocPrint(allocator, "{s}.json", .{e.path[0 .. e.path.len - 5]});
+    const manifest = std.fs.cwd().readFileAlloc(allocator, mp, 1024 * 1024) catch return "manifest がありません";
+    const m = approval.parseManifest(allocator, manifest) catch return "manifest が読めません";
+    const v = try approval.check(allocator, store, m, try approval.digestHex(allocator, wasm, manifest));
+    return switch (v) {
+        .approved => "OK (承認したときのまま)",
+        .updated => "更新されています (権限は増えていないので、そのまま起動します)",
+        .permissions_increased => try std.fmt.allocPrint(allocator, "⚠ 更新で権限が増えています。起動しません → weave add {s} で確認", .{e.path}),
+        .not_approved => "OK",
+    };
+}
+
+/// `weave remove <name>` — 承認を取り消す (strict では次から起動しない)
+fn cmdRemove(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var rest = std.ArrayListUnmanaged([]const u8){};
+    const path = try approvalsPathArg(args, &rest, allocator);
+    if (rest.items.len != 1) {
+        std.debug.print("usage: weave remove <name> [--approvals .weave/approved.json]   (名前は weave list で確認)\n", .{});
+        std.process.exit(2);
+    }
+    var store = try approval.Store.load(allocator, path);
+    if (!store.remove(rest.items[0])) {
+        std.debug.print("weave remove: '{s}' は承認の記録にありません (weave list で確認)\n", .{rest.items[0]});
+        std.process.exit(1);
+    }
+    try store.save(allocator, path);
+    std.debug.print("'{s}' の承認を取り消しました。次の weave run からは起動しません\n", .{rest.items[0]});
 }
 
 fn sinkLabel(node: []const u8) []const u8 {
@@ -596,6 +689,8 @@ fn realMain() !void {
     if (std.mem.eql(u8, cmd, "doctor")) return cmdDoctor(allocator);
     if (std.mem.eql(u8, cmd, "init")) return cmdInit(allocator, rest);
     if (std.mem.eql(u8, cmd, "add")) return cmdAdd(allocator, rest);
+    if (std.mem.eql(u8, cmd, "list")) return cmdList(allocator, rest);
+    if (std.mem.eql(u8, cmd, "remove")) return cmdRemove(allocator, rest);
     if (std.mem.eql(u8, cmd, "demo")) return cmdDemo(allocator, rest);
     if (std.mem.eql(u8, cmd, "record")) return cmdRecord(allocator, rest);
     if (std.mem.eql(u8, cmd, "topic") and rest.len >= 1) {

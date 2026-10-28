@@ -3,7 +3,7 @@
 //! Core (weave) が子プロセスとして起動する。自分の中に小さなバスを持ち、そこで既存の ObsEgress
 //! (または mock) をそのまま動かす。Core とは UNIX ドメインソケットでつながり、フレームは ws_proto を使う。
 //!   Core → cell : {"t":"core.obs.request.<Type>","p":"<payload JSON>"}   OBS への要求
-//!   cell → Core : {"t":"core.obs.event.*" | "core.obs.link","p":"..."}  OBS からの状態
+//!   cell → Core : {"t":"core.obs.event.*" | "core.obs.link" | "core.obs.problem","p":"..."}  OBS からの状態・断られた要求
 //! 何を受け取り何を出してよいかの判定は Core 側で行う (このプロセスは信頼されない)。
 //! ObsEgress がパーサのバグなどで落ちても、落ちるのはこのプロセスだけで、Core は再起動して
 //! 意図した OBS の状態を送り直す。
@@ -36,7 +36,7 @@ const Link = struct {
     /// ローカルバスで ObsEgress が出したもののうち、Core に返すものだけを送る
     fn tap(ctx: ?*anyopaque, msg: *const event_bus.EventMessage) void {
         const self: *Link = @ptrCast(@alignCast(ctx.?));
-        if (std.mem.startsWith(u8, msg.topic, "core.obs.event.") or std.mem.eql(u8, msg.topic, "core.obs.link")) {
+        if (std.mem.startsWith(u8, msg.topic, "core.obs.event.") or std.mem.eql(u8, msg.topic, "core.obs.link") or std.mem.eql(u8, msg.topic, "core.obs.problem")) {
             self.send(msg.topic, msg.payload);
         }
     }
@@ -116,11 +116,12 @@ pub fn main() !void {
         defer allocator.free(f.payload);
         if (f.opcode == .close) break;
         if (f.opcode != .text) continue;
-        const Msg = struct { t: []const u8, p: []const u8 };
-        const m = std.json.parseFromSlice(Msg, allocator, f.payload, .{}) catch continue;
+        const Msg = struct { t: []const u8, p: []const u8, s: u32 = 0 };
+        const m = std.json.parseFromSlice(Msg, allocator, f.payload, .{ .ignore_unknown_fields = true }) catch continue;
         defer m.deinit();
         if (!std.mem.startsWith(u8, m.value.t, "core.obs.request.")) continue;
-        bus.publish(m.value.t, m.value.p, .Reliable, 0) catch {};
+        // 送り主は Core のノード ID のまま渡す (子のバスにそのノードはいないが、ObsEgress は記録に使うだけ)
+        bus.publish(m.value.t, m.value.p, .Reliable, m.value.s) catch {};
     }
     bus.waitIdle();
     log.info("weave-cell: Core closed the link; exiting", .{});

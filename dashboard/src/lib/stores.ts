@@ -88,11 +88,13 @@ export interface Health {
   updated: number;
   overall: 'ok' | 'warn' | 'trouble';
   nodes: { name: string; kind: string; status: string }[];
-  problems: { node: string; status: string; since: number | null; expected: boolean }[];
+  problems: { node: string; status: string; since: number | null; expected: boolean; action?: string }[];
   impacts: { node: string; effect: 'stalled' | 'degraded'; because: string[]; lost: string[] }[];
   sinks: { node: string; sink: string; topics: string[] }[];
   sinks_stopped: string[];
   warnings: { node: string; topic: string; suggestion: string; from: string }[];
+  /** OBS に断られている操作 (名前違いなど)。同じ操作が通ったら消える */
+  obs_problems?: { plugin: string; request: string; target: string; target_kind: string; code: number; comment: string; suggestion: string | null; count: number; ts: number; action: string }[];
   recent: { node: string; down_ms: number; ts: number }[];
 }
 export const health = writable<Health | null>(null);

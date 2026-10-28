@@ -18,6 +18,7 @@ const log = @import("../common/log.zig");
 pub const NODE_ID: u32 = 11;
 pub const TOPIC = "core.health.summary";
 const MAX_RECENT = 5;
+const MAX_OBS_PROBLEMS = 8;
 
 pub const HealthMonitor = struct {
     allocator: std.mem.Allocator,
@@ -34,6 +35,28 @@ pub const HealthMonitor = struct {
     last_body: std.ArrayListUnmanaged(u8) = .{},
     recent: [MAX_RECENT]Recent = undefined,
     recent_len: usize = 0,
+    /// OBS に断られている要求 (core.obs.problem)。同じ要求が通ったら消える
+    obs_problems: std.ArrayListUnmanaged(ObsProblem) = .{},
+
+    const ObsProblem = struct {
+        node_id: u32,
+        request: []u8,
+        target: []u8,
+        target_kind: []u8,
+        code: i64,
+        comment: []u8,
+        suggestion: ?[]u8,
+        count: u32 = 1,
+        ts: i64,
+
+        fn free(self: *ObsProblem, a: std.mem.Allocator) void {
+            a.free(self.request);
+            a.free(self.target);
+            a.free(self.target_kind);
+            a.free(self.comment);
+            if (self.suggestion) |x| a.free(x);
+        }
+    };
 
     pub const Declared = struct {
         node: blast.Node,
@@ -43,6 +66,8 @@ pub const HealthMonitor = struct {
         builtin: bool,
         /// 起動時に読み込みを拒否した理由 (例: "approval_required")。起動していないときは missing の代わりにこれを出す
         blocked: ?[]const u8 = null,
+        /// プラグインの wasm のパス (「weave add <path>」のように、どうすればいいかを示すため)
+        wasm_path: ?[]const u8 = null,
     };
 
     const Recent = struct {
@@ -71,6 +96,8 @@ pub const HealthMonitor = struct {
         self.stopped.store(true, .release);
         self.mutex.lock();
         self.last_body.deinit(self.allocator);
+        for (self.obs_problems.items) |*o| o.free(self.allocator);
+        self.obs_problems.deinit(self.allocator);
         self.mutex.unlock();
         self.decl_arena.deinit();
         self.allocator.destroy(self);
@@ -83,14 +110,16 @@ pub const HealthMonitor = struct {
 
     /// manifest を「本来いるはずのノード」として加える (起動時に指定したプラグイン / --expect)
     pub fn addManifest(self: *HealthMonitor, path: []const u8, declared_cells: []const []const u8) !void {
-        const node = try blast.loadManifestNodeIn(self.decl_arena.allocator(), path, declared_cells);
+        const a = self.decl_arena.allocator();
+        const node = try blast.loadManifestNodeIn(a, path, declared_cells);
+        const wasm_path: ?[]const u8 = if (std.mem.endsWith(u8, path, ".json")) try std.fmt.allocPrint(a, "{s}.wasm", .{path[0 .. path.len - 5]}) else null;
         for (self.declared.items) |*d| {
             if (std.mem.eql(u8, d.node.name, node.name)) {
                 d.expected = true;
                 return;
             }
         }
-        try self.declared.append(self.decl_arena.allocator(), .{ .node = node, .expected = true, .builtin = false });
+        try self.declared.append(a, .{ .node = node, .expected = true, .builtin = false, .wasm_path = wasm_path });
     }
 
     /// 起動時に読み込みを拒否したプラグイン (未承認・権限の増加など)。「起動していない」の代わりに理由を出す
@@ -114,7 +143,7 @@ pub const HealthMonitor = struct {
     pub fn start(self: *HealthMonitor) !void {
         const observe = self.bus.getCell("observe") orelse try self.bus.createCell("observe", .{ .trust = .core });
         const opts: event_bus.EventBus.SubscribeOptions = .{ .cell = observe, .record_graph = false };
-        for ([_][]const u8{ "core.system.tick", "core.node.down", "core.node.recovered", "core.node.registered", "core.system.graph.delta" }) |t| {
+        for ([_][]const u8{ "core.system.tick", "core.node.down", "core.node.recovered", "core.node.registered", "core.system.graph.delta", "core.obs.problem" }) |t| {
             try self.bus.subscribeEx(t, NODE_ID, onBusMessage, self, opts);
         }
         self.recompute();
@@ -124,7 +153,46 @@ pub const HealthMonitor = struct {
         const self: *HealthMonitor = @ptrCast(@alignCast(ctx orelse return));
         if (self.stopped.load(.acquire)) return;
         if (std.mem.eql(u8, msg.topic, "core.node.recovered")) self.noteRecovered(msg.payload);
+        if (std.mem.eql(u8, msg.topic, "core.obs.problem")) self.noteObsProblem(msg.payload);
         self.recompute();
+    }
+
+    pub fn noteObsProblem(self: *HealthMonitor, payload: []const u8) void {
+        const P = struct { node_id: u32 = 0, request: []const u8 = "", target: []const u8 = "", target_kind: []const u8 = "other", code: i64 = 0, comment: []const u8 = "", suggestion: ?[]const u8 = null, resolved: bool = false };
+        const parsed = std.json.parseFromSlice(P, self.allocator, payload, .{ .ignore_unknown_fields = true }) catch return;
+        defer parsed.deinit();
+        const v = parsed.value;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const a = self.allocator;
+        for (self.obs_problems.items, 0..) |*o, i| {
+            if (o.node_id == v.node_id and std.mem.eql(u8, o.request, v.request) and std.mem.eql(u8, o.target, v.target)) {
+                if (v.resolved) {
+                    o.free(a);
+                    _ = self.obs_problems.orderedRemove(i);
+                } else {
+                    o.count += 1;
+                    o.ts = std.time.milliTimestamp();
+                }
+                return;
+            }
+        }
+        if (v.resolved) return;
+        if (self.obs_problems.items.len >= MAX_OBS_PROBLEMS) {
+            var old = self.obs_problems.orderedRemove(0);
+            old.free(a);
+        }
+        const o = ObsProblem{
+            .node_id = v.node_id,
+            .request = a.dupe(u8, v.request) catch return,
+            .target = a.dupe(u8, v.target) catch return,
+            .target_kind = a.dupe(u8, v.target_kind) catch return,
+            .code = v.code,
+            .comment = a.dupe(u8, v.comment) catch return,
+            .suggestion = if (v.suggestion) |x| (a.dupe(u8, x) catch null) else null,
+            .ts = std.time.milliTimestamp(),
+        };
+        self.obs_problems.append(a, o) catch {};
     }
 
     fn noteRecovered(self: *HealthMonitor, payload: []const u8) void {
@@ -211,6 +279,19 @@ pub const HealthMonitor = struct {
         return .{ .nodes = nodes.items, .status = status.items, .since = since.items, .expected = expected.items };
     }
 
+    /// 状態ごとの「どうすればいいか」(配信の現場の言葉で)
+    fn actionFor(arena: std.mem.Allocator, status: []const u8, node: []const u8, wasm_path: ?[]const u8) ![]const u8 {
+        const eq = std.mem.eql;
+        if (eq(u8, status, "approval_required"))
+            return std.fmt.allocPrint(arena, "PC で weave add {s} を実行し、権限を確認して承認してください", .{wasm_path orelse node});
+        if (eq(u8, status, "missing"))
+            return std.fmt.allocPrint(arena, "{s} が起動していません。起動コマンドに入れてください (weave add 済みなら weave run だけで起動します)", .{node});
+        if (eq(u8, status, "restarting")) return arena.dupe(u8, "自動で作り直しています。数秒で戻ります");
+        if (eq(u8, status, "quarantined")) return arena.dupe(u8, "何度も落ちたため止めています。直前の操作を確かめてから WEAVE を起動し直してください");
+        if (eq(u8, status, "disconnected")) return arena.dupe(u8, "接続先 (OBS など) が起動しているか確かめてください。戻れば自動でつながり、表示も元に戻ります");
+        return arena.dupe(u8, "");
+    }
+
     fn isDownLabel(s: []const u8) bool {
         if (std.mem.eql(u8, s, "missing") or std.mem.eql(u8, s, "approval_required")) return true;
         const st = std.meta.stringToEnum(@import("../common/types.zig").NodeStatus, s) orelse return false;
@@ -223,7 +304,7 @@ pub const HealthMonitor = struct {
 
         var down = std.ArrayListUnmanaged([]const u8){};
         const JNode = struct { name: []const u8, kind: []const u8, status: []const u8 };
-        const JProblem = struct { node: []const u8, status: []const u8, since: ?i64, expected: bool };
+        const JProblem = struct { node: []const u8, status: []const u8, since: ?i64, expected: bool, action: []const u8 };
         var jnodes = std.ArrayListUnmanaged(JNode){};
         var problems = std.ArrayListUnmanaged(JProblem){};
         for (m.nodes, 0..) |n, i| {
@@ -231,7 +312,10 @@ pub const HealthMonitor = struct {
             try jnodes.append(arena, .{ .name = n.name, .kind = n.kind, .status = m.status[i] });
             if (isDownLabel(m.status[i])) {
                 try down.append(arena, n.name);
-                try problems.append(arena, .{ .node = n.name, .status = m.status[i], .since = m.since[i], .expected = m.expected[i] });
+                const wasm_path: ?[]const u8 = for (self.declared.items) |d| {
+                    if (std.mem.eql(u8, d.node.name, n.name)) break d.wasm_path;
+                } else null;
+                try problems.append(arena, .{ .node = n.name, .status = m.status[i], .since = m.since[i], .expected = m.expected[i], .action = try actionFor(arena, m.status[i], n.name, wasm_path) });
             }
         }
         const report = try blast.computeFailureSet(arena, m.nodes, down.items);
@@ -248,7 +332,25 @@ pub const HealthMonitor = struct {
         var recent = try arena.alloc(JRecent, self.recent_len);
         for (self.recent[0..self.recent_len], 0..) |*r, i| recent[i] = .{ .node = try arena.dupe(u8, r.name()), .down_ms = r.down_ms, .ts = r.ts };
 
-        const overall: []const u8 = if (problems.items.len > 0 or report.sinks_stopped.len > 0) "trouble" else if (warns.len > 0) "warn" else "ok";
+        // OBS に断られている要求。送り主はノード ID → 名前に直す
+        const JObs = struct { plugin: []const u8, request: []const u8, target: []const u8, target_kind: []const u8, code: i64, comment: []const u8, suggestion: ?[]const u8, count: u32, ts: i64, action: []const u8 };
+        const snap = try self.graph.snapshot(arena);
+        var obs = try arena.alloc(JObs, self.obs_problems.items.len);
+        for (self.obs_problems.items, 0..) |o, i| {
+            const plugin: []const u8 = for (snap) |sn| {
+                if (sn.id == o.node_id) break sn.name;
+            } else if (o.node_id == 0) "WEAVE" else try std.fmt.allocPrint(arena, "node {d}", .{o.node_id});
+            const what: []const u8 = if (std.mem.eql(u8, o.target_kind, "scene")) "シーン" else "ソース";
+            const action = if (o.code != 600)
+                try std.fmt.allocPrint(arena, "OBS が断りました: {s}", .{o.comment})
+            else if (o.suggestion) |sg|
+                try std.fmt.allocPrint(arena, "OBS に「{s}」という{s}がありません。もしかして「{s}」? OBS 側の名前を「{s}」に変えると動きます", .{ o.target, what, sg, o.target })
+            else
+                try std.fmt.allocPrint(arena, "OBS に「{s}」という{s}がありません。OBS で「{s}」という名前の{s}を作ってください", .{ o.target, what, o.target, what });
+            obs[i] = .{ .plugin = plugin, .request = o.request, .target = o.target, .target_kind = o.target_kind, .code = o.code, .comment = o.comment, .suggestion = o.suggestion, .count = o.count, .ts = o.ts, .action = action };
+        }
+
+        const overall: []const u8 = if (problems.items.len > 0 or report.sinks_stopped.len > 0 or obs.len > 0) "trouble" else if (warns.len > 0) "warn" else "ok";
         try w.print("{f}", .{std.json.fmt(.{
             .overall = overall,
             .nodes = jnodes.items,
@@ -258,6 +360,7 @@ pub const HealthMonitor = struct {
             .sinks_stopped = report.sinks_stopped,
             .warnings = warns,
             .recent = recent,
+            .obs_problems = obs,
         }, .{})});
     }
 
@@ -409,4 +512,34 @@ test "HealthMonitor: OBS disconnected → the sink is reported as stopped" {
     try hm.writeBody(arena_inst.allocator(), out.writer(arena_inst.allocator()));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"overall\":\"trouble\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"sinks_stopped\":[\"ObsEgress\"]") != null);
+}
+
+test "HealthMonitor: OBS refusing a name shows which plugin, the closest name, and clears once it works" {
+    const a = std.testing.allocator;
+    var bus = try event_bus.EventBus.init(a, 16);
+    defer bus.deinit();
+    bus.verbose = false;
+    var graph = SystemGraph.init(a);
+    defer graph.deinit();
+    graph.bus = &bus;
+    const hm = try HealthMonitor.create(a, &bus, &graph);
+    defer hm.destroy();
+    try graph.registerNodeIn(105, "scoreboard", .wasm, "plugin.scoreboard");
+
+    const p = "{\"node_id\":105,\"request\":\"SetInputSettings\",\"target\":\"Scoreboard\",\"target_kind\":\"input\",\"code\":600,\"comment\":\"No source\",\"suggestion\":\"Score Board\",\"resolved\":false}";
+    hm.noteObsProblem(p);
+    hm.noteObsProblem(p);
+    var arena_inst = std.heap.ArenaAllocator.init(a);
+    defer arena_inst.deinit();
+    var out = std.ArrayListUnmanaged(u8){};
+    try hm.writeBody(arena_inst.allocator(), out.writer(arena_inst.allocator()));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"plugin\":\"scoreboard\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "もしかして「Score Board」") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"overall\":\"trouble\"") != null);
+
+    hm.noteObsProblem("{\"node_id\":105,\"request\":\"SetInputSettings\",\"target\":\"Scoreboard\",\"resolved\":true}");
+    out.clearRetainingCapacity();
+    try hm.writeBody(arena_inst.allocator(), out.writer(arena_inst.allocator()));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"obs_problems\":[]") != null);
 }

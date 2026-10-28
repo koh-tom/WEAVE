@@ -35,6 +35,21 @@ zig build                                   # Core・CLI・Wasm プラグイン�
 右に「WEAVE 内部 (セル・拒否したもの・障害と復帰)」が表示されます。サイドバーの「草ラッシュ」で
 kusa_node が OBS のオーバーレイを表示し、5 秒後に自動で消します。
 
+### 配信者として使うとき
+
+```bash
+./weave add wasm-apps/subgoal.wasm      # 入れるプラグインを、権限を見て承認 (一度だけ)
+./weave add wasm-apps/countdown.wasm
+./weave list                            # 承認したプラグインと今の状態 (更新された・権限が増えた・ファイルが無い)
+./weave up --real-obs                   # プラグインを指定しなければ、承認したものを全部起動
+./weave remove countdown                # もう使わないものは承認を取り消す
+```
+
+うまく動かないときは、起動ログの `[STATUS]` の URL (スマホでも可) を開くと、止まっているものと
+**どうすればいいか** が出ます。OBS がプラグインの操作を断ったとき (ソース名・シーン名の違いがいちばん多い) は、
+どのプラグインの操作かと、OBS にある近い名前 (「もしかして『Score Board』?」) を出します。名前を直して OBS を
+起動し直せば、WEAVE が意図した表示を送り直し、表示は消えます。
+
 一番見せたいもの (通しデモ):
 
 ```bash
@@ -120,6 +135,7 @@ kusa_node が OBS のオーバーレイを表示し、5 秒後に自動で消し
 ```bash
 ./weave add wasm-apps/subgoal.wasm      # 権限を人の言葉で表示 (「チャットの本文を読む」「配信画面の文字を変える」…) → y で承認
 ./weave run --approval-mode strict wasm-apps/subgoal.wasm
+./weave list / ./weave remove subgoal   # 承認の一覧 (今の状態つき) / 取り消し
 ```
 
 承認した権限と wasm+manifest のダイジェストを `.weave/approved.json` に記録します。strict では、承認していないプラグインと、
@@ -173,11 +189,12 @@ Host API v1 (Wasm から呼べる関数): `os_api_publish` / `os_api_subscribe` 
 | `weave up [options] [plugins...]` | Supervisor 付きで起動 (落ちても即再起動・状態復元) |
 | `weave audit [node \| --failure node]` | 影響範囲の監査 |
 | `weave key generate\|sign\|verify` | プラグイン署名 |
-| `weave obs-sim [--port N] [--password P] [--state-file F]` | OBS WebSocket v5 シミュレータ |
+| `weave obs-sim [--port N] [--password P] [--state-file F] [--inputs A,B] [--scenes X,Y]` | OBS WebSocket v5 シミュレータ (`--inputs/--scenes` で無い名前への操作を本物と同じく断る) |
 | `weave topic pub <topic> <payload>` / `weave topic echo [pattern]` | イベントの発行・表示 |
 | `weave node ls` | ノード一覧 (所属セル・状態) |
 | `weave doctor` | 環境の自己診断 |
-| `weave add <plugin.wasm> [--yes]` | 権限を確かめて承認 (`--approval-mode strict` で必須) |
+| `weave add <plugin.wasm> [--yes]` | 権限を確かめて承認 (承認したものはプラグイン指定なしの `weave run` で起動) |
+| `weave list` / `weave remove <name>` | 承認したプラグインと今の状態 / 承認の取り消し |
 | `weave init <name>` | プラグインのひな形 |
 | `weave-bridge [--streamerbot ws://...] [--weave ws://...]` | Streamer.bot ブリッジ (`mock-streamerbot` / `mock-astro` / `mock-streamlabs` でモック) |
 

@@ -111,14 +111,15 @@ pub const CellLink = struct {
         const self: *CellLink = @ptrCast(@alignCast(ctx.?));
         const prefix = "core.obs.request.";
         if (!std.mem.startsWith(u8, msg.topic, prefix)) return;
-        _ = self.desired.record(msg.topic[prefix.len..], msg.payload) catch false;
-        self.sendToChild(msg.topic, msg.payload);
+        _ = self.desired.recordFrom(msg.topic[prefix.len..], msg.payload, msg.source_node_id) catch false;
+        self.sendToChild(msg.topic, msg.payload, msg.source_node_id);
     }
 
-    fn sendToChild(self: *CellLink, topic: []const u8, payload: []const u8) void {
+    /// s = 要求を出したノード (OBS に断られたとき、子がどのプラグインの要求かを返せるように)
+    fn sendToChild(self: *CellLink, topic: []const u8, payload: []const u8, sender: u32) void {
         var out: std.ArrayListUnmanaged(u8) = .{};
         defer out.deinit(self.allocator);
-        out.writer(self.allocator).print("{f}", .{std.json.fmt(.{ .t = topic, .p = payload }, .{})}) catch return;
+        out.writer(self.allocator).print("{f}", .{std.json.fmt(.{ .t = topic, .p = payload, .s = sender }, .{})}) catch return;
         self.stream_mutex.lock();
         defer self.stream_mutex.unlock();
         const s = self.stream orelse return;
@@ -208,7 +209,7 @@ pub const CellLink = struct {
             var tbuf: [128]u8 = undefined;
             for (entries) |e| {
                 const t = std.fmt.bufPrint(&tbuf, "core.obs.request.{s}", .{e.request_type}) catch continue;
-                self.sendToChild(t, e.data);
+                self.sendToChild(t, e.data, e.sender);
             }
             if (entries.len > 0 and self.restarts.load(.monotonic) > 0) log.info("CellLink: re-sent {d} desired OBS state(s) to the restarted egress cell", .{entries.len});
         } else |_| {}
@@ -235,7 +236,7 @@ pub const CellLink = struct {
     }
 
     pub fn allowedFromChild(topic: []const u8) bool {
-        return std.mem.startsWith(u8, topic, "core.obs.event.") or std.mem.eql(u8, topic, "core.obs.link");
+        return std.mem.startsWith(u8, topic, "core.obs.event.") or std.mem.eql(u8, topic, "core.obs.link") or std.mem.eql(u8, topic, "core.obs.problem");
     }
 };
 

@@ -89,6 +89,9 @@ jobs:
       - name: E2E — user approval of plugin permissions (weave add), re-approval when permissions grow
         run: ./tests/e2e/approval.sh
 
+      - name: E2E — OBS refusing a source name is shown with the plugin and "did you mean", and clears once fixed
+        run: ./tests/e2e/obs_names.sh
+
       - name: E2E — egress cell as a separate process survives kill -9 (ADR-010 stage 1)
         run: ./tests/e2e/egress_isolation.sh
 
