@@ -42,6 +42,13 @@ pub const reserved = [_][]const u8{
     "core.cell.#",
     // 稼働状態のまとめ (HealthMonitor)。偽造されると「止まっていない」と見せかけられる
     "core.health.#",
+    // OBS からの報告。出すのは OBS への送信役 (Core) だけ。偽造されると、OBS の状態を偽ったり (event / link)、
+    // /status に偽の「どうすれば」(problem) や遅延 (latency) を出して配信者を誤誘導できてしまう。
+    // core.obs.request.* (OBS への要求) はプラグインが宣言して使うので予約しない
+    "core.obs.event.#",
+    "core.obs.link",
+    "core.obs.problem",
+    "core.obs.latency",
 };
 
 /// 個人情報を含みうるパターン (購読には `data_access: ["pii"]` の宣言が要る)。
@@ -126,4 +133,13 @@ test "classify and default qos" {
     try std.testing.expect(touchesPii("ext.twitch.chat.message"));
     try std.testing.expect(touchesPii("ext.twitch.#"));
     try std.testing.expect(!touchesPii("core.system.tick"));
+}
+
+test "OBS からの報告は予約。OBS への要求は予約しない" {
+    try std.testing.expect(touchesReserved("core.obs.problem"));
+    try std.testing.expect(touchesReserved("core.obs.latency"));
+    try std.testing.expect(touchesReserved("core.obs.link"));
+    try std.testing.expect(touchesReserved("core.obs.event.SceneItemEnableStateChanged"));
+    try std.testing.expect(touchesReserved("core.obs.#")); // 広いパターンも拒否
+    try std.testing.expect(!touchesReserved("core.obs.request.SetInputSettings"));
 }
