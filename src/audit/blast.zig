@@ -337,12 +337,17 @@ fn providedOnlyByFailed(nodes: []const Node, failed: *const std.StringHashMapUnm
 }
 
 /// 落ちたノードの集合から、入力が全て途絶えたノードを推移的に加える (沈黙の連鎖)
-fn propagateFailures(arena: std.mem.Allocator, nodes: []const Node, failed: *std.StringHashMapUnmanaged(void)) !void {
+/// starve_sinks: 実世界シンク (OBS への送信など) も「入力を全部失ったら止まる」とみなすか。
+///   監査 (起動前の見積もり) では true: 「このノードが落ちたら OBS への要求が全部止まる」を出したい。
+///   実行中の稼働状態では false: 送るものが無いだけで OBS への送信役自身は動いており、OBS からのイベントも届き続ける。
+///   ここで止まった扱いにすると「OBS への送信が止まっています」と、OBS 自体が壊れたように見えてしまう
+fn propagateFailures(arena: std.mem.Allocator, nodes: []const Node, failed: *std.StringHashMapUnmanaged(void), starve_sinks: bool) !void {
     var changed = true;
     while (changed) {
         changed = false;
         for (nodes) |n| {
             if (failed.contains(n.name)) continue;
+            if (n.is_sink and !starve_sinks) continue;
             var fed: usize = 0;
             var lost: usize = 0;
             for (n.sub_patterns) |sp| {
@@ -363,7 +368,7 @@ pub fn computeFailure(arena: std.mem.Allocator, nodes: []const Node, target_name
     var failed = std.StringHashMapUnmanaged(void){};
     try failed.put(arena, target_name, {});
     // 沈黙が連鎖しなくなるまで繰り返す
-    try propagateFailures(arena, nodes, &failed);
+    try propagateFailures(arena, nodes, &failed, true);
 
     var degraded = std.ArrayListUnmanaged(FailureReport.Affected){};
     var stalled = std.ArrayListUnmanaged([]const u8){};
@@ -434,11 +439,12 @@ pub const SetReport = struct {
 pub fn computeFailureSet(arena: std.mem.Allocator, nodes: []const Node, down: []const []const u8) !SetReport {
     var failed = std.StringHashMapUnmanaged(void){};
     for (down) |d| try failed.put(arena, d, {});
-    try propagateFailures(arena, nodes, &failed);
+    try propagateFailures(arena, nodes, &failed, false);
 
     var impacts = std.ArrayListUnmanaged(SetReport.Impact){};
     for (nodes) |n| {
         if (isIn(down, n.name)) continue; // 起点は「問題」として別に出す
+        if (n.is_sink) continue; // シンクが失った入力は、下の sink_effects (誰の表示が止まるか) で出す
         var lost = std.ArrayListUnmanaged([]const u8){};
         var because = std.ArrayListUnmanaged([]const u8){};
         for (n.sub_patterns) |sp| {
@@ -873,4 +879,29 @@ test "editDistance" {
     try std.testing.expectEqual(@as(?usize, 1), editDistance("ext.twich.chat", "ext.twitch.chat", 3));
     try std.testing.expectEqual(@as(?usize, 2), editDistance("abcd", "abdc", 3));
     try std.testing.expectEqual(@as(?usize, null), editDistance("ext.a", "core.system.tick", 3));
+}
+
+test "computeFailureSet: when the only plugin feeding OBS stops, OBS itself is not reported as stopped" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nodes = [_]Node{
+        try testNode(arena, "ObsEgress", &.{"core.obs.event.*"}, &.{"core.obs.request.*"}, true),
+        try testNode(arena, "score_tool", &.{"ext.score.update"}, &.{"ext.twitch.chat.message"}, false),
+        try testNode(arena, "scoreboard", &.{"core.obs.request.SetInputSettings"}, &.{"ext.score.update"}, false),
+        // OBS の状態を見ている別のプラグイン。OBS からのイベントは届き続けるので影響を受けない
+        try testNode(arena, "watcher", &.{"ext.watch.out"}, &.{"core.obs.event.SceneItemEnableStateChanged"}, false),
+        try testNode(arena, "TwitchAdapter", &.{"ext.twitch.chat.message"}, &.{}, false),
+    };
+    const r = try computeFailureSet(arena, &nodes, &.{"score_tool"});
+    try std.testing.expectEqual(@as(usize, 0), r.sinks_stopped.len);
+    for (r.impacts) |im| {
+        try std.testing.expect(!std.mem.eql(u8, im.node, "ObsEgress"));
+        try std.testing.expect(!std.mem.eql(u8, im.node, "watcher"));
+    }
+    try std.testing.expectEqual(@as(usize, 1), r.sink_effects.len);
+    try std.testing.expectEqualStrings("scoreboard", r.sink_effects[0].node);
+    // OBS への送信役そのものが落ちたときは、止まったシンクとして出す
+    const r2 = try computeFailureSet(arena, &nodes, &.{"ObsEgress"});
+    try std.testing.expectEqual(@as(usize, 1), r2.sinks_stopped.len);
 }
