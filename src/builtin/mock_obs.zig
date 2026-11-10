@@ -2,6 +2,7 @@ const std = @import("std");
 const event_bus = @import("../core/event_bus.zig");
 const log = @import("../common/log.zig");
 const DesiredState = @import("obs.zig").DesiredState;
+const LatencyStats = @import("obs.zig").LatencyStats;
 
 pub const MockObsEgressNode = struct {
     /// バスにつないだか (attach 済み)
@@ -15,6 +16,8 @@ pub const MockObsEgressNode = struct {
     mutex: std.Thread.Mutex,
     /// WEAVE が意図した OBS の状態 (スナップショットの対象, R7)
     desired: DesiredState,
+    /// 入力から「OBS に送る (ここではファイルに書く)」までの時間 (core.obs.latency)
+    latency: LatencyStats = .{},
     /// 接続時に出力ファイルを空にする。egress を別プロセスにしたとき (ADR-010) は、子プロセスが
     /// 再起動するたびに記録が消えないよう false にし、空にするのは Core の起動時 1 回だけにする
     truncate_on_connect: bool = true,
@@ -125,19 +128,25 @@ pub const MockObsEgressNode = struct {
         try line_list.append(self.allocator, '\n');
 
         // Atomically append to file using POSIX open with O_APPEND + fsync
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const sent_us = blk: {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        const flags = std.posix.O{
-            .ACCMODE = .WRONLY,
-            .APPEND = true,
-            .CREAT = true,
+            const flags = std.posix.O{
+                .ACCMODE = .WRONLY,
+                .APPEND = true,
+                .CREAT = true,
+            };
+            const fd = try std.posix.open(self.filepath, flags, 0o644);
+            defer std.posix.close(fd);
+
+            _ = try std.posix.write(fd, line_list.items);
+            // 書いた時点を「送った」とみなす (fsync の待ちは本物の OBS への送信には無いので含めない)
+            const t = std.time.microTimestamp();
+            try std.posix.fsync(fd);
+            break :blk t;
         };
-        const fd = try std.posix.open(self.filepath, flags, 0o644);
-        defer std.posix.close(fd);
-
-        _ = try std.posix.write(fd, line_list.items);
-        try std.posix.fsync(fd);
+        self.latency.onSentAt(self.bus, self.node_id, msg, sent_us);
 
         // 100ms delayed stub publish for SetSceneItemEnabled
         if (std.mem.endsWith(u8, msg.topic, "SetSceneItemEnabled")) {

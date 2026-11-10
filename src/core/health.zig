@@ -37,6 +37,10 @@ pub const HealthMonitor = struct {
     recent_len: usize = 0,
     /// OBS に断られている要求 (core.obs.problem)。同じ要求が通ったら消える
     obs_problems: std.ArrayListUnmanaged(ObsProblem) = .{},
+    /// 入力から OBS に送るまでの時間 (core.obs.latency)。0.1 ms 単位に丸めて持つ (細かい揺れで /status を更新しない)
+    latency: ?Latency = null,
+
+    const Latency = struct { p50_ms: f64 = 0, p99_ms: f64 = 0, max_ms: f64 = 0 };
 
     const ObsProblem = struct {
         node_id: u32,
@@ -143,7 +147,7 @@ pub const HealthMonitor = struct {
     pub fn start(self: *HealthMonitor) !void {
         const observe = self.bus.getCell("observe") orelse try self.bus.createCell("observe", .{ .trust = .core });
         const opts: event_bus.EventBus.SubscribeOptions = .{ .cell = observe, .record_graph = false };
-        for ([_][]const u8{ "core.system.tick", "core.node.down", "core.node.recovered", "core.node.registered", "core.system.graph.delta", "core.obs.problem" }) |t| {
+        for ([_][]const u8{ "core.system.tick", "core.node.down", "core.node.recovered", "core.node.registered", "core.system.graph.delta", "core.obs.problem", "core.obs.latency" }) |t| {
             try self.bus.subscribeEx(t, NODE_ID, onBusMessage, self, opts);
         }
         self.recompute();
@@ -154,7 +158,23 @@ pub const HealthMonitor = struct {
         if (self.stopped.load(.acquire)) return;
         if (std.mem.eql(u8, msg.topic, "core.node.recovered")) self.noteRecovered(msg.payload);
         if (std.mem.eql(u8, msg.topic, "core.obs.problem")) self.noteObsProblem(msg.payload);
+        if (std.mem.eql(u8, msg.topic, "core.obs.latency")) self.noteLatency(msg.payload);
         self.recompute();
+    }
+
+    pub fn noteLatency(self: *HealthMonitor, payload: []const u8) void {
+        const P = struct { p50_us: u32 = 0, p99_us: u32 = 0, max_us: u32 = 0 };
+        const parsed = std.json.parseFromSlice(P, self.allocator, payload, .{ .ignore_unknown_fields = true }) catch return;
+        defer parsed.deinit();
+        const q = struct {
+            fn ms(us: u32) f64 {
+                return @round(@as(f64, @floatFromInt(us)) / 100.0) / 10.0;
+            }
+        };
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        // 件数は持たない (件数が増えるたびに /status を更新しない。分位点が 0.1 ms 動いたときだけ変わる)
+        self.latency = .{ .p50_ms = q.ms(parsed.value.p50_us), .p99_ms = q.ms(parsed.value.p99_us), .max_ms = q.ms(parsed.value.max_us) };
     }
 
     pub fn noteObsProblem(self: *HealthMonitor, payload: []const u8) void {
@@ -344,7 +364,7 @@ pub const HealthMonitor = struct {
             const action = if (o.code != 600)
                 try std.fmt.allocPrint(arena, "OBS が断りました: {s}", .{o.comment})
             else if (o.suggestion) |sg|
-                try std.fmt.allocPrint(arena, "OBS に「{s}」という{s}がありません。もしかして「{s}」? OBS 側の名前を「{s}」に変えると動きます", .{ o.target, what, sg, o.target })
+                try std.fmt.allocPrint(arena, "OBS に「{s}」という{s}がありません。もしかして「{s}」? 指定した名前を「{s}」に直すか、OBS 側の名前を「{s}」に変えると動きます", .{ o.target, what, sg, sg, o.target })
             else
                 try std.fmt.allocPrint(arena, "OBS に「{s}」という{s}がありません。OBS で「{s}」という名前の{s}を作ってください", .{ o.target, what, o.target, what });
             obs[i] = .{ .plugin = plugin, .request = o.request, .target = o.target, .target_kind = o.target_kind, .code = o.code, .comment = o.comment, .suggestion = o.suggestion, .count = o.count, .ts = o.ts, .action = action };
@@ -361,6 +381,7 @@ pub const HealthMonitor = struct {
             .warnings = warns,
             .recent = recent,
             .obs_problems = obs,
+            .latency = self.latency,
         }, .{})});
     }
 

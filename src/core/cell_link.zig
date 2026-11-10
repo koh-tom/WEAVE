@@ -112,14 +112,19 @@ pub const CellLink = struct {
         const prefix = "core.obs.request.";
         if (!std.mem.startsWith(u8, msg.topic, prefix)) return;
         _ = self.desired.recordFrom(msg.topic[prefix.len..], msg.payload, msg.source_node_id) catch false;
-        self.sendToChild(msg.topic, msg.payload, msg.source_node_id);
+        self.sendToChildEx(msg.topic, msg.payload, msg.source_node_id, msg.origin_us, msg.hops);
     }
 
     /// s = 要求を出したノード (OBS に断られたとき、子がどのプラグインの要求かを返せるように)
     fn sendToChild(self: *CellLink, topic: []const u8, payload: []const u8, sender: u32) void {
+        self.sendToChildEx(topic, payload, sender, 0, 0);
+    }
+
+    /// o / h = 入力の起点時刻と因果の深さ (子の OBS への送信役が「入力から OBS まで」を測るため)
+    fn sendToChildEx(self: *CellLink, topic: []const u8, payload: []const u8, sender: u32, origin_us: i64, hops: u8) void {
         var out: std.ArrayListUnmanaged(u8) = .{};
         defer out.deinit(self.allocator);
-        out.writer(self.allocator).print("{f}", .{std.json.fmt(.{ .t = topic, .p = payload, .s = sender }, .{})}) catch return;
+        out.writer(self.allocator).print("{f}", .{std.json.fmt(.{ .t = topic, .p = payload, .s = sender, .o = origin_us, .h = hops }, .{})}) catch return;
         self.stream_mutex.lock();
         defer self.stream_mutex.unlock();
         const s = self.stream orelse return;
@@ -236,7 +241,7 @@ pub const CellLink = struct {
     }
 
     pub fn allowedFromChild(topic: []const u8) bool {
-        return std.mem.startsWith(u8, topic, "core.obs.event.") or std.mem.eql(u8, topic, "core.obs.link") or std.mem.eql(u8, topic, "core.obs.problem");
+        return std.mem.startsWith(u8, topic, "core.obs.event.") or std.mem.eql(u8, topic, "core.obs.link") or std.mem.eql(u8, topic, "core.obs.problem") or std.mem.eql(u8, topic, "core.obs.latency");
     }
 };
 

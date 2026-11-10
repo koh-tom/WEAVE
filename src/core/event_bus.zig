@@ -34,6 +34,9 @@ pub const EventMessage = struct {
     parent_id: u64 = 0,
     /// 因果の深さ。外部入力 = 0
     hops: u8 = 0,
+    /// 因果の連鎖の最初の入力がバスに入った時刻 (UNIX マイクロ秒)。反応して出たメッセージは親の値を引き継ぐ。
+    /// OBS への送信役が「入力から OBS に送るまで」を測るのに使う (core.obs.latency)
+    origin_us: i64 = 0,
 };
 
 /// 購読コールバック
@@ -485,6 +488,8 @@ pub const PublishOptions = struct {
     timestamp: ?i64 = null,
     parent_id: u64 = 0,
     hops: u8 = 0,
+    /// 0 なら発行した時刻を起点にする (外部入力)。反応して出す場合は親の origin_us を渡す
+    origin_us: i64 = 0,
 };
 
 pub const PublishError = error{ InvalidTopic, QueueFull, QueueShutdown, OutOfMemory, HopLimitExceeded };
@@ -862,6 +867,7 @@ pub const EventBus = struct {
             .payload = payload,
             .parent_id = opts.parent_id,
             .hops = opts.hops,
+            .origin_us = if (opts.origin_us != 0) opts.origin_us else std.time.microTimestamp(),
         };
 
         // 宛先の収集 (セルごとにまとめる)。1 プラグイン = 1 セルなのでセル数に上限は置かない。

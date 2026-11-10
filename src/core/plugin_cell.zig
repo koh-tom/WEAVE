@@ -53,6 +53,7 @@ pub const PluginCell = struct {
     // 処理中のメッセージ (子からの publish の parent / 深さ)
     inflight_id: u64 = 0,
     inflight_hops: u8 = 0,
+    inflight_origin_us: i64 = 0,
 
     // 子のプロセスごとの障害 (R2 を Core 側で / breaker)
     poison: std.AutoHashMapUnmanaged(u64, void) = .{},
@@ -216,6 +217,7 @@ pub const PluginCell = struct {
         try ws.writeFrame(conn.stream, .binary, self.meta.wasm_buffer, false);
         self.inflight_id = 0;
         self.inflight_hops = 0;
+        self.inflight_origin_us = 0;
         try self.pump("ready");
         const st_copy: ?[]u8 = blk: {
             self.state_mutex.lock();
@@ -250,7 +252,7 @@ pub const PluginCell = struct {
             }
             if (std.mem.eql(u8, op, "pub")) {
                 const hops: u8 = if (self.inflight_id != 0) self.inflight_hops +| 1 else 0;
-                const code = host_api.publishChecked(self.bus, self.allocator, self.meta, self.cell, m.value.t, m.value.p, m.value.qos, self.inflight_id, hops);
+                const code = host_api.publishChecked(self.bus, self.allocator, self.meta, self.cell, m.value.t, m.value.p, m.value.qos, self.inflight_id, hops, if (self.inflight_id != 0) self.inflight_origin_us else 0);
                 try self.send(.{ .op = "ret", .code = code });
             } else if (std.mem.eql(u8, op, "sub")) {
                 var code = host_api.subscribeAllowed(self.bus, self.meta, m.value.t);
@@ -349,6 +351,7 @@ pub const PluginCell = struct {
         }
         self.inflight_id = msg.id;
         self.inflight_hops = msg.hops;
+        self.inflight_origin_us = msg.origin_us;
         defer self.inflight_id = 0;
         const sent = self.send(.{ .op = "msg", .id = msg.id, .t = msg.topic, .p = msg.payload, .ts = msg.timestamp, .qos = @intFromEnum(msg.qos) });
         if (sent) |_| {

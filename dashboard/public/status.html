@@ -64,6 +64,10 @@
     <h2>設定の気になる点</h2>
     <ul id="warnings"></ul>
   </section>
+  <section id="sec-latency" hidden>
+    <h2>チャットから配信画面まで</h2>
+    <ul><li id="latency" class="item ok"></li></ul>
+  </section>
   <section id="sec-recent" hidden>
     <h2>最近の自動復帰</h2>
     <ul id="recent"></ul>
@@ -155,6 +159,11 @@
       li.appendChild(el('div', 'mono', w.topic + '  →  もしかして ' + w.suggestion + '(' + nm(w.from) + ' が出しています)'));
       return li;
     });
+
+    // 入力 (チャットなど) が WEAVE に届いてから、OBS に指示を送るまでの時間
+    const lat = h.latency;
+    $('sec-latency').hidden = !lat;
+    if (lat) $('latency').textContent = `ふだん ${lat.p50_ms} ms ・ 遅いときでも ${lat.p99_ms} ms (99%) ・ 最大 ${lat.max_ms} ms`;
 
     fill('sec-recent', 'recent', h.recent || [], (r) => {
       const li = el('li', 'item ok');

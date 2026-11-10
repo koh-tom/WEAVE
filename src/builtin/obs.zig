@@ -286,6 +286,86 @@ pub const ProblemTracker = struct {
         }
         return false;
     }
+
+    /// 要求が通ったときに呼ぶ。同じプラグインの同じ種類の要求で、断られていたものを全部「解消」として取り出す
+    /// (名前を直して別の名前で通った場合も、打ち間違えた名前の問題が残り続けないように)。
+    /// 取り出した対象名を buf に詰めて返す (最大 8 件)
+    pub fn resolveSameKind(self: *ProblemTracker, p: *const Pending, buf: *[8][128]u8, lens: *[8]usize) usize {
+        var pbuf: [128]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&pbuf, "{d}|{s}|", .{ p.sender, p.request() }) catch return 0;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var n: usize = 0;
+        var keys: [8][]const u8 = undefined;
+        var it = self.failing.keyIterator();
+        while (it.next()) |k| {
+            if (n == keys.len) break;
+            if (std.mem.startsWith(u8, k.*, prefix)) {
+                keys[n] = k.*;
+                n += 1;
+            }
+        }
+        for (keys[0..n], 0..) |k, i| {
+            const t = k[prefix.len..];
+            lens[i] = @min(t.len, buf[i].len);
+            @memcpy(buf[i][0..lens[i]], t[0..lens[i]]);
+            _ = self.failing.remove(k);
+            self.allocator.free(k);
+        }
+        return n;
+    }
+};
+
+/// 「入力がバスに入ってから OBS に送るまで」の時間の集計。直近 2048 件から分位点を出す。
+/// 入力から始まった連鎖 (hops > 0) の要求だけを数える (プラグインの起動時の初期表示などは除く)
+pub const LatencyStats = struct {
+    mutex: std.Thread.Mutex = .{},
+    ring: [2048]u32 = undefined,
+    len: usize = 0,
+    pos: usize = 0,
+    total: u64 = 0,
+    last_pub_ms: i64 = 0,
+
+    pub const Summary = struct { samples: u64 = 0, p50_us: u32 = 0, p95_us: u32 = 0, p99_us: u32 = 0, max_us: u32 = 0 };
+
+    pub fn record(self: *LatencyStats, us: i64) void {
+        const v: u32 = @intCast(std.math.clamp(us, 0, std.math.maxInt(u32)));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.ring[self.pos] = v;
+        self.pos = (self.pos + 1) % self.ring.len;
+        if (self.len < self.ring.len) self.len += 1;
+        self.total += 1;
+    }
+
+    pub fn summary(self: *LatencyStats) Summary {
+        var buf: [2048]u32 = undefined;
+        self.mutex.lock();
+        const n = self.len;
+        @memcpy(buf[0..n], self.ring[0..n]);
+        const total = self.total;
+        self.mutex.unlock();
+        if (n == 0) return .{};
+        std.mem.sort(u32, buf[0..n], {}, std.sort.asc(u32));
+        return .{ .samples = total, .p50_us = buf[(n - 1) * 50 / 100], .p95_us = buf[(n - 1) * 95 / 100], .p99_us = buf[(n - 1) * 99 / 100], .max_us = buf[n - 1] };
+    }
+
+    /// 入力から始まった要求を OBS に送ったところで呼ぶ。前回の報告から 500 ms 以上たっていれば core.obs.latency を出す
+    pub fn onSent(self: *LatencyStats, bus: *event_bus.EventBus, node_id: u32, msg: *const event_bus.EventMessage) void {
+        self.onSentAt(bus, node_id, msg, std.time.microTimestamp());
+    }
+
+    pub fn onSentAt(self: *LatencyStats, bus: *event_bus.EventBus, node_id: u32, msg: *const event_bus.EventMessage, sent_us: i64) void {
+        if (msg.hops == 0 or msg.origin_us == 0) return;
+        self.record(sent_us - msg.origin_us);
+        const now = std.time.milliTimestamp();
+        if (now - self.last_pub_ms < 500) return;
+        self.last_pub_ms = now;
+        var buf: [192]u8 = undefined;
+        var w = std.io.Writer.fixed(&buf);
+        w.print("{f}", .{std.json.fmt(self.summary(), .{})}) catch return;
+        bus.publish("core.obs.latency", w.buffered(), .Transient, node_id) catch {};
+    }
 };
 
 pub const ObsEgressNode = struct {
@@ -311,6 +391,7 @@ pub const ObsEgressNode = struct {
     outbox_max: usize = 64,
     next_request: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
     problems: ProblemTracker,
+    latency: LatencyStats = .{},
     connections: u64 = 0,
     reconnects: u64 = 0,
     reapplied_total: u64 = 0,
@@ -556,7 +637,15 @@ pub const ObsEgressNode = struct {
             return;
         };
         if (ok) {
-            if (self.problems.setFailing(&p, false)) self.publishProblem(&p, 100, "", true);
+            var tbuf: [8][128]u8 = undefined;
+            var tlens: [8]usize = undefined;
+            const n = self.problems.resolveSameKind(&p, &tbuf, &tlens);
+            for (0..n) |i| {
+                var q = p;
+                q.target_len = @min(tlens[i], q.target_buf.len);
+                @memcpy(q.target_buf[0..q.target_len], tbuf[i][0..q.target_len]);
+                self.publishProblem(&q, 100, "", true);
+            }
             return;
         }
         const code: i64 = if (status.object.get("code")) |c| (if (c == .integer) c.integer else 0) else 0;
@@ -653,6 +742,8 @@ pub const ObsEgressNode = struct {
         const prefix = "core.obs.request.";
         if (!std.mem.startsWith(u8, msg.topic, prefix)) return;
         self.handleRequestFrom(msg.topic[prefix.len..], msg.payload, msg.source_node_id);
+        // OBS に送れた (接続中) ものだけ数える。未接続の間に溜めたものは接続後にまとめて送るので除く
+        if (self.identified.load(.acquire)) self.latency.onSent(self.bus, self.node_id, msg);
     }
 };
 
@@ -702,9 +793,47 @@ test "ProblemTracker: who sent a refused request, and the closest name OBS actua
     try std.testing.expect(t.suggest(.input, "SubGoal", &buf) == null); // 名前は合っている
     try std.testing.expect(t.suggest(.input, "TotallyDifferent", &buf) == null);
 
+    // 名前を直して別の名前で通ったら、打ち間違えた名前の問題も解消する
+    var t2 = ProblemTracker.init(a);
+    defer t2.deinit();
+    t2.noteRequest(20, 105, "SetInputSettings", "{\"inputName\":\"timer\"}");
+    const bad = t2.take(20).?;
+    _ = t2.setFailing(&bad, true);
+    t2.noteRequest(21, 105, "SetInputSettings", "{\"inputName\":\"Timer\"}");
+    const good = t2.take(21).?;
+    var tb: [8][128]u8 = undefined;
+    var tl: [8]usize = undefined;
+    try std.testing.expectEqual(@as(usize, 1), t2.resolveSameKind(&good, &tb, &tl));
+    try std.testing.expectEqualStrings("timer", tb[0][0..tl[0]]);
+    try std.testing.expectEqual(@as(usize, 0), t2.resolveSameKind(&good, &tb, &tl));
+
     // 断られた → (同じものがまた断られても知らせる) → 通った (一度だけ解消を知らせる)
     try std.testing.expect(t.setFailing(&p, true));
     try std.testing.expect(t.setFailing(&p, true));
     try std.testing.expect(t.setFailing(&p, false));
     try std.testing.expect(!t.setFailing(&p, false));
+}
+
+test "LatencyStats: percentiles over the recent samples, and only input-driven requests count" {
+    var st = LatencyStats{};
+    var i: i64 = 1;
+    while (i <= 100) : (i += 1) st.record(i * 10); // 10, 20, ..., 1000 µs
+    const s = st.summary();
+    try std.testing.expectEqual(@as(u64, 100), s.samples);
+    try std.testing.expectEqual(@as(u32, 500), s.p50_us);
+    try std.testing.expectEqual(@as(u32, 950), s.p95_us);
+    try std.testing.expectEqual(@as(u32, 1000), s.max_us);
+
+    var bus = try event_bus.EventBus.init(std.testing.allocator, 16);
+    defer bus.deinit();
+    bus.verbose = false;
+    var st2 = LatencyStats{};
+    const init_msg = event_bus.EventMessage{ .id = 1, .topic = "core.obs.request.SetInputSettings", .timestamp = 0, .source_node_id = 100, .qos = .Reliable, .payload = "{}", .hops = 0, .origin_us = std.time.microTimestamp() };
+    st2.onSent(&bus, 2, &init_msg); // 起動時の初期表示 (入力が起点ではない) は数えない
+    try std.testing.expectEqual(@as(u64, 0), st2.summary().samples);
+    const chat_msg = event_bus.EventMessage{ .id = 2, .topic = "core.obs.request.SetInputSettings", .timestamp = 0, .source_node_id = 100, .qos = .Reliable, .payload = "{}", .hops = 1, .origin_us = std.time.microTimestamp() - 1500 };
+    st2.onSent(&bus, 2, &chat_msg);
+    const s2 = st2.summary();
+    try std.testing.expectEqual(@as(u64, 1), s2.samples);
+    try std.testing.expect(s2.p50_us >= 1500);
 }
