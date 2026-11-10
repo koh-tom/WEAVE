@@ -72,6 +72,31 @@ weave demo before_after        # または ./demo/run_before_after_demo.sh
 - obs-websocket のパスワードは OBS の設定ファイルから読む (表示・保存はしない)。OBS の既定コレクション/プロファイルは終了時に元に戻す。
 - Inspector の「OBS の実際の状態」は、本物の OBS からの `SceneItemEnableStateChanged` で埋まる (mock は自前でイベントを流す)。
 
+## 模擬配信: 本物の OBS にたくさんのツールをつないで 1 本流す (記録つき)
+
+```bash
+./demo/stream_sim/make_media.sh                 # ゲーム画面の代わりの動画と効果音 4 種を ffmpeg で作る (初回だけ)
+python3 demo/stream_sim/make_collection.py     # OBS のシーンコレクション/プロファイル "WEAVE-stream" (既存のものは触らない)
+python3 demo/stream_sim/run.py                 # 約 1 分半の番組を流して記録 (OBS は仮想モニターで動く。実画面は使わない)
+python3 demo/stream_sim/report.py demo/output/stream_sim/run-<日時>   # report.html と配信画面の一覧 sheet.png
+```
+
+番組「WEAVE 杯 決勝 ― 実況配信」に、本物の OBS Studio (録画しながら)・プラグイン 9 個
+(subgoal / shoutout / kusa_node / scoreboard / score_tool / countdown / **sfx** / loop_node / malicious_plugin)・
+StreamElements と Streamlabs のアラート (モック)・架空の視聴者 15 人のチャットをつなぎ、途中で事故を起こす:
+
+| いつ | 事故 | WEAVE がしたこと (記録に残るもの) |
+|---|---|---|
+| 配信前 | score_tool の入れ忘れ | /status に「起動していません」と直し方 → 足して起動し直す |
+| 中盤 | 荒らしの `!freeze` で loop_node が無限ループ | そのプラグインだけ 1 ms で作り直し。直後の草ラッシュのお祝いカードは出る |
+| 中盤 | タイマーのソース名を小文字の `timer` と打ち間違え | OBS が断る → /status に「もしかして『Timer』?」→ 直すと消える |
+| 終盤 | Core を kill -9 | Supervisor が数十 ms で戻す。スコア・サブ目標・タイマーはそのまま |
+| ずっと | malicious_plugin がチャットのたびに攻撃 | 全部拒否 (監査ログに件数) |
+
+記録 (`demo/output/stream_sim/run-<日時>/`): OBS が描いた配信画面 (obs-websocket の GetSourceScreenshot)、
+OBS アプリの画面、/status と Inspector の画面、時刻つきの出来事 (`timeline.jsonl`)、全イベント、監査ログ、
+入力から OBS に送るまでの遅延 (`core.obs.latency`)、OBS の統計 (落ちたフレーム・CPU)。OBS の録画は `demo/output/stream_sim/obs/`。
+
 ## どこが止まっていて、原因はどれか(稼働状態と観測専用画面)
 
 イベント運営で実際に起きた事故の再現です。スコア係のツールを起動し忘れたため、配信画面のスコア表示が 0-0 のまま固まりました。見た目は正常なので誰も気づかず、原因が分からないまま進行が約 30 分遅れました。
