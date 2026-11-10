@@ -25,6 +25,7 @@ def media(name, path, loop):
               "settings": {"local_file": path, "is_local_file": True, "looping": loop, "restart_on_activate": loop,
                            "close_when_inactive": False, "clear_on_media_end": True, "hw_decode": False}})
     s["monitoring_type"] = 0
+    s["mixers"] = 0xFF  # 全部の音声トラックに出す (0 だと「Unassigned」で録画に音が入らない)
     return s
 
 

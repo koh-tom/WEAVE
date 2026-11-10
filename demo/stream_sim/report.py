@@ -46,7 +46,7 @@ def us_ms(v):
 
 tiles = [
     ("チャット → OBS への指示", f"{us_ms(lat.get('p50_us'))} ms", f"p50 / p99 {us_ms(lat.get('p99_us'))} ms ({lat.get('samples', 0)} 件)"),
-    ("暴走したプラグインの復帰", f"{plugin_rec} ms", "無限ループ → 命令数上限で停止 → 予備に切替"),
+    ("暴走したプラグインの復帰", "1 ms 未満" if plugin_rec == 0 else f"{plugin_rec} ms", "無限ループ → 命令数上限で停止 → 予備に切替 (ログは ms 単位)"),
     ("Core を kill -9 → 復帰", f"{core_rec.get('ms', '?')} ms", f"うち Core の起動 {core_rec.get('core_ready_ms', '?')} ms (Supervisor)"),
     ("拒否した攻撃", f"{denied.get('acl_denied', 0)} 件", "悪意プラグインの core.system.shutdown 発行。通ったのは 0 件"),
     ("OBS への指示", f"{sum(obs_req.values())} 件", " / ".join(f"{k} {v}" for k, v in sorted(obs_req.items(), key=lambda x: -x[1]))),
