@@ -92,6 +92,9 @@ jobs:
       - name: E2E — OBS refusing a source name is shown with the plugin and "did you mean", and clears once fixed
         run: ./tests/e2e/obs_names.sh
 
+      - name: E2E — input-to-OBS latency is measured live (core.obs.latency) and shown on /status
+        run: ./tests/e2e/latency.sh
+
       - name: E2E — egress cell as a separate process survives kill -9 (ADR-010 stage 1)
         run: ./tests/e2e/egress_isolation.sh
 

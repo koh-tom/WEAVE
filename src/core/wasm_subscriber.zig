@@ -476,6 +476,7 @@ pub const WasmSubscriber = struct {
             @import("../api/host_api.zig").current_message_timestamp = msg.timestamp;
             @import("../api/host_api.zig").current_message_id = msg.id;
             @import("../api/host_api.zig").current_message_hops = msg.hops;
+            @import("../api/host_api.zig").current_message_origin_us = msg.origin_us;
             defer @import("../api/host_api.zig").current_message_id = 0;
             var msg_argv = [_]u32{ t_ptr, @intCast(msg.topic.len), p_ptr, @intCast(msg.payload.len) };
             if (!wamr.wasm_runtime_call_wasm(env, func, 4, &msg_argv)) {

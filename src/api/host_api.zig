@@ -74,12 +74,12 @@ export fn os_api_publish(
     const parent = current_message_id;
     const hops: u8 = if (parent != 0) current_message_hops +| 1 else 0;
     const cell: ?*event_bus.Cell = if (meta.subscriber) |*sub| sub.cell else null;
-    return publishChecked(bus, pm.allocator, meta, cell, topic, payload, qos, parent, hops);
+    return publishChecked(bus, pm.allocator, meta, cell, topic, payload, qos, parent, hops, if (parent != 0) current_message_origin_us else 0);
 }
 
 /// publish の検査 (ACL → 流量 → トピック数 → セル予算 → 保持の制限 → 因果の深さ) を通して発行する。
 /// Wasm の Host API と、別プロセスのセルからの問い合わせ (ADR-010) の両方が使う唯一の強制点。
-pub fn publishChecked(bus: *event_bus.EventBus, allocator: std.mem.Allocator, meta: *plugin_manager.PluginMetadata, cell: ?*event_bus.Cell, topic: []const u8, payload: []const u8, qos: u32, parent: u64, hops: u8) i32 {
+pub fn publishChecked(bus: *event_bus.EventBus, allocator: std.mem.Allocator, meta: *plugin_manager.PluginMetadata, cell: ?*event_bus.Cell, topic: []const u8, payload: []const u8, qos: u32, parent: u64, hops: u8, origin_us: i64) i32 {
     if (topic.len > MAX_TOPIC_BYTES or payload.len > MAX_PAYLOAD_BYTES) return toI32(.ERROR_INVALID_PARAMETER);
     // 権限チェック (ACL)
     if (!meta.manifest_parsed.value.canPublish(topic)) {
@@ -152,7 +152,7 @@ pub fn publishChecked(bus: *event_bus.EventBus, allocator: std.mem.Allocator, me
     if (qos_val == .Transient and topics.classify(topic) != .state) qos_val = .BestEffort;
 
     // 深さが上限を超えた連鎖はハウリング (ツール同士の無限反響) とみなしてバスが止める。
-    bus.publishEx(topic, payload, .{ .qos = qos_val, .source = meta.node_id, .parent_id = parent, .hops = hops }) catch |err| {
+    bus.publishEx(topic, payload, .{ .qos = qos_val, .source = meta.node_id, .parent_id = parent, .hops = hops, .origin_us = origin_us }) catch |err| {
         if (err == error.QueueFull) return toI32(.ERROR_QUEUE_FULL);
         if (err == error.InvalidTopic) return toI32(.ERROR_INVALID_TOPIC);
         if (err == error.HopLimitExceeded) {
@@ -311,6 +311,8 @@ pub threadlocal var current_message_timestamp: i64 = 0;
 /// 処理中のメッセージ (on_message 中だけ非 0)。ここから publish されたものの parent になる
 pub threadlocal var current_message_id: u64 = 0;
 pub threadlocal var current_message_hops: u8 = 0;
+/// 処理中のメッセージの起点時刻 (EventMessage.origin_us)。ここから publish されたものに引き継ぐ
+pub threadlocal var current_message_origin_us: i64 = 0;
 
 export fn os_api_current_timestamp(
     exec_env: wamr.wasm_exec_env_t,

@@ -189,6 +189,7 @@ pub fn describePublish(p: []const u8) Description {
         if (eql(r, "SetSceneItemEnabled")) return .{ .text = "配信画面の表示 (ソースの表示 / 非表示) を変える", .weight = .sensitive };
         if (eql(r, "SetInputSettings")) return .{ .text = "配信画面の文字などの中身を変える", .weight = .sensitive };
         if (eql(r, "SetInputMute")) return .{ .text = "音声をミュート / 解除する", .weight = .sensitive };
+        if (eql(r, "TriggerMediaInputAction")) return .{ .text = "効果音や動画 (メディアソース) を再生する / 止める", .weight = .sensitive };
         return .{ .text = "OBS を操作する", .weight = .sensitive };
     }
     if (startsWith(p, "core.")) return .{ .text = "WEAVE 内部のイベントを出す (予約名のため実際には拒否される)", .weight = .strong };
