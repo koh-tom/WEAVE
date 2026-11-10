@@ -1,0 +1,12 @@
+{
+    "abi_version": 1,
+    "name": "sfx",
+    "version": "1.0.0",
+    "description": "chat commands (!clap / !drum / !yay / 888) and alerts (follow / sub / tip) play OBS media sources SE_*",
+    "permissions": {
+        "publish": ["core.obs.request.TriggerMediaInputAction"],
+        "subscribe": ["ext.twitch.chat.message", "ext.streamelements.activity.#", "ext.streamlabs.event.#"],
+        "data_access": ["pii"]
+    },
+    "rate_limit_eps": 20
+}

@@ -53,3 +53,6 @@ demo/output/*.webm
 
 # 本物の OBS 版デモの実行物 (OBS の録画・ログ・状態)
 demo/output/obs/
+# 模擬配信の出力 (OBS の録画・スクショ・記録・生成した素材)。demo/stream_sim/run.py が作る
+demo/output/stream_sim/
+__pycache__/
