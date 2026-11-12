@@ -35,7 +35,38 @@ zig build                                   # Core・CLI・Wasm プラグイン�
 右に「WEAVE 内部 (セル・拒否したもの・障害と復帰)」が表示されます。サイドバーの「草ラッシュ」で
 kusa_node が OBS のオーバーレイを表示し、5 秒後に自動で消します。
 
-### 配信者として使うとき
+### 配信者として、いまの環境のまま始める
+
+```bash
+./weave setup                           # OBS の WebSocket 設定を読んで、つながるか確かめる (weave.json に書く)
+./weave up                              # 起動。OBS に自動でつながり、落ちてもすぐ戻る
+./weave wrap add streamerbot            # いま使っている OBS 連携ツールを WEAVE の下に置く (下を参照)
+```
+
+**既存ツールはそのまま使えます。** OBS を操作するツール (Streamer.bot の OBS 連携、Touch Portal、自作スクリプトなど) は、
+OBS の接続先を `127.0.0.1:4455` から **WEAVE の `127.0.0.1:4456`** に変え、`weave wrap add` が表示したパスワードを入れるだけで
+WEAVE の下に入ります (ツールの中身は変えません)。WEAVE は OBS のふりをして間に入り、要求を 1 つずつ確かめてから本物の OBS に渡します。
+
+- 最初は **学習モード**: 普段どおり使うと、実際に使った操作と対象 (例: 「OverlayText の文字を変える」) を記録する。
+  `weave wrap lock <name>` で「その操作だけを許す」宣言にする。配信・録画の停止は学習モードでも通さない
+- 宣言にない対象・操作 (乗っ取られて番組名を書き換える、配信を止める) は OBS に届かない
+- 1 秒あたりの操作数に上限を持ち、暴走したら **そのツールだけ** を一定時間止め、壊された表示を暴走の前に戻す
+- ツールは Inspector と /status に「wrapped」として載り、止めた理由もそこに出る
+
+本物の OBS で前後を比べるデモ: `python3 demo/wrap/run.py` (既存ツール役の `demo/wrap/hype_bot.py` を、直接つないだときと WEAVE 経由のときで動かす)
+
+### プラグインを書く (開発者)
+
+```bash
+./weave init my_bot                     # wasm-apps/my_bot.zig と manifest (my_bot.json) ができる
+./weave dev my_bot                      # ビルドして起動。保存するたびに作り直して起動し直す
+                                        # (weave setup 済みなら本物の OBS、まだなら OBS なしで送った操作をファイルに記録)
+```
+
+Inspector の「テスト用チャット」から試せます。書くのは「何を受け取り、何を出すか」の宣言とロジックだけで、
+OBS やチャットの API を個別に調べる必要はありません。
+
+### プラグインを入れる
 
 ```bash
 ./weave add wasm-apps/subgoal.wasm      # 入れるプラグインを、権限を見て承認 (一度だけ)
@@ -171,6 +202,7 @@ cp .weave/devkey.pub .weave/trusted_keys
 |---|---|---|
 | **Zig SDK** (`wasm-apps/plugin_sdk.zig`) | 新しく書く | `./weave init my_bot` → `zig build` で自動的にビルド対象になる |
 | **C / OBS 互換 shim** (`wasm-apps/obs_compat/obs_shim.h`) | 既存の OBS プラグインの C ソースを載せ替える | `scene_switcher.c` を `zig build` が wasm32 にビルド |
+| **ラッパー** (ObsGate, `:4456`) | OBS を直接操作する既存ツールを、そのまま WEAVE の下に置く | 接続先を 4456 に変えるだけ。`weave wrap add` / `lock` で対象つきの宣言 (`SetInputSettings:OverlayText`) |
 | **ブリッジ** (`weave-bridge`) | 改変できない常駐ツールを繋ぐ | Streamer.bot のイベントを WEAVE へ、WEAVE から Streamer.bot のアクションを実行 |
 | **ネイティブアダプタ** (Core 内) | クラウドサービスの実プロトコル | OBS WebSocket v5、Twitch IRC、StreamElements Astro (`ext.streamelements.activity.<type>`)、Streamlabs Socket API (`ext.streamlabs.event.<type>`) |
 | **リモートノード** (WebSocket, `ws://127.0.0.1:8081/`) | 任意の言語のプロセス | `{"type":"hello","manifest":{...}}` で参加 |
@@ -195,11 +227,15 @@ Host API v1 (Wasm から呼べる関数): `os_api_publish` / `os_api_subscribe` 
 | `weave doctor` | 環境の自己診断 |
 | `weave add <plugin.wasm> [--yes]` | 権限を確かめて承認 (承認したものはプラグイン指定なしの `weave run` で起動) |
 | `weave list` / `weave remove <name>` | 承認したプラグインと今の状態 / 承認の取り消し |
+| `weave setup` | OBS の WebSocket 設定を読み、つながるか確かめて `weave.json` に書く |
+| `weave wrap add <name> [--allow A,B:target] [--rate N]` | 既存ツールを ObsGate (`:4456`) の下に置く。`--allow` なしなら学習モード |
+| `weave wrap list` / `show <name>` / `lock <name>` / `remove <name>` | ラップしたツールの一覧 / 接続先とパスワード / 学習した操作を宣言にする / やめる |
 | `weave init <name>` | プラグインのひな形 |
+| `weave dev <name>` | ビルドして起動し、保存するたびに作り直す |
 | `weave-bridge [--streamerbot ws://...] [--weave ws://...]` | Streamer.bot ブリッジ (`mock-streamerbot` / `mock-astro` / `mock-streamlabs` でモック) |
 
 主な起動オプション: `--mock-obs` / `--real-obs --obs-port --obs-pass` / `--mock-twitch <scenario> [--mock-twitch-once]` /
-`--no-twitch` / `--bind` / `--dash-port` / `--node-port` / `--introspection off|metadata|contents` /
+`--no-twitch` / `--gate-port` / `--wrap-dir` / `--no-gate` / `--bind` / `--dash-port` / `--node-port` / `--introspection off|metadata|contents` /
 `--signature-mode off|warn|strict` / `--approval-mode off|warn|strict` / `--audit-log` / `--state-dir` / `--no-snapshot` /
 `--streamelements-channel <id>` (JWT は環境変数 `STREAMELEMENTS_JWT` のみ) / `--streamlabs` (トークンは環境変数 `STREAMLABS_SOCKET_TOKEN` のみ)。`./zig-out/bin/WEAVE --help` で全て表示。
 
