@@ -18,6 +18,7 @@
 | `countdown.sh` | OBS 同梱の Countdown スクリプトの振る舞いを再実装した `countdown` プラグインで、開始 → 毎秒のテキスト更新 → 終了メッセージが OBS (mock) に届く (C3) |
 | `approval.sh` | `--approval-mode strict`: 未承認のプラグインは読み込まず稼働状態に「承認待ち」と出す。`weave add` で権限を人の言葉で見て承認すると動く。更新で権限 (StopStream) が増えたら止め、増えた分だけに ★ を付けて再承認を求める。権限が増えていないコードの更新は通す (トラストアンカー Stage 0)。`weave list` で今の状態が見え、プラグインを指定しない `weave run` で承認済みが起動し、`weave remove` で止まる |
 | `latency.sh` | 草ラッシュで出たお祝いカードの要求について、チャットがバスに入ってから OBS に送るまでの時間を測っている。`core.obs.latency` に件数と分位点が出て、/status のまとめにも載る |
+| `obs_gate.sh` | 既存ツールを ObsGate (4456) 経由にする。パスワードが違うツールはつながれない・宣言した対象だけ OBS に届き、宣言にない対象 (番組名) と操作 (StopStream) は 205 で断る・送りすぎたツールだけを止めて (207) 監査し、時間が過ぎたら戻す |
 | `obs_names.sh` | OBS (シミュレータ) に無い名前へ書くと、`/status` に「scoreboard の操作が OBS に断られている。もしかして『Score Board』?」と出る。OBS の名前を直して起動し直すと送り直されて消える。送信役が別プロセスでも送り主が分かる |
 | `egress_isolation.sh` | `--isolate-egress` で OBS への送信役を別プロセス (weave-cell) にし、表示中に kill -9 しても Core は止まらず ~90 ms で子が戻り、意図した表示が送り直され、その後の要求も届く。終了時は子も片付く (ADR-010 段階 1) |
 | `plugin_isolation.sh` | `--isolate-plugins` で Wasm プラグインを 1 つずつ別プロセスに。同じ出力、子の publish も Core が検査 (malicious の core.system.shutdown を拒否)、待機中の kill -9 から状態ごと復帰、処理中に落ちたメッセージは Core で隔離 (ADR-010 段階 2) |

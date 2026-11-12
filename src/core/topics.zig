@@ -49,6 +49,8 @@ pub const reserved = [_][]const u8{
     "core.obs.link",
     "core.obs.problem",
     "core.obs.latency",
+    // ラップした既存ツールの状態 (ObsGate)。偽造されると「止めた」「戻した」を偽れる
+    "core.wrap.#",
 };
 
 /// 個人情報を含みうるパターン (購読には `data_access: ["pii"]` の宣言が要る)。

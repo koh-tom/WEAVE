@@ -492,6 +492,9 @@ pub const ObsEgressNode = struct {
         const host = self.host orelse return;
         const address = try std.net.Address.resolveIp(host, self.port);
         const stream = try std.net.tcpConnectToAddress(address);
+        // フレームのヘッダと本体を別々に書くので、Nagle で送信が数十 ms 遅れないようにする
+        const one: c_int = 1;
+        std.posix.setsockopt(stream.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
         self.mutex.lock();
         self.stream = stream;
         self.mutex.unlock();

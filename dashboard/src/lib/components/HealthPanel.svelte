@@ -6,7 +6,7 @@
     missing: '起動していません',
     approval_required: '承認待ちのため止めています',
     restarting: '自動で作り直しています',
-    quarantined: '何度も落ちたため一時停止中',
+    quarantined: '一時的に止めています',
     stopped: '停止しています',
     degraded: '一部が動いていません',
     disconnected: '接続が切れています',
