@@ -55,4 +55,8 @@ demo/output/*.webm
 demo/output/obs/
 # 模擬配信の出力 (OBS の録画・スクショ・記録・生成した素材)。demo/stream_sim/run.py が作る
 demo/output/stream_sim/
+# 既存ツールのラップの前後比較 (demo/wrap/run.py)
+demo/output/wrap_demo/
+# weave setup が書く設定 (OBS のパスワードを含む)
+weave.json
 __pycache__/

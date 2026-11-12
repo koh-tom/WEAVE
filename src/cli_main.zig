@@ -23,12 +23,18 @@ const Manifest = @import("core/manifest.zig").Manifest;
 const approval = @import("security/approval.zig");
 const signing = @import("security/signing.zig");
 const blast = @import("audit/blast.zig");
+const quick = @import("cli_quick.zig");
 
 const Conn = struct { host: []const u8, port: u16, path: []const u8, token: ?[]const u8 };
 
 fn usage() void {
     std.debug.print(
         \\weave — WEAVE CLI
+        \\
+        \\  はじめに:
+        \\  weave setup                             OBS の設定を読んでつながるか確かめる (配信者向け・最初に 1 回)
+        \\  weave wrap add <name>                   いま使っている OBS 連携ツールを WEAVE の下に置く (接続先を変えるだけ)
+        \\  weave dev <name>                        プラグインをビルドして起動し、保存するたびに作り直す (開発者向け)
         \\
         \\  weave run [options] [plugin.wasm ...]   Core を起動
         \\  weave up  [options] [plugin.wasm ...]   Supervisor 付きで起動 (落ちても即再起動)
@@ -687,6 +693,9 @@ fn realMain() !void {
     if (std.mem.eql(u8, cmd, "key")) return execSibling(allocator, "weave-key", rest, null);
     if (std.mem.eql(u8, cmd, "obs-sim")) return execSibling(allocator, "weave-obs-sim", rest, null);
     if (std.mem.eql(u8, cmd, "doctor")) return cmdDoctor(allocator);
+    if (std.mem.eql(u8, cmd, "setup")) return quick.cmdSetup(allocator, rest);
+    if (std.mem.eql(u8, cmd, "wrap")) return quick.cmdWrap(allocator, rest);
+    if (std.mem.eql(u8, cmd, "dev")) return quick.cmdDev(allocator, rest);
     if (std.mem.eql(u8, cmd, "init")) return cmdInit(allocator, rest);
     if (std.mem.eql(u8, cmd, "add")) return cmdAdd(allocator, rest);
     if (std.mem.eql(u8, cmd, "list")) return cmdList(allocator, rest);
