@@ -5,6 +5,7 @@
 #     item 1 = お祝いカード (kusa_node)   item 2 = シャウトアウトカード (shoutout)
 #     ゲーム画面 (ライフゲームの動画をループ) / ● LIVE / 番組名 / SubGoal / Scoreboard / Timer
 #     SE_clap / SE_drum / SE_yay / SE_fanfare … 効果音 (sfx プラグインが頭から再生し直す)
+#     item 20 / 21 = BEFORE / AFTER の札 (demo/wrap の前後比較用)
 #   既存のコレクション・プロファイルには触らない。録画先は demo/output/stream_sim/obs/
 import copy, importlib.util, json, os, re, sys
 
@@ -52,12 +53,18 @@ def make_collection():
              roc.item(7, subgoal, 1880, 30, align=6), roc.item(8, score, 960, 80), roc.item(9, timer, 960, 540),
              roc.item(1, card1, 0, 0, align=5, visible=False), roc.item(2, card2, 0, 0, align=5, visible=False)]
     items += [roc.item(10 + i, s, 0, 0, align=5) for i, s in enumerate(ses)]
+    # デモの前後比較の札 (demo/wrap/run.py が出し入れする。プラグインは触らない)
+    bb, bt = roc.color("BeforeBg", "c62828", 600, 80), roc.text("BeforeText", "BEFORE：WEAVE なし", 44)
+    ab, at = roc.color("AfterBg", "1f5fbf", 600, 80), roc.text("AfterText", "AFTER：WEAVE あり", 44)
+    tag_b = roc.scene("TagBefore", [roc.item(1, bb, 1580, 180), roc.item(2, bt, 1580, 180)])
+    tag_a = roc.scene("TagAfter", [roc.item(1, ab, 1580, 180), roc.item(2, at, 1580, 180)])
+    items += [roc.item(20, tag_b, 0, 0, align=5, visible=False), roc.item(21, tag_a, 0, 0, align=5, visible=False)]
     overlay = roc.scene("Overlay", items)
     out = copy.deepcopy(roc.scaffold())
     out["name"] = NAME
     out["current_scene"] = out["current_program_scene"] = "Overlay"
-    out["scene_order"] = [{"name": "Overlay"}, {"name": "Card1"}, {"name": "Card2"}]
-    out["sources"] = [game, live_bg, live, title, subgoal, score, timer, otext, stext, c1bg, c2bg, *ses, card1, card2, overlay]
+    out["scene_order"] = [{"name": "Overlay"}, {"name": "Card1"}, {"name": "Card2"}, {"name": "TagBefore"}, {"name": "TagAfter"}]
+    out["sources"] = [game, live_bg, live, title, subgoal, score, timer, otext, stext, c1bg, c2bg, *ses, bb, bt, ab, at, card1, card2, tag_b, tag_a, overlay]
     out["groups"] = []
     out["saved_projectors"] = []
     os.makedirs(f"{BASE}/scenes", exist_ok=True)

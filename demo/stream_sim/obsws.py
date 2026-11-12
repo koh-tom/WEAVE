@@ -12,9 +12,13 @@ CFG = os.path.expanduser("~/.config/obs-studio/plugin_config/obs-websocket/confi
 
 
 class OBS:
-    def __init__(self, host="127.0.0.1"):
-        cfg = json.load(open(CFG))
-        self.port, self.pw = cfg.get("server_port", 4455), cfg.get("server_password", "")
+    def __init__(self, host="127.0.0.1", port=None, password=None):
+        """port / password を省くと OBS の設定ファイルの値 (本物の OBS)。WEAVE のラッパー (4456) につなぐときは両方渡す"""
+        if port is None:
+            cfg = json.load(open(CFG))
+            self.port, self.pw = cfg.get("server_port", 4455), cfg.get("server_password", "")
+        else:
+            self.port, self.pw = port, password or ""
         self.s = socket.create_connection((host, self.port), timeout=10)
         key = base64.b64encode(os.urandom(16)).decode()
         self.s.sendall(f"GET / HTTP/1.1\r\nHost: {host}:{self.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
