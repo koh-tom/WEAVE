@@ -32,6 +32,10 @@ pub const Config = struct {
     wasm_heap_size: u32 = 64 * 1024,
     mock_obs_filepath: []const u8 = "mock_obs_received.jsonl",
     mock_obs: bool = false,
+    /// 既存ツールのラッパー (ObsGate) の待ち受けポート。.weave/wrap/*.json があるときだけ開く
+    gate_port: u16 = 4456,
+    wrap_dir: []const u8 = ".weave/wrap",
+    no_gate: bool = false,
     /// OBS への送信セル (egress) を別の OS プロセス (weave-cell) で動かす (ADR-010 Level 2 段階 1)
     isolate_egress: bool = false,
     /// Wasm プラグインを 1 つずつ別の OS プロセス (weave-cell plugin) で動かす (ADR-010 段階 2)
@@ -114,6 +118,7 @@ pub const Config = struct {
         self.introspection = try allocator.dupe(u8, self.introspection);
         self.dashboard_dist = try allocator.dupe(u8, self.dashboard_dist);
         self.state_dir = try allocator.dupe(u8, self.state_dir);
+        self.wrap_dir = try allocator.dupe(u8, self.wrap_dir);
 
         // 1. 設定ファイルの読み込み (weave.json) - 任意
         if (std.fs.cwd().openFile("weave.json", .{})) |file| {
@@ -157,6 +162,11 @@ pub const Config = struct {
                     self.mock_obs_filepath = try allocator.dupe(u8, v.string);
                 }
                 if (obj.get("mock_obs")) |v| self.mock_obs = v.bool;
+                if (obj.get("gate_port")) |v| self.gate_port = @intCast(v.integer);
+                if (obj.get("wrap_dir")) |v| {
+                    allocator.free(self.wrap_dir);
+                    self.wrap_dir = try allocator.dupe(u8, v.string);
+                }
                 if (obj.get("log_level")) |v| self.log_level = LogLevel.fromString(v.string);
                 if (obj.get("graph_full_interval_secs")) |v| self.graph_full_interval_secs = @intCast(v.integer);
                 if (obj.get("node_ws_token")) |v| self.node_ws_token = try allocator.dupe(u8, v.string);
@@ -437,6 +447,19 @@ pub const Config = struct {
                 if (i >= args.len) return error.ArgumentMissing;
                 allocator.free(self.mock_obs_filepath);
                 self.mock_obs_filepath = try allocator.dupe(u8, args[i]);
+            } else if (std.mem.eql(u8, arg, "--gate-port")) {
+                if (i + 1 < args.len) {
+                    i += 1;
+                    self.gate_port = try std.fmt.parseInt(u16, args[i], 10);
+                }
+            } else if (std.mem.eql(u8, arg, "--wrap-dir")) {
+                if (i + 1 < args.len) {
+                    i += 1;
+                    allocator.free(self.wrap_dir);
+                    self.wrap_dir = try allocator.dupe(u8, args[i]);
+                }
+            } else if (std.mem.eql(u8, arg, "--no-gate")) {
+                self.no_gate = true;
             } else if (std.mem.eql(u8, arg, "--mock-obs")) {
                 self.mock_obs = true;
             } else if (std.mem.eql(u8, arg, "--real-obs")) {
@@ -560,6 +583,7 @@ pub const Config = struct {
         allocator.free(self.introspection);
         allocator.free(self.dashboard_dist);
         allocator.free(self.state_dir);
+        allocator.free(self.wrap_dir);
         if (self.dashboard_token) |t| allocator.free(t);
         if (self.observer_token) |t| allocator.free(t);
         for (self.expect.items) |e| allocator.free(e);
@@ -602,6 +626,9 @@ fn printHelp() void {
         \\  --mock-obs-file <path> Path to mock OBS jsonl output (default: mock_obs_received.jsonl)
         \\  --mock-obs            Use mock OBS node instead of real WebSocket client
         \\  --real-obs            Use real OBS WebSocket client (default)
+        \\  --gate-port <port>    Port for wrapped existing tools (ObsGate, default 4456; opens only if .weave/wrap/*.json exist)
+        \\  --wrap-dir <dir>      Wrapped tool specs (default .weave/wrap)
+        \\  --no-gate             Do not open the ObsGate
         \\  --graph-interval <s> Full topology publish interval in seconds (default: 60)
         \\  --signature-mode <m> Plugin signature enforcement: off|warn|strict (default: off)
         \\  --trust-keys <path>  Trusted public keys file (default: .weave/trusted_keys)

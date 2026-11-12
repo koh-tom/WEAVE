@@ -18,6 +18,7 @@ const streamlabs = @import("builtin/streamlabs.zig");
 
 const Config = @import("common/config.zig").Config;
 const Snapshot = @import("core/snapshot.zig").Snapshot;
+const ObsGate = @import("builtin/obs_gate.zig").ObsGate;
 
 fn runTwitch(t: *TwitchAdapter) void {
     t.run() catch |err| {
@@ -536,6 +537,28 @@ pub fn main() !void {
         if (snapshot) |*sn| sn.start() catch |err| log.warn("Snapshot: failed to start: {any}", .{err});
     }
 
+    // 既存ツールのラッパー (ObsGate)。.weave/wrap/*.json があるときだけ OBS のふりをして待ち受ける
+    var maybe_gate: ?*ObsGate = null;
+    if (!config.no_gate) {
+        maybe_gate = ObsGate.init(allocator, &core.bus, .{
+            .bind = config.bind,
+            .port = config.gate_port,
+            .upstream_host = config.obs_host,
+            .upstream_port = config.obs_port,
+            .upstream_password = config.obs_password,
+            .wrap_dir = config.wrap_dir,
+        }) catch |err| blk: {
+            log.warn("ObsGate: cannot load {s}: {any}", .{ config.wrap_dir, err });
+            break :blk null;
+        };
+        if (maybe_gate) |g| g.start() catch |err| {
+            log.err("ObsGate: cannot listen on port {d}: {any}. Choose another with --gate-port", .{ config.gate_port, err });
+            g.deinit();
+            maybe_gate = null;
+        };
+    }
+    defer if (maybe_gate) |g| g.deinit();
+
     // 稼働状態の監視 (core.health.summary)。本来いるはずのノード = 起動時に指定したプラグイン + --expect
     const health = try HealthMonitor.create(allocator, &core.bus, &core.graph);
     {
@@ -586,6 +609,7 @@ pub fn main() !void {
     if (maybe_twitch) |*t| t.stop();
     if (maybe_se) |se| se.stop();
     if (maybe_sl) |sl| sl.stop();
+    if (maybe_gate) |g| g.stop();
     node_ws.stop();
     core.bus.stop();
 
@@ -629,6 +653,7 @@ test {
     _ = @import("builtin/dashboard.zig");
     _ = @import("core/health.zig");
     _ = @import("builtin/obs.zig");
+    _ = @import("builtin/obs_gate.zig");
     _ = @import("builtin/streamelements.zig");
     _ = @import("builtin/streamlabs.zig");
     _ = @import("core/snapshot.zig");

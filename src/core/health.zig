@@ -39,6 +39,8 @@ pub const HealthMonitor = struct {
     obs_problems: std.ArrayListUnmanaged(ObsProblem) = .{},
     /// 入力から OBS に送るまでの時間 (core.obs.latency)。0.1 ms 単位に丸めて持つ (細かい揺れで /status を更新しない)
     latency: ?Latency = null,
+    /// ラップした既存ツール (ObsGate) を止めている理由。名前 → 理由 (core.wrap.status)
+    wrap_reasons: std.StringHashMapUnmanaged([]u8) = .{},
 
     const Latency = struct { p50_ms: f64 = 0, p99_ms: f64 = 0, max_ms: f64 = 0 };
 
@@ -102,6 +104,12 @@ pub const HealthMonitor = struct {
         self.last_body.deinit(self.allocator);
         for (self.obs_problems.items) |*o| o.free(self.allocator);
         self.obs_problems.deinit(self.allocator);
+        var wit = self.wrap_reasons.iterator();
+        while (wit.next()) |e| {
+            self.allocator.free(e.key_ptr.*);
+            self.allocator.free(e.value_ptr.*);
+        }
+        self.wrap_reasons.deinit(self.allocator);
         self.mutex.unlock();
         self.decl_arena.deinit();
         self.allocator.destroy(self);
@@ -147,7 +155,7 @@ pub const HealthMonitor = struct {
     pub fn start(self: *HealthMonitor) !void {
         const observe = self.bus.getCell("observe") orelse try self.bus.createCell("observe", .{ .trust = .core });
         const opts: event_bus.EventBus.SubscribeOptions = .{ .cell = observe, .record_graph = false };
-        for ([_][]const u8{ "core.system.tick", "core.node.down", "core.node.recovered", "core.node.registered", "core.system.graph.delta", "core.obs.problem", "core.obs.latency" }) |t| {
+        for ([_][]const u8{ "core.system.tick", "core.node.down", "core.node.recovered", "core.node.registered", "core.system.graph.delta", "core.obs.problem", "core.obs.latency", "core.wrap.status" }) |t| {
             try self.bus.subscribeEx(t, NODE_ID, onBusMessage, self, opts);
         }
         self.recompute();
@@ -159,7 +167,33 @@ pub const HealthMonitor = struct {
         if (std.mem.eql(u8, msg.topic, "core.node.recovered")) self.noteRecovered(msg.payload);
         if (std.mem.eql(u8, msg.topic, "core.obs.problem")) self.noteObsProblem(msg.payload);
         if (std.mem.eql(u8, msg.topic, "core.obs.latency")) self.noteLatency(msg.payload);
+        if (std.mem.eql(u8, msg.topic, "core.wrap.status")) self.noteWrap(msg.payload);
         self.recompute();
+    }
+
+    /// ラップした既存ツールを止めた / 戻した (ObsGate)。止めている間は理由を「どうすれば」に出す
+    pub fn noteWrap(self: *HealthMonitor, payload: []const u8) void {
+        const P = struct { name: []const u8 = "", state: []const u8 = "", reason: []const u8 = "" };
+        const parsed = std.json.parseFromSlice(P, self.allocator, payload, .{ .ignore_unknown_fields = true }) catch return;
+        defer parsed.deinit();
+        const v = parsed.value;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const a = self.allocator;
+        if (self.wrap_reasons.fetchRemove(v.name)) |old| {
+            a.free(old.key);
+            a.free(old.value);
+        }
+        if (!std.mem.eql(u8, v.state, "quarantined")) return;
+        const k = a.dupe(u8, v.name) catch return;
+        const r = std.fmt.allocPrint(a, "{s}。止めている間も配信と他のツールはそのまま動きます。時間が過ぎると自動で戻します", .{v.reason}) catch {
+            a.free(k);
+            return;
+        };
+        self.wrap_reasons.put(a, k, r) catch {
+            a.free(k);
+            a.free(r);
+        };
     }
 
     pub fn noteLatency(self: *HealthMonitor, payload: []const u8) void {
@@ -335,7 +369,8 @@ pub const HealthMonitor = struct {
                 const wasm_path: ?[]const u8 = for (self.declared.items) |d| {
                     if (std.mem.eql(u8, d.node.name, n.name)) break d.wasm_path;
                 } else null;
-                try problems.append(arena, .{ .node = n.name, .status = m.status[i], .since = m.since[i], .expected = m.expected[i], .action = try actionFor(arena, m.status[i], n.name, wasm_path) });
+                const action = if (self.wrap_reasons.get(n.name)) |r| try arena.dupe(u8, r) else try actionFor(arena, m.status[i], n.name, wasm_path);
+                try problems.append(arena, .{ .node = n.name, .status = m.status[i], .since = m.since[i], .expected = m.expected[i], .action = action });
             }
         }
         const report = try blast.computeFailureSet(arena, m.nodes, down.items);

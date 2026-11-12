@@ -14,6 +14,8 @@ pub const NodeType = enum {
     wasm,
     native,
     remote,
+    /// 既存ツールを ObsGate でラップしたもの (中身は WEAVE の外。OBS への操作だけを WEAVE が通す)
+    wrapped,
 };
 
 pub const NodeInfo = struct {

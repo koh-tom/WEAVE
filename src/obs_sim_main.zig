@@ -268,7 +268,11 @@ pub fn main() !void {
             if (err == error.SocketNotListening or !g_running.load(.acquire)) break;
             continue;
         };
-        // デモ用途なので 1 接続ずつ処理する (OBS 本体も通常 1 クライアント)
-        handleClient(allocator, &state, password, conn);
+        // 本物の OBS と同じく、複数のクライアントを同時に受け付ける (WEAVE の送信役と、ラップした既存ツールなど)
+        const th = std.Thread.spawn(.{}, handleClient, .{ allocator, &state, password, conn }) catch {
+            conn.stream.close();
+            continue;
+        };
+        th.detach();
     }
 }
