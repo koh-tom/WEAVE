@@ -30,41 +30,55 @@ def media(name, path, loop):
     return s
 
 
+def image(name, file):
+    s = roc.base_source(name)
+    s.update({"id": "image_source", "versioned_id": "image_source", "settings": {"file": os.path.join(MEDIA, "panels", file), "unload": False}})
+    return s
+
+
+def label(name, txt, size):
+    """パネルの上に置く文字 (縁取りなし・影つき)"""
+    s = roc.text(name, txt, size)
+    s["settings"].update({"outline": False, "drop_shadow": True})
+    return s
+
+
 def make_collection():
-    game = media("ゲーム画面", os.path.join(MEDIA, "game.mp4"), True)
-    live_bg = roc.color("LiveBadge", "c62828", 210, 64)
-    live = roc.text("LiveText", "● LIVE", 40)
-    title = roc.text("番組名", "WEAVE 杯 決勝 ― 実況配信", 44)
-    subgoal = roc.text("SubGoal", "サブ  8 / 50", 52)
-    score = roc.text("Scoreboard", "A 0 - 0 B", 64)
-    timer = roc.text("Timer", "", 96)
-    otext = roc.text("OverlayText", "草 草 草 ！ チャットが盛り上がってます", 60)
-    stext = roc.text("ShoutoutText", "", 64)
-    c1bg = roc.color("Card1Bg", "1a7f37", 1920, 120)
-    c2bg = roc.color("Card2Bg", "1f5fbf", 1200, 120)
-    card1 = roc.scene("Card1", [roc.item(1, c1bg, 960, 1010), roc.item(2, otext, 960, 1010)])
-    card2 = roc.scene("Card2", [roc.item(1, c2bg, 960, 260), roc.item(2, stext, 960, 260)])
+    # 背景は風景 (make_scenery.py)。無ければ前のライフゲームの動画
+    bgfile = os.path.join(MEDIA, "scenery.mp4")
+    game = media("ゲーム画面", bgfile if os.path.exists(bgfile) else os.path.join(MEDIA, "game.mp4"), True)
+    live = image("LiveBadge", "live.png")
+    title_bg, title = image("TitleBg", "title.png"), label("番組名", "WEAVE 杯 決勝 ― 実況配信", 30)
+    sub_bg, subgoal = image("SubGoalBg", "subgoal.png"), label("SubGoal", "サブ  8 / 50", 40)
+    score_bg, score = image("ScoreBg", "score.png"), label("Scoreboard", "A 0 - 0 B", 54)
+    timer = label("Timer", "", 110)
+    otext = label("OverlayText", "草 草 草 ！ チャットが盛り上がってます", 48)
+    stext = label("ShoutoutText", "", 50)
+    c1bg, c2bg = image("Card1Bg", "card1.png"), image("Card2Bg", "card2.png")
+    card1 = roc.scene("Card1", [roc.item(1, c1bg, 960, 960), roc.item(2, otext, 960, 960)])
+    card2 = roc.scene("Card2", [roc.item(1, c2bg, 960, 250), roc.item(2, stext, 960, 250)])
     ses = [media(n, os.path.join(MEDIA, f), False) for n, f in
            [("SE_clap", "se_clap.wav"), ("SE_drum", "se_drum.wav"), ("SE_yay", "se_yay.wav"), ("SE_fanfare", "se_fanfare.wav")]]
     game_item = roc.item(3, game, 0, 0, align=5)
     game_item["scale"] = {"x": 1.5, "y": 1.5}  # 1280x720 の動画を 1920x1080 の画面いっぱいに
+    # item の番号はプラグインとデモが使う (1 = お祝いカード, 2 = シャウトアウト, 3 = 背景, 20 / 21 = BEFORE / AFTER の札)
     items = [game_item,
-             roc.item(4, live_bg, 40, 30, align=5), roc.item(5, live, 60, 36, align=5), roc.item(6, title, 40, 110, align=5),
-             roc.item(7, subgoal, 1880, 30, align=6), roc.item(8, score, 960, 80), roc.item(9, timer, 960, 540),
+             roc.item(4, live, 135, 62), roc.item(5, title_bg, 485, 62), roc.item(6, title, 485, 60),
+             roc.item(22, sub_bg, 1670, 66), roc.item(7, subgoal, 1670, 64),
+             roc.item(23, score_bg, 960, 76), roc.item(8, score, 960, 72), roc.item(9, timer, 960, 540),
              roc.item(1, card1, 0, 0, align=5, visible=False), roc.item(2, card2, 0, 0, align=5, visible=False)]
     items += [roc.item(10 + i, s, 0, 0, align=5) for i, s in enumerate(ses)]
-    # デモの前後比較の札 (demo/wrap/run.py が出し入れする。プラグインは触らない)
-    bb, bt = roc.color("BeforeBg", "c62828", 600, 80), roc.text("BeforeText", "BEFORE：WEAVE なし", 44)
-    ab, at = roc.color("AfterBg", "1f5fbf", 600, 80), roc.text("AfterText", "AFTER：WEAVE あり", 44)
-    tag_b = roc.scene("TagBefore", [roc.item(1, bb, 1580, 180), roc.item(2, bt, 1580, 180)])
-    tag_a = roc.scene("TagAfter", [roc.item(1, ab, 1580, 180), roc.item(2, at, 1580, 180)])
+    # デモの前後比較の札 (文字は画像に入れてある)
+    bb, ab = image("BeforeBg", "tag_before.png"), image("AfterBg", "tag_after.png")
+    tag_b = roc.scene("TagBefore", [roc.item(1, bb, 1610, 170)])
+    tag_a = roc.scene("TagAfter", [roc.item(1, ab, 1610, 170)])
     items += [roc.item(20, tag_b, 0, 0, align=5, visible=False), roc.item(21, tag_a, 0, 0, align=5, visible=False)]
     overlay = roc.scene("Overlay", items)
     out = copy.deepcopy(roc.scaffold())
     out["name"] = NAME
     out["current_scene"] = out["current_program_scene"] = "Overlay"
     out["scene_order"] = [{"name": "Overlay"}, {"name": "Card1"}, {"name": "Card2"}, {"name": "TagBefore"}, {"name": "TagAfter"}]
-    out["sources"] = [game, live_bg, live, title, subgoal, score, timer, otext, stext, c1bg, c2bg, *ses, bb, bt, ab, at, card1, card2, tag_b, tag_a, overlay]
+    out["sources"] = [game, live, title_bg, title, sub_bg, subgoal, score_bg, score, timer, otext, stext, c1bg, c2bg, *ses, bb, ab, card1, card2, tag_b, tag_a, overlay]
     out["groups"] = []
     out["saved_projectors"] = []
     os.makedirs(f"{BASE}/scenes", exist_ok=True)
