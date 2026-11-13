@@ -17,6 +17,7 @@ OBS に obs-websocket v5 で直接つなぎ、チャットのコマンドで配�
 import argparse, json, os, random, sys, threading, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "stream_sim"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # obsws.py を隣に置いた場合
 from obsws import OBS  # noqa: E402
 
 ap = argparse.ArgumentParser()
