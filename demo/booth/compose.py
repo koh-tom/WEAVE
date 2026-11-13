@@ -59,12 +59,12 @@ def card_before(path):
 
 def card_end(path):
     im = Image.new("RGB", (W, H), "#ffffff"); d = ImageDraw.Draw(im)
-    d.text((140, 80), "入れてから使うまで", font=font(BOLD, 80), fill="#1f3a5f")
+    d.text((140, 80), "コマンド 3 つで動かせる　＋　既存ツールもそのまま", font=font(BOLD, 72), fill="#1f3a5f")
     mono, lab = font(REG, 54, True), font(REG, 44)
-    rows = [("$ weave setup", "OBS の設定を読み取って、つながるか確かめる"),
-            ("$ weave wrap add <ツール>", "いまのツールを WEAVE の下に置く (接続先を変えるだけ)"),
-            ("$ weave up", "WEAVE を起動する (落ちてもすぐ起動し直す)"),
-            ("$ weave wrap lock <ツール>", "使った操作だけを許す宣言にする")]
+    rows = [("$ weave add subgoal.wasm", "権限を見て承認"),
+            ("$ weave audit subgoal", "乗っ取られたら・止まったら、届く範囲を確かめる"),
+            ("$ weave up --real-obs", "起動 (落ちてもすぐ起動し直す)"),
+            ("$ weave wrap add <ツール>", "いま使っているツールは、接続先を変えるだけ")]
     y = 250
     for c, t in rows:
         d.rounded_rectangle((140, y - 10, 1080, y + 76), radius=10, fill="#f6f6f6", outline="#cccccc")
