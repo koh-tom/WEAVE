@@ -269,7 +269,7 @@ fn wrapLock(allocator: std.mem.Allocator, args: []const []const u8) !void {
     sf.spec.allow = merged.items;
     sf.spec.mode = "enforce";
     try sf.save();
-    try out.print("宣言にしました → {s}\n  WEAVE を起動し直すと有効になります\n", .{sf.path});
+    try out.print("宣言にしました → {s}\n  起動中の WEAVE はすぐに読み直します (起動し直す必要はありません)\n", .{sf.path});
     try out.flush();
 }
 

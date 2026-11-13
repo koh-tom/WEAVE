@@ -3,6 +3,7 @@
 #   1. パスワードが合わないツールはつながれない
 #   2. 宣言した対象への操作は OBS に届く。宣言にない対象 (番組名) と操作 (StopStream) は 205 で断られ、OBS に届かない
 #   3. 上限を超えて送り続けると、そのツールだけが止まる (207)。core.security.* と core.wrap.status に出る
+#   4. 宣言ファイルを書き換えると、起動し直さずに効く
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BIN=./zig-out/bin
@@ -67,4 +68,18 @@ grep -q '"core.security.acl_denied"' "$DIR/audit.log" || fail "denial not audite
 grep -q '"core.security.limit_exceeded"' "$DIR/audit.log" || fail "quarantine not audited"
 sleep 3.5
 grep -q "ObsGate: bot released" "$DIR/weave.log" || fail "bot was not released after quarantine_secs"
+
+# 4. 宣言を書き換えると (weave wrap lock と同じ)、起動し直さずに効く
+cat > "$DIR/wrap/bot.json" <<'J'
+{"name":"bot","password":"botpw","mode":"enforce","allow":["SetInputSettings:OverlayText","SetInputSettings:番組名"],"rate_per_sec":5,"burst":5,"quarantine_secs":3}
+J
+sleep 1.5
+python3 - <<'PY' || exit 1
+import sys
+sys.path.insert(0, "demo/stream_sim")
+from obsws import OBS
+o = OBS(port=4476, password="botpw")
+o.call("SetInputSettings", {"inputName": "番組名", "inputSettings": {"text": "ok"}})
+print("ok: the rewritten declaration took effect without a restart")
+PY
 echo "PASS"
