@@ -57,6 +57,7 @@ demo/output/obs/
 demo/output/stream_sim/
 # 既存ツールのラップの前後比較 (demo/wrap/run.py)
 demo/output/wrap_demo/
+demo/output/booth/
 # weave setup が書く設定 (OBS のパスワードを含む)
 weave.json
 __pycache__/
