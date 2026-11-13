@@ -140,6 +140,10 @@ pub const Config = struct {
                 if (obj.get("ws_gateway_port")) |v| self.ws_gateway_port = @intCast(v.integer);
                 if (obj.get("node_ws_port")) |v| self.node_ws_port = @intCast(v.integer);
                 if (obj.get("dashboard_port")) |v| self.dashboard_port = @intCast(v.integer);
+                if (obj.get("dashboard_dist")) |v| {
+                    allocator.free(self.dashboard_dist);
+                    self.dashboard_dist = try allocator.dupe(u8, v.string);
+                }
                 if (obj.get("twitch_channel")) |v| {
                     allocator.free(self.twitch_channel);
                     self.twitch_channel = try allocator.dupe(u8, v.string);
