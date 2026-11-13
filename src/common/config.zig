@@ -162,6 +162,7 @@ pub const Config = struct {
                     self.mock_obs_filepath = try allocator.dupe(u8, v.string);
                 }
                 if (obj.get("mock_obs")) |v| self.mock_obs = v.bool;
+                if (obj.get("no_twitch")) |v| self.no_twitch = v.bool;
                 if (obj.get("gate_port")) |v| self.gate_port = @intCast(v.integer);
                 if (obj.get("wrap_dir")) |v| {
                     allocator.free(self.wrap_dir);

@@ -99,6 +99,10 @@ const Tool = struct {
     gate: *ObsGate,
     spec_path: []const u8,
     parsed: std.json.Parsed(Spec),
+    /// 読み直す前の宣言。ほかのスレッドが名前などを参照している可能性があるので、ゲートを閉じるまで残す
+    retired: std.ArrayListUnmanaged(std.json.Parsed(Spec)) = .{},
+    /// 宣言ファイルの更新時刻 (weave wrap lock などで書き換わったら読み直す)
+    spec_mtime: i128 = 0,
     node_id: u32,
     registered: bool = false,
     mutex: std.Thread.Mutex = .{},
@@ -137,6 +141,8 @@ const Tool = struct {
         for (self.learned.keys()) |k| a.free(k);
         self.learned.deinit(a);
         self.parsed.deinit();
+        for (self.retired.items) |*r| r.deinit();
+        self.retired.deinit(a);
         a.free(self.spec_path);
     }
 
@@ -206,6 +212,7 @@ pub const ObsGate = struct {
             };
             const t = try allocator.create(Tool);
             t.* = .{ .gate = self, .spec_path = path, .parsed = parsed, .node_id = next_id, .tokens = parsed.value.burst, .last_refill_ms = now };
+            t.spec_mtime = if (std.fs.cwd().statFile(path)) |st| st.mtime else |_| 0;
             for (parsed.value.learned) |l| try t.learned.put(allocator, try allocator.dupe(u8, l), {});
             next_id += 1;
             try self.tools.append(allocator, t);
@@ -339,8 +346,11 @@ pub const ObsGate = struct {
 
     /// 止めている時間が過ぎたツールを戻す
     fn watchLoop(self: *ObsGate) void {
+        var tick: u32 = 0;
         while (self.running.load(.acquire)) {
             std.Thread.sleep(200 * std.time.ns_per_ms);
+            tick +%= 1;
+            if (tick % 5 == 0) for (self.tools.items) |t| self.reloadIfChanged(t);
             const now = std.time.milliTimestamp();
             for (self.tools.items) |t| {
                 t.mutex.lock();
@@ -358,6 +368,39 @@ pub const ObsGate = struct {
                     log.info("ObsGate: {s} released", .{t.name()});
                 }
             }
+        }
+    }
+
+    /// 宣言ファイルが書き換わっていたら読み直す (weave wrap lock の結果を、WEAVE を起動し直さずに効かせる)
+    fn reloadIfChanged(self: *ObsGate, t: *Tool) void {
+        const a = self.allocator;
+        const st = std.fs.cwd().statFile(t.spec_path) catch return;
+        if (st.mtime == t.spec_mtime) return;
+        t.spec_mtime = st.mtime;
+        const bytes = std.fs.cwd().readFileAlloc(a, t.spec_path, 1 << 20) catch return;
+        defer a.free(bytes);
+        const parsed = std.json.parseFromSlice(Spec, a, bytes, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| {
+            log.warn("ObsGate: cannot reload {s}: {any}", .{ t.spec_path, err });
+            return;
+        };
+        t.mutex.lock();
+        const before = t.parsed.value.mode;
+        const was_learning = t.learning();
+        t.retired.append(a, t.parsed) catch {
+            t.mutex.unlock();
+            var p = parsed;
+            p.deinit();
+            return;
+        };
+        t.parsed = parsed;
+        for (parsed.value.learned) |l| {
+            if (!t.learned.contains(l)) if (a.dupe(u8, l)) |k| t.learned.put(a, k, {}) catch a.free(k) else |_| {};
+        }
+        const now_learning = t.learning();
+        t.mutex.unlock();
+        if (was_learning != now_learning) {
+            log.info("ObsGate: {s} reloaded ({s} -> {s}, {d} allowed)", .{ t.name(), before, parsed.value.mode, parsed.value.allow.len });
+            self.publishStatus(t, "active", if (now_learning) "学習モードにしました" else "宣言どおりに通すようにしました", 0);
         }
     }
 
