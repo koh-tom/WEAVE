@@ -86,11 +86,9 @@ def runaway_loop():
     while time.time() - start < args.max_seconds:
         n += 1
         k = random.randint(1000, 99999)
-        # 止まらないカウンタを、画面のいろいろな文字に書き込み続ける (画面の点滅はしない)
-        text("OverlayText", "★" * (1 + n % 12) + f" PARTY x{n} " + "★" * (1 + n % 12))
-        text("Scoreboard", f"A {k} - {-n} B")
+        # 止まらないカウンタを、サブ数のカウントと帯に書き込み続ける (画面の点滅はしない)
         text("SubGoal", f"サブ  {k} / 50")
-        text("Timer", f"{n:06d}")
+        text("OverlayText", f"★ PARTY x{n} ★")
         card(True)
         time.sleep(0.04)
     say(f"runaway stopped by --max-seconds ({n} rounds)")
