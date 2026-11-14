@@ -23,8 +23,9 @@ OUT = os.path.join(ROOT, "demo", "output", "booth", "run-" + datetime.now().strf
 WD = os.path.join(OUT, "work")
 TOOLS = os.path.join(ROOT, "demo", "output", "stream_sim", "tools")  # playwright-core がある
 USERINI = os.path.expanduser("~/.config/obs-studio/user.ini")
-DEFAULTS = {"OverlayText": "草 草 草 ！ チャットが盛り上がってます", "Scoreboard": "A 0 - 0 B", "SubGoal": "サブ  8 / 50",
-            "Timer": "", "番組名": "WEAVE 杯 決勝 ― 実況配信"}
+DEFAULTS = {"OverlayText": "草 草 草 ！ チャットが盛り上がってます", "SubGoal": "サブ  8 / 50", "番組名": "まったり雑談配信"}
+# 展示では出さない部品 (模擬配信用のスコアボードとタイマー): シーンの item 番号
+HIDE = [8, 23, 9]
 DASH, TOKEN = 3036, "booth-dash"
 procs = {}
 evf = None
@@ -61,7 +62,7 @@ def reset_screen():
     o = OBS()
     for name, text in DEFAULTS.items():
         o.call("SetInputSettings", {"inputName": name, "inputSettings": {"text": text}})
-    for iid, on in [(1, False), (3, True)]:
+    for iid, on in [(1, False), (3, True)] + [(i, False) for i in HIDE]:
         o.call("SetSceneItemEnabled", {"sceneName": "Overlay", "sceneItemId": iid, "sceneItemEnabled": on})
 
 
@@ -127,9 +128,9 @@ def main():
         chat_bot("kumo_23", "!party")
         time.sleep(1.2)
         chat_bot("nyanta", "!party")
-        cap("パーティー中にもう一度 !party → バグで止まらなくなり、画面の文字を壊し続ける")
+        cap("パーティー中にもう一度 !party → バグで止まらなくなり、サブ数のカウントがでたらめに")
         time.sleep(8.5)
-        cap("ツールが止まっても、壊れた表示は残ったまま。どこで何が起きたかも分からない")
+        cap("ツールが止まっても、壊れたカウントは残ったまま。どこで何が起きたかも分からない")
         time.sleep(3.5)
         reset_screen()
         time.sleep(0.5)
@@ -214,7 +215,7 @@ def main():
         chat_bot("kumo_23", "!party")
         time.sleep(1.2)
         chat_bot("nyanta", "!party")
-        cap("暴走した所だけ停止：同じバグでも、このツールだけを止めて、表示を暴走の前に戻す")
+        cap("暴走した所だけ停止：同じバグでも、このツールだけを止めて、カウントを元に戻す")
         time.sleep(7.0)
         cap("止めた理由は Inspector に。配信とほかのツールは動いたまま")
         time.sleep(4.0)
