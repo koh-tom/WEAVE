@@ -23,7 +23,7 @@ OUT = os.path.join(ROOT, "demo", "output", "booth", "run-" + datetime.now().strf
 WD = os.path.join(OUT, "work")
 TOOLS = os.path.join(ROOT, "demo", "output", "stream_sim", "tools")  # playwright-core がある
 USERINI = os.path.expanduser("~/.config/obs-studio/user.ini")
-DEFAULTS = {"OverlayText": "草 草 草 ！ チャットが盛り上がってます", "SubGoal": "サブ  8 / 50", "番組名": "まったり雑談配信"}
+DEFAULTS = {"OverlayText": "草 草 草 ！ チャットが盛り上がってます", "SubGoal": "サブ  8 / 50", "番組名": "雑談配信"}
 # 展示では出さない部品 (模擬配信用のスコアボードとタイマー): シーンの item 番号
 HIDE = [8, 23, 9]
 DASH, TOKEN = 3036, "booth-dash"
@@ -122,13 +122,13 @@ def main():
         cap("BEFORE：よくある既存ツール (hype_bot) が、OBS に直接つながっている")
         start_bot()
         time.sleep(3.0)
-        chat_bot("kumo_23", "!party")
-        cap("チャットの !party で、画面を盛り上げるツール")
+        chat_bot("kumo_23", "!sub")
+        cap("チャットの !sub で、サブ数を数えるツール")
         time.sleep(3.0)
-        chat_bot("kumo_23", "!party")
+        chat_bot("kumo_23", "!sub")
         time.sleep(1.2)
-        chat_bot("nyanta", "!party")
-        cap("パーティー中にもう一度 !party → バグで止まらなくなり、サブ数のカウントがでたらめに")
+        chat_bot("nyanta", "!sub")
+        cap("続けて !sub が来ると → バグで止まらなくなり、サブ数のカウントがでたらめに")
         time.sleep(8.5)
         cap("ツールが止まっても、壊れたカウントは残ったまま。どこで何が起きたかも分からない")
         time.sleep(3.5)
@@ -146,7 +146,7 @@ def main():
         os.makedirs(os.path.join(WD, ".weave", "wrap"), exist_ok=True)
         # 学習モードで記録した宣言 (weave wrap add → 普段どおり使う → weave wrap lock) と同じもの
         json.dump({"name": "hype_bot", "password": "booth-demo-pw", "mode": "enforce",
-                   "allow": ["SetInputSettings:OverlayText", "SetSceneItemEnabled:Overlay#1"],
+                   "allow": ["SetInputSettings:SubGoal"],
                    "rate_per_sec": 10, "burst": 20, "quarantine_secs": 10},
                   open(os.path.join(WD, ".weave", "wrap", "hype_bot.json"), "w"))
         # プラグインは作業フォルダに写して承認する。subgoal だけ「前の版 (権限が 1 つ少ない) を承認済み → 更新で権限が増えた」状態にする
@@ -209,12 +209,12 @@ def main():
         time.sleep(2.5)
         start_bot(4456, "booth-demo-pw")
         time.sleep(2.5)
-        chat_bot("kumo_23", "!party")
+        chat_bot("kumo_23", "!sub")
         cap("普段どおりの操作は、そのまま OBS に届く")
         time.sleep(5.5)
-        chat_bot("kumo_23", "!party")
+        chat_bot("kumo_23", "!sub")
         time.sleep(1.2)
-        chat_bot("nyanta", "!party")
+        chat_bot("nyanta", "!sub")
         cap("暴走した所だけ停止：同じバグでも、このツールだけを止めて、カウントを元に戻す")
         time.sleep(7.0)
         cap("止めた理由は Inspector に。配信とほかのツールは動いたまま")
