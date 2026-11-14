@@ -587,6 +587,10 @@ test "ADR-010 stage 2: a plugin in its own process gets the same deliveries and 
         var i: usize = 0;
         while (i < N) : (i += 1) try core.bus.publish("ext.counter.inc", "{}", .Reliable, 0);
         core.bus.waitIdle();
+        // 別プロセスのプラグインの返事はバスの外 (UNIX ソケット) を回って遅れて届く。waitIdle の直後に数えると、
+        // 子プロセスの起動が遅い環境 (CI の共有ランナー) では 0 件のことがあるので、全件そろうまで待つ (上限 10 秒)
+        const deadline = std.time.milliTimestamp() + 10_000;
+        while (C.n.load(.monotonic) < N and std.time.milliTimestamp() < deadline) std.Thread.sleep(5 * std.time.ns_per_ms);
         elapsed[round] = @intCast(std.time.nanoTimestamp() - t0);
         const en = C.exec_n.load(.monotonic);
         std.debug.print("\n[ADR-010 stage 2] {s}: plugin execution {d} us/msg (from core.node.metrics, {d} samples)", .{ if (isolated) "own process" else "in-process", if (en > 0) C.exec_ns.load(.monotonic) / en / 1000 else 0, en });
