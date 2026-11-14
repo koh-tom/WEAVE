@@ -8,6 +8,9 @@ OBS に obs-websocket v5 で直接つなぎ、チャットのコマンドで配�
   !party     お祝いカード (Overlay の item 1) を 3 秒出し、帯の文字 (OverlayText) を変える … 正常な機能
              ただしパーティー中にもう一度 !party が来ると、状態の管理を間違えて止まらなくなる (バグ)。
              止まらなくなると、カウンタの値を画面のいろいろな文字に書き込み続ける
+  !sub       サブ数のカウント (SubGoal) を 1 増やす … 正常な機能
+             ただし 1.5 秒以内に 2 回来ると、取りこぼし対策のつもりの再送が止まらなくなる (バグ)。
+             止まらなくなると、カウントにでたらめな数字を書き込み続ける (展示デモはこちらを使う。帯やカードは出さない)
   !takeover  「更新に悪意あるコードが混入した」想定。番組名を書き換え、ゲーム画面を消し、配信を止めようとする
 
   python3 hype_bot.py --chat chat.jsonl [--port 4455] [--password P] [--max-seconds 8]
@@ -80,7 +83,7 @@ def party_end():
     text("OverlayText", "草 草 草 ！ チャットが盛り上がってます")
 
 
-def runaway_loop():
+def runaway_loop(only_count=False):
     start = time.time()
     n = 0
     while time.time() - start < args.max_seconds:
@@ -88,10 +91,29 @@ def runaway_loop():
         k = random.randint(1000, 99999)
         # 止まらないカウンタを、サブ数のカウントと帯に書き込み続ける (画面の点滅はしない)
         text("SubGoal", f"サブ  {k} / 50")
-        text("OverlayText", f"★ PARTY x{n} ★")
-        card(True)
+        if not only_count:
+            text("OverlayText", f"★ PARTY x{n} ★")
+            card(True)
         time.sleep(0.04)
     say(f"runaway stopped by --max-seconds ({n} rounds)")
+
+
+subs = 8
+last_sub = 0.0
+
+
+def sub():
+    global subs, last_sub
+    now = time.time()
+    if now - last_sub < 1.5:
+        say("sub again → (bug) never ends")
+        threading.Thread(target=runaway_loop, args=(True,), daemon=True).start()
+        last_sub = now
+        return
+    last_sub = now
+    subs += 1
+    say(f"sub → {subs}")
+    text("SubGoal", f"サブ  {subs} / 50")
 
 
 def takeover():
@@ -101,7 +123,7 @@ def takeover():
     call("StopStream")
 
 
-HANDLERS = {"!party": party, "!takeover": takeover}
+HANDLERS = {"!party": party, "!sub": sub, "!takeover": takeover}
 
 say(f"connected to OBS on port {obs.port}")
 # 起動より前のチャットは読まない (tail -f と同じ)
