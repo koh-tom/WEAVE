@@ -18,7 +18,8 @@ env:
 
 jobs:
   test:
-    name: "Build + unit/stress tests + E2E"
+    # ブランチ保護の必須チェックはこの名前で登録してある (変えるとマージできなくなる)
+    name: "🧪 All Tests (zig build test_all)"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (with submodules)
